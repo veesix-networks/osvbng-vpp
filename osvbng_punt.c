@@ -27,7 +27,6 @@ osvbng_punt_main_t osvbng_punt_main;
 static void
 osvbng_punt_socket_init_internal (osvbng_punt_main_t * pm, u8 * socket_path)
 {
-  struct sockaddr_un addr;
   int fd;
 
   if (pm->socket_fd >= 0)
