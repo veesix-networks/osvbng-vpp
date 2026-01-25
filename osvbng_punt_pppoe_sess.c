@@ -20,18 +20,6 @@
 #include <vnet/feature/feature.h>
 #include <osvbng_punt/osvbng_punt.h>
 
-/*
- * PPPoE Session Selective Punt
- *
- * This node runs on device-input BEFORE VPP's pppoe-input node.
- * It inspects the PPP protocol field inside PPPoE session packets:
- *   - Control plane (LCP, PAP, CHAP, IPCP, IPv6CP) -> punt to userspace
- *   - Data plane (IPv4, IPv6) -> pass to next feature (VPP pppoe-input for fast path)
- *
- * This allows unified control plane handling while maintaining VPP fast path for IP traffic.
- */
-
-/* PPPoE header structure (RFC 2516) */
 typedef struct
 {
   u8 ver_type;
@@ -43,7 +31,6 @@ typedef struct
 
 #define PPPOE_VER_TYPE 0x11
 
-/* PPP Protocol values */
 #define PPP_PROTOCOL_ip4    0x0021
 #define PPP_PROTOCOL_ip6    0x0057
 #define PPP_PROTOCOL_lcp    0xc021
@@ -52,7 +39,6 @@ typedef struct
 #define PPP_PROTOCOL_ipcp   0x8021
 #define PPP_PROTOCOL_ipv6cp 0x8057
 
-/* EtherTypes */
 #define ETHERNET_TYPE_PPPOE_SESSION 0x8864
 #define ETHERNET_TYPE_VLAN          0x8100
 #define ETHERNET_TYPE_DOT1AD        0x88a8
@@ -68,8 +54,7 @@ typedef struct
 #define foreach_osvbng_punt_pppoe_sess_error \
   _(PUNTED, "PPPoE control plane packets punted") \
   _(PASSED, "PPPoE IP packets passed to fast path") \
-  _(DROPPED, "PPPoE packets dropped (socket error)") \
-  _(NOT_PPPOE, "Non-PPPoE packets (passed through)")
+  _(DROPPED, "PPPoE packets dropped (socket error)")
 
 typedef enum
 {
@@ -88,7 +73,6 @@ static char *osvbng_punt_pppoe_sess_error_strings[] = {
 typedef enum
 {
   OSVBNG_PUNT_PPPOE_SESS_NEXT_DROP,
-  OSVBNG_PUNT_PPPOE_SESS_NEXT_ETHERNET_INPUT,
   OSVBNG_PUNT_PPPOE_SESS_N_NEXT,
 } osvbng_punt_pppoe_sess_next_t;
 
@@ -100,44 +84,34 @@ format_osvbng_punt_pppoe_sess_trace (u8 * s, va_list * args)
   osvbng_punt_pppoe_sess_trace_t *t =
     va_arg (*args, osvbng_punt_pppoe_sess_trace_t *);
 
-  s = format (s, "OSVBNG-PUNT-PPPOE-SESS: sw_if_index %d ppp_proto 0x%04x %s",
+  s = format (s, "sw_if_index %d ppp_proto 0x%04x %s",
 	      t->sw_if_index, t->ppp_proto,
 	      t->is_ip ? "-> fast-path" : (t->punted ? "-> punted" : "-> dropped"));
   return s;
 }
 
-/*
- * Check if PPP protocol is IP (should go to fast path)
- */
 always_inline int
 ppp_proto_is_ip (u16 ppp_proto)
 {
   return (ppp_proto == PPP_PROTOCOL_ip4 || ppp_proto == PPP_PROTOCOL_ip6);
 }
 
-/*
- * Get PPPoE header from ethernet frame, handling VLAN tags
- * Returns NULL if not a PPPoE session packet
- */
 always_inline pppoe_header_t *
 get_pppoe_header (vlib_buffer_t * b0, u16 * ethertype_out)
 {
   ethernet_header_t *eth0;
-  pppoe_header_t *pppoe0;
   u16 ethertype;
   u32 offset = sizeof (ethernet_header_t);
 
   eth0 = vlib_buffer_get_current (b0);
   ethertype = clib_net_to_host_u16 (eth0->type);
 
-  /* Handle VLAN tags */
   if (ethertype == ETHERNET_TYPE_VLAN || ethertype == ETHERNET_TYPE_DOT1AD)
     {
       ethernet_vlan_header_t *vlan0 = (ethernet_vlan_header_t *) (eth0 + 1);
       ethertype = clib_net_to_host_u16 (vlan0->type);
       offset += sizeof (ethernet_vlan_header_t);
 
-      /* Handle QinQ (double VLAN) */
       if (ethertype == ETHERNET_TYPE_VLAN)
 	{
 	  vlan0 = (ethernet_vlan_header_t *) ((u8 *) eth0 + offset);
@@ -149,13 +123,11 @@ get_pppoe_header (vlib_buffer_t * b0, u16 * ethertype_out)
   if (ethertype_out)
     *ethertype_out = ethertype;
 
-  /* Not a PPPoE session packet */
   if (PREDICT_FALSE (ethertype != ETHERNET_TYPE_PPPOE_SESSION))
     return NULL;
 
-  pppoe0 = (pppoe_header_t *) ((u8 *) eth0 + offset);
+  pppoe_header_t *pppoe0 = (pppoe_header_t *) ((u8 *) eth0 + offset);
 
-  /* Validate PPPoE version/type */
   if (PREDICT_FALSE (pppoe0->ver_type != PPPOE_VER_TYPE))
     return NULL;
 
@@ -168,9 +140,8 @@ osvbng_punt_pppoe_sess_inline (vlib_main_t * vm,
 			       vlib_frame_t * frame)
 {
   u32 n_left_from, *from, *to_next;
-  osvbng_punt_pppoe_sess_next_t next_index;
-  u32 pkts_punted = 0, pkts_passed = 0, pkts_dropped = 0, pkts_not_pppoe = 0;
-  osvbng_punt_main_t *pm = &osvbng_punt_main;
+  u32 next_index;
+  u32 pkts_punted = 0, pkts_passed = 0, pkts_dropped = 0;
 
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
@@ -182,7 +153,6 @@ osvbng_punt_pppoe_sess_inline (vlib_main_t * vm,
 
       vlib_get_next_frame (vm, node, next_index, to_next, n_left_to_next);
 
-      /* Dual loop for performance */
       while (n_left_from >= 4 && n_left_to_next >= 2)
 	{
 	  u32 bi0, bi1;
@@ -190,13 +160,11 @@ osvbng_punt_pppoe_sess_inline (vlib_main_t * vm,
 	  u32 next0, next1;
 	  u32 sw_if_index0, sw_if_index1;
 	  pppoe_header_t *pppoe0, *pppoe1;
-	  u16 ppp_proto0, ppp_proto1;
+	  u16 ppp_proto0 = 0, ppp_proto1 = 0;
 	  u16 ethertype0, ethertype1;
 	  u8 punted0 = 0, punted1 = 0;
 	  u8 is_ip0 = 0, is_ip1 = 0;
-	  uword *p0, *p1;
 
-	  /* Prefetch next iteration */
 	  {
 	    vlib_buffer_t *p2, *p3;
 	    p2 = vlib_get_buffer (vm, from[2]);
@@ -222,93 +190,60 @@ osvbng_punt_pppoe_sess_inline (vlib_main_t * vm,
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 	  sw_if_index1 = vnet_buffer (b1)->sw_if_index[VLIB_RX];
 
-	  /* Default: pass to ethernet-input */
-	  next0 = OSVBNG_PUNT_PPPOE_SESS_NEXT_ETHERNET_INPUT;
-	  next1 = OSVBNG_PUNT_PPPOE_SESS_NEXT_ETHERNET_INPUT;
-	  ppp_proto0 = 0;
-	  ppp_proto1 = 0;
+	  vnet_feature_next (&next0, b0);
+	  vnet_feature_next (&next1, b1);
 
-	  /* Check if punt is enabled for this interface */
-	  p0 = hash_get (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_PPPOE_SESSION],
-			 sw_if_index0);
-	  p1 = hash_get (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_PPPOE_SESSION],
-			 sw_if_index1);
+	  pppoe0 = get_pppoe_header (b0, &ethertype0);
+	  pppoe1 = get_pppoe_header (b1, &ethertype1);
 
-	  /* Process packet 0 */
-	  if (p0)
+	  if (pppoe0)
 	    {
-	      pppoe0 = get_pppoe_header (b0, &ethertype0);
-	      if (pppoe0)
+	      ppp_proto0 = clib_net_to_host_u16 (pppoe0->ppp_proto);
+	      if (ppp_proto_is_ip (ppp_proto0))
 		{
-		  ppp_proto0 = clib_net_to_host_u16 (pppoe0->ppp_proto);
-
-		  if (ppp_proto_is_ip (ppp_proto0))
-		    {
-		      /* IP traffic - pass to next feature (VPP pppoe-input) */
-		      is_ip0 = 1;
-		      pkts_passed++;
-		    }
-		  else
-		    {
-		      /* Control plane - punt to userspace */
-		      if (osvbng_punt_send_packet (b0, sw_if_index0,
-						   OSVBNG_PUNT_PROTO_PPPOE_SESSION) == 0)
-			{
-			  pkts_punted++;
-			  punted0 = 1;
-			}
-		      else
-			{
-			  pkts_dropped++;
-			}
-		      next0 = OSVBNG_PUNT_PPPOE_SESS_NEXT_DROP;
-		    }
+		  is_ip0 = 1;
+		  pkts_passed++;
 		}
 	      else
 		{
-		  /* Not PPPoE session - pass through */
-		  pkts_not_pppoe++;
-		}
-	    }
-
-	  /* Process packet 1 */
-	  if (p1)
-	    {
-	      pppoe1 = get_pppoe_header (b1, &ethertype1);
-	      if (pppoe1)
-		{
-		  ppp_proto1 = clib_net_to_host_u16 (pppoe1->ppp_proto);
-
-		  if (ppp_proto_is_ip (ppp_proto1))
+		  if (osvbng_punt_send_packet (b0, sw_if_index0,
+					       OSVBNG_PUNT_PROTO_PPPOE_SESSION) == 0)
 		    {
-		      /* IP traffic - pass to next feature (VPP pppoe-input) */
-		      is_ip1 = 1;
-		      pkts_passed++;
+		      pkts_punted++;
+		      punted0 = 1;
 		    }
 		  else
 		    {
-		      /* Control plane - punt to userspace */
-		      if (osvbng_punt_send_packet (b1, sw_if_index1,
-						   OSVBNG_PUNT_PROTO_PPPOE_SESSION) == 0)
-			{
-			  pkts_punted++;
-			  punted1 = 1;
-			}
-		      else
-			{
-			  pkts_dropped++;
-			}
-		      next1 = OSVBNG_PUNT_PPPOE_SESS_NEXT_DROP;
+		      pkts_dropped++;
 		    }
-		}
-	      else
-		{
-		  /* Not PPPoE session - pass through */
-		  pkts_not_pppoe++;
+		  next0 = OSVBNG_PUNT_PPPOE_SESS_NEXT_DROP;
 		}
 	    }
 
-	  /* Trace */
+	  if (pppoe1)
+	    {
+	      ppp_proto1 = clib_net_to_host_u16 (pppoe1->ppp_proto);
+	      if (ppp_proto_is_ip (ppp_proto1))
+		{
+		  is_ip1 = 1;
+		  pkts_passed++;
+		}
+	      else
+		{
+		  if (osvbng_punt_send_packet (b1, sw_if_index1,
+					       OSVBNG_PUNT_PROTO_PPPOE_SESSION) == 0)
+		    {
+		      pkts_punted++;
+		      punted1 = 1;
+		    }
+		  else
+		    {
+		      pkts_dropped++;
+		    }
+		  next1 = OSVBNG_PUNT_PPPOE_SESS_NEXT_DROP;
+		}
+	    }
+
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE)))
 	    {
 	      if (b0->flags & VLIB_BUFFER_IS_TRACED)
@@ -336,7 +271,6 @@ osvbng_punt_pppoe_sess_inline (vlib_main_t * vm,
 					   bi0, bi1, next0, next1);
 	}
 
-      /* Single loop for remaining packets */
       while (n_left_from > 0 && n_left_to_next > 0)
 	{
 	  u32 bi0;
@@ -348,7 +282,6 @@ osvbng_punt_pppoe_sess_inline (vlib_main_t * vm,
 	  u16 ethertype0;
 	  u8 punted0 = 0;
 	  u8 is_ip0 = 0;
-	  uword *p0;
 
 	  bi0 = from[0];
 	  to_next[0] = bi0;
@@ -360,50 +293,33 @@ osvbng_punt_pppoe_sess_inline (vlib_main_t * vm,
 	  b0 = vlib_get_buffer (vm, bi0);
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
-	  /* Default: pass to ethernet-input */
-	  next0 = OSVBNG_PUNT_PPPOE_SESS_NEXT_ETHERNET_INPUT;
+	  vnet_feature_next (&next0, b0);
 
-	  /* Check if punt is enabled for this interface */
-	  p0 = hash_get (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_PPPOE_SESSION],
-			 sw_if_index0);
-
-	  if (p0)
+	  pppoe0 = get_pppoe_header (b0, &ethertype0);
+	  if (pppoe0)
 	    {
-	      pppoe0 = get_pppoe_header (b0, &ethertype0);
-	      if (pppoe0)
+	      ppp_proto0 = clib_net_to_host_u16 (pppoe0->ppp_proto);
+	      if (ppp_proto_is_ip (ppp_proto0))
 		{
-		  ppp_proto0 = clib_net_to_host_u16 (pppoe0->ppp_proto);
-
-		  if (ppp_proto_is_ip (ppp_proto0))
-		    {
-		      /* IP traffic - pass to next feature (VPP pppoe-input) */
-		      is_ip0 = 1;
-		      pkts_passed++;
-		    }
-		  else
-		    {
-		      /* Control plane - punt to userspace */
-		      if (osvbng_punt_send_packet (b0, sw_if_index0,
-						   OSVBNG_PUNT_PROTO_PPPOE_SESSION) == 0)
-			{
-			  pkts_punted++;
-			  punted0 = 1;
-			}
-		      else
-			{
-			  pkts_dropped++;
-			}
-		      next0 = OSVBNG_PUNT_PPPOE_SESS_NEXT_DROP;
-		    }
+		  is_ip0 = 1;
+		  pkts_passed++;
 		}
 	      else
 		{
-		  /* Not PPPoE session - pass through */
-		  pkts_not_pppoe++;
+		  if (osvbng_punt_send_packet (b0, sw_if_index0,
+					       OSVBNG_PUNT_PROTO_PPPOE_SESSION) == 0)
+		    {
+		      pkts_punted++;
+		      punted0 = 1;
+		    }
+		  else
+		    {
+		      pkts_dropped++;
+		    }
+		  next0 = OSVBNG_PUNT_PPPOE_SESS_NEXT_DROP;
 		}
 	    }
 
-	  /* Trace */
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE)
 			     && (b0->flags & VLIB_BUFFER_IS_TRACED)))
 	    {
@@ -432,9 +348,6 @@ osvbng_punt_pppoe_sess_inline (vlib_main_t * vm,
   vlib_node_increment_counter (vm, node->node_index,
 			       OSVBNG_PUNT_PPPOE_SESS_ERROR_DROPPED,
 			       pkts_dropped);
-  vlib_node_increment_counter (vm, node->node_index,
-			       OSVBNG_PUNT_PPPOE_SESS_ERROR_NOT_PPPOE,
-			       pkts_not_pppoe);
 
   return frame->n_vectors;
 }
@@ -456,15 +369,9 @@ VLIB_REGISTER_NODE (osvbng_punt_pppoe_sess_node) = {
   .n_next_nodes = OSVBNG_PUNT_PPPOE_SESS_N_NEXT,
   .next_nodes = {
     [OSVBNG_PUNT_PPPOE_SESS_NEXT_DROP] = "error-drop",
-    [OSVBNG_PUNT_PPPOE_SESS_NEXT_ETHERNET_INPUT] = "ethernet-input",
   },
 };
 
-/*
- * Feature arc registration on device-input
- * Runs BEFORE VPP's pppoe-input so we can intercept control plane
- * IP packets pass through to pppoe-input for fast-path decap
- */
 VNET_FEATURE_INIT (osvbng_punt_pppoe_sess, static) = {
   .arc_name = "device-input",
   .node_name = "osvbng-punt-pppoe-sess",

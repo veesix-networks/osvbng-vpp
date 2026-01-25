@@ -254,8 +254,7 @@ osvbng_punt_init_proto_configs (osvbng_punt_main_t * pm)
   pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].ip_protocol = 0;
   pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].l4_port = 0;
   pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].use_feature_arc = 1;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].arc_name =
-    "ethernet-input";
+  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].arc_name = "device-input";
   pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].node_name =
     "osvbng-punt-pppoe-disc";
 
