@@ -185,7 +185,9 @@ osvbng_punt_init (vlib_main_t * vm)
   return 0;
 }
 
-VLIB_INIT_FUNCTION (osvbng_punt_init);
+VLIB_INIT_FUNCTION (osvbng_punt_init) = {
+  .runs_after = VLIB_INITS ("pppoe_init"),
+};
 
 static clib_error_t *
 osvbng_punt_enable_disable_command_fn (vlib_main_t * vm,
