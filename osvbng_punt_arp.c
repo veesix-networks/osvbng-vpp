@@ -23,11 +23,13 @@ typedef struct
 {
   u32 sw_if_index;
   u8 punted;
+  u8 not_enabled;
 } osvbng_punt_arp_trace_t;
 
 #define foreach_osvbng_punt_arp_error \
   _(PUNTED, "ARP packets punted")  \
-  _(DROPPED, "ARP packets dropped (socket error)")
+  _(DROPPED, "ARP packets dropped (socket error)") \
+  _(NOT_ENABLED, "ARP packets dropped (punt not enabled)")
 
 typedef enum
 {
@@ -57,7 +59,8 @@ format_osvbng_punt_arp_trace (u8 * s, va_list * args)
   osvbng_punt_arp_trace_t *t = va_arg (*args, osvbng_punt_arp_trace_t *);
 
   s = format (s, "OSVBNG-PUNT-ARP: sw_if_index %d %s", t->sw_if_index,
-	      t->punted ? "punted" : "dropped");
+	      t->not_enabled ? "not-enabled" : (t->punted ? "punted" :
+						"dropped"));
   return s;
 }
 
@@ -65,9 +68,10 @@ static_always_inline uword
 osvbng_punt_arp_inline (vlib_main_t * vm,
 			vlib_node_runtime_t * node, vlib_frame_t * frame)
 {
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
   u32 n_left_from, *from, *to_next;
   osvbng_punt_arp_next_t next_index;
-  u32 pkts_punted = 0, pkts_dropped = 0;
+  u32 pkts_punted = 0, pkts_dropped = 0, pkts_not_enabled = 0;
 
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
@@ -83,9 +87,11 @@ osvbng_punt_arp_inline (vlib_main_t * vm,
 	{
 	  u32 bi0;
 	  vlib_buffer_t *b0;
-	  u32 next0;
+	  u32 next0 = OSVBNG_PUNT_ARP_NEXT_DROP;
 	  u32 sw_if_index0;
 	  u8 punted = 0;
+	  u8 not_enabled = 0;
+	  uword *p;
 
 	  bi0 = from[0];
 	  to_next[0] = bi0;
@@ -97,29 +103,29 @@ osvbng_punt_arp_inline (vlib_main_t * vm,
 	  b0 = vlib_get_buffer (vm, bi0);
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
-	  i16 rewind = sizeof (ethernet_header_t);
+	  p = hash_get (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_ARP],
+			sw_if_index0);
 
-	  if (b0->flags & VNET_BUFFER_F_VLAN_2_DEEP)
-	    rewind += 2 * sizeof (ethernet_vlan_header_t);
-	  else if (b0->flags & VNET_BUFFER_F_VLAN_1_DEEP)
-	    rewind += sizeof (ethernet_vlan_header_t);
-
-	  vlib_buffer_advance (b0, -rewind);
-
-	  /* Send packet to userspace */
-	  if (osvbng_punt_send_packet
-	      (b0, sw_if_index0, OSVBNG_PUNT_PROTO_ARP) == 0)
+	  if (p)
 	    {
-	      pkts_punted++;
-	      punted = 1;
+	      /* Reset buffer to ethernet header for full L2 frame punt */
+	      vlib_buffer_reset (b0);
+	      if (osvbng_punt_send_packet
+		  (b0, sw_if_index0, OSVBNG_PUNT_PROTO_ARP) == 0)
+		{
+		  pkts_punted++;
+		  punted = 1;
+		}
+	      else
+		{
+		  pkts_dropped++;
+		}
 	    }
 	  else
 	    {
-	      pkts_dropped++;
+	      pkts_not_enabled++;
+	      not_enabled = 1;
 	    }
-
-	  /* Always drop after punt attempt */
-	  next0 = OSVBNG_PUNT_ARP_NEXT_DROP;
 
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE)
 			     && (b0->flags & VLIB_BUFFER_IS_TRACED)))
@@ -128,6 +134,7 @@ osvbng_punt_arp_inline (vlib_main_t * vm,
 		vlib_add_trace (vm, node, b0, sizeof (*t));
 	      t->sw_if_index = sw_if_index0;
 	      t->punted = punted;
+	      t->not_enabled = not_enabled;
 	    }
 
 	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
@@ -142,6 +149,9 @@ osvbng_punt_arp_inline (vlib_main_t * vm,
 			       OSVBNG_PUNT_ARP_ERROR_PUNTED, pkts_punted);
   vlib_node_increment_counter (vm, node->node_index,
 			       OSVBNG_PUNT_ARP_ERROR_DROPPED, pkts_dropped);
+  vlib_node_increment_counter (vm, node->node_index,
+			       OSVBNG_PUNT_ARP_ERROR_NOT_ENABLED,
+			       pkts_not_enabled);
 
   return frame->n_vectors;
 }
@@ -162,14 +172,8 @@ VLIB_REGISTER_NODE (osvbng_punt_arp_node) = {
   .error_strings = osvbng_punt_arp_error_strings,
   .n_next_nodes = OSVBNG_PUNT_ARP_N_NEXT,
   .next_nodes = {
-		 [OSVBNG_PUNT_ARP_NEXT_DROP] = "error-drop",
-		 },
-};
-
-VNET_FEATURE_INIT (osvbng_punt_arp, static) = {
-  .arc_name = "arp",
-  .node_name = "osvbng-punt-arp",
-  .runs_before = VNET_FEATURES ("arp-reply"),
+    [OSVBNG_PUNT_ARP_NEXT_DROP] = "error-drop",
+  },
 };
 
 /*

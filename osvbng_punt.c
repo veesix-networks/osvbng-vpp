@@ -15,45 +15,43 @@
 
 #include <vnet/vnet.h>
 #include <vnet/plugin/plugin.h>
+#include <vnet/ethernet/ethernet.h>
 #include <vlibapi/api.h>
 #include <vlibmemory/api.h>
 #include <vpp/app/version.h>
-#include <vlib/unix/unix.h>
 
 #include <osvbng_punt/osvbng_punt.h>
 
 osvbng_punt_main_t osvbng_punt_main;
 
-static int
+static void
 osvbng_punt_socket_init_internal (osvbng_punt_main_t * pm, u8 * socket_path)
 {
+  struct sockaddr_un addr;
   int fd;
 
-  if (pm->socket_fd != -1)
-    return 0;			/* Already initialized */
+  if (pm->socket_fd >= 0)
+    return;
 
-  /* Create unbound socket for sendto() */
   fd = socket (AF_UNIX, SOCK_DGRAM, 0);
   if (fd < 0)
-    return -1;
+    {
+      clib_warning ("Failed to create punt socket: %s", strerror (errno));
+      return;
+    }
 
-  /* Prepare destination address */
+  int flags = fcntl (fd, F_GETFL, 0);
+  fcntl (fd, F_SETFL, flags | O_NONBLOCK);
+
   clib_memset (&pm->dest_addr, 0, sizeof (pm->dest_addr));
   pm->dest_addr.sun_family = AF_UNIX;
   strncpy (pm->dest_addr.sun_path, (char *) socket_path,
 	   sizeof (pm->dest_addr.sun_path) - 1);
 
   pm->socket_fd = fd;
-  pm->socket_path = format (0, "%s%c", socket_path, 0);
+  pm->socket_path = vec_dup (socket_path);
 
-  return 0;
-}
-
-int
-osvbng_punt_socket_init (u8 * socket_path)
-{
-  osvbng_punt_main_t *pm = &osvbng_punt_main;
-  return osvbng_punt_socket_init_internal (pm, socket_path);
+  clib_warning ("OSVBNG punt socket initialized: %s", socket_path);
 }
 
 int
@@ -64,27 +62,26 @@ osvbng_punt_send_packet (vlib_buffer_t * b, u32 sw_if_index,
   osvbng_punt_packet_header_t hdr;
   struct iovec iov[2];
   struct msghdr msg;
-  ssize_t n_sent;
+  ssize_t sent;
+  u8 *data;
+  u32 len;
 
-  /* Check if socket is initialized */
-  if (pm->socket_fd == -1)
-    {
-      pm->packets_dropped[protocol]++;
-      return -1;
-    }
+  if (pm->socket_fd < 0)
+    return -1;
 
-  /* Build packet header with metadata only (MAC/VLAN in packet itself) */
+  data = vlib_buffer_get_current (b);
+  len = b->current_length;
+
   hdr.sw_if_index = clib_host_to_net_u32 (sw_if_index);
   hdr.protocol = protocol;
-  hdr.direction = 0;		/* RX */
-  hdr.data_len = clib_host_to_net_u16 (b->current_length);
+  hdr.direction = 0;
+  hdr.data_len = clib_host_to_net_u16 (len);
   hdr.timestamp_ns = clib_host_to_net_u64 (vlib_time_now (pm->vlib_main) * 1e9);
 
-  /* Send header + packet data using sendmsg() */
   iov[0].iov_base = &hdr;
   iov[0].iov_len = sizeof (hdr);
-  iov[1].iov_base = vlib_buffer_get_current (b);
-  iov[1].iov_len = b->current_length;
+  iov[1].iov_base = data;
+  iov[1].iov_len = len;
 
   clib_memset (&msg, 0, sizeof (msg));
   msg.msg_name = &pm->dest_addr;
@@ -92,10 +89,9 @@ osvbng_punt_send_packet (vlib_buffer_t * b, u32 sw_if_index,
   msg.msg_iov = iov;
   msg.msg_iovlen = 2;
 
-  n_sent = sendmsg (pm->socket_fd, &msg, 0);
-  if (n_sent < 0)
+  sent = sendmsg (pm->socket_fd, &msg, 0);
+  if (sent < 0)
     {
-      /* Socket may not exist yet, silently drop */
       pm->packets_dropped[protocol]++;
       return -1;
     }
@@ -105,13 +101,20 @@ osvbng_punt_send_packet (vlib_buffer_t * b, u32 sw_if_index,
 }
 
 int
+osvbng_punt_socket_init (u8 * socket_path)
+{
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
+  osvbng_punt_socket_init_internal (pm, socket_path);
+  return pm->socket_fd >= 0 ? 0 : -1;
+}
+
+int
 osvbng_punt_enable_disable (u32 sw_if_index,
 			    osvbng_punt_protocol_t protocol,
 			    u8 * socket_path, int enable_disable)
 {
   osvbng_punt_main_t *pm = &osvbng_punt_main;
   vnet_main_t *vnm = pm->vnet_main;
-  osvbng_punt_proto_config_t *config;
 
   if (protocol >= OSVBNG_PUNT_N_PROTO)
     return VNET_API_ERROR_INVALID_VALUE;
@@ -119,172 +122,46 @@ osvbng_punt_enable_disable (u32 sw_if_index,
   if (pool_is_free_index (vnm->interface_main.sw_interfaces, sw_if_index))
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
-  config = &pm->proto_configs[protocol];
-
   if (enable_disable)
     {
-      /* Store socket path and initialize if first enable */
       if (!pm->socket_path && socket_path)
-	{
-	  osvbng_punt_socket_init_internal (pm, socket_path);
-	}
+	osvbng_punt_socket_init_internal (pm, socket_path);
 
-      /* Enable punt on this interface for this protocol */
       hash_set (pm->enabled_interfaces[protocol], sw_if_index, 1);
 
-      /* Call protocol-specific enable function */
-      switch (protocol)
-	{
-	case OSVBNG_PUNT_PROTO_DHCPV4:
-	  osvbng_punt_enable_dhcpv4 (sw_if_index, socket_path);
-	  break;
-	case OSVBNG_PUNT_PROTO_L2TP:
-	  osvbng_punt_enable_l2tp (sw_if_index, socket_path);
-	  break;
-	case OSVBNG_PUNT_PROTO_IPV6_ND:
-	  osvbng_punt_enable_ipv6_nd (sw_if_index, socket_path);
-	  break;
-	case OSVBNG_PUNT_PROTO_ARP:
-	  /* Feature arc based */
-	  if (config->use_feature_arc)
-	    {
-	      vnet_feature_enable_disable (config->arc_name,
-					   config->node_name,
-					   sw_if_index, 1, 0, 0);
-	    }
-	  break;
-	default:
-	  /* Other protocols use feature arcs */
-	  if (config->use_feature_arc)
-	    {
-	      vnet_feature_enable_disable (config->arc_name,
-					   config->node_name,
-					   sw_if_index, 1, 0, 0);
-	    }
-	  break;
-	}
+      clib_warning ("OSVBNG punt enabled: protocol %d on sw_if_index %d",
+		    protocol, sw_if_index);
     }
   else
     {
-      /* Disable punt on this interface */
       hash_unset (pm->enabled_interfaces[protocol], sw_if_index);
 
-      /* Call protocol-specific disable function */
-      switch (protocol)
-	{
-	case OSVBNG_PUNT_PROTO_DHCPV4:
-	  osvbng_punt_disable_dhcpv4 (sw_if_index);
-	  break;
-	case OSVBNG_PUNT_PROTO_L2TP:
-	  osvbng_punt_disable_l2tp (sw_if_index);
-	  break;
-	case OSVBNG_PUNT_PROTO_IPV6_ND:
-	  osvbng_punt_disable_ipv6_nd (sw_if_index);
-	  break;
-	case OSVBNG_PUNT_PROTO_ARP:
-	  /* Feature arc based */
-	  if (config->use_feature_arc)
-	    {
-	      vnet_feature_enable_disable (config->arc_name,
-					   config->node_name,
-					   sw_if_index, 0, 0, 0);
-	    }
-	  break;
-	default:
-	  /* Other protocols use feature arcs */
-	  if (config->use_feature_arc)
-	    {
-	      vnet_feature_enable_disable (config->arc_name,
-					   config->node_name,
-					   sw_if_index, 0, 0, 0);
-	    }
-	  break;
-	}
-
-      /* Close socket if no more punts enabled */
-      int still_enabled = 0;
-      for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
-	{
-	  if (hash_elts (pm->enabled_interfaces[i]) > 0)
-	    {
-	      still_enabled = 1;
-	      break;
-	    }
-	}
-
-      if (!still_enabled && pm->socket_fd != -1)
-	{
-	  close (pm->socket_fd);
-	  pm->socket_fd = -1;
-	}
+      clib_warning ("OSVBNG punt disabled: protocol %d on sw_if_index %d",
+		    protocol, sw_if_index);
     }
 
   return 0;
 }
 
 static void
-osvbng_punt_init_proto_configs (osvbng_punt_main_t * pm)
+osvbng_punt_register_ethertypes (vlib_main_t * vm)
 {
-  /* DHCPv4 */
-  pm->proto_configs[OSVBNG_PUNT_PROTO_DHCPV4].ethertype = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_DHCPV4].ip_protocol = IP_PROTOCOL_UDP;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_DHCPV4].l4_port = 67;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_DHCPV4].use_feature_arc = 1;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_DHCPV4].arc_name = "ip4-unicast";
-  pm->proto_configs[OSVBNG_PUNT_PROTO_DHCPV4].node_name = "osvbng-punt-dhcp";
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
 
-  /* DHCPv6 */
-  pm->proto_configs[OSVBNG_PUNT_PROTO_DHCPV6].ethertype = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_DHCPV6].ip_protocol = IP_PROTOCOL_UDP;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_DHCPV6].l4_port = 547;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_DHCPV6].use_feature_arc = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_DHCPV6].arc_name = NULL;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_DHCPV6].node_name = "osvbng-punt-dhcp6";
+  ethernet_register_input_type (vm, ETHERNET_TYPE_ARP,
+				osvbng_punt_arp_node.index);
+  pm->original_arp_node = 0;
 
-  /* ARP */
-  pm->proto_configs[OSVBNG_PUNT_PROTO_ARP].ethertype = 0x0806;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_ARP].ip_protocol = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_ARP].l4_port = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_ARP].use_feature_arc = 1;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_ARP].arc_name = "arp";
-  pm->proto_configs[OSVBNG_PUNT_PROTO_ARP].node_name = "osvbng-punt-arp";
+  ethernet_register_input_type (vm, ETHERNET_TYPE_PPPOE_DISCOVERY,
+				osvbng_punt_pppoe_disc_node.index);
+  pm->original_pppoe_disc_node = 0;
 
-  /* PPPoE Discovery */
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].ethertype = 0x8863;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].ip_protocol = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].l4_port = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].use_feature_arc = 1;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].arc_name = "device-input";
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].node_name =
-    "osvbng-punt-pppoe-disc";
+  ethernet_register_input_type (vm, ETHERNET_TYPE_PPPOE_SESSION,
+				osvbng_punt_pppoe_sess_node.index);
+  pm->original_pppoe_sess_node = 0;
 
-  /* PPPoE Session - runs on device-input BEFORE pppoe-input */
-  /* Only punts control plane (LCP/PAP/CHAP/IPCP/IPv6CP), passes IP to fast path */
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].ethertype = 0x8864;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].ip_protocol = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].l4_port = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].use_feature_arc = 1;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].arc_name = "device-input";
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].node_name =
-    "osvbng-punt-pppoe-sess";
-
-  /* IPv6 ND */
-  pm->proto_configs[OSVBNG_PUNT_PROTO_IPV6_ND].ethertype = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_IPV6_ND].ip_protocol =
-    IP_PROTOCOL_ICMP6;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_IPV6_ND].l4_port = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_IPV6_ND].use_feature_arc = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_IPV6_ND].arc_name = NULL;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_IPV6_ND].node_name =
-    "osvbng-punt-ipv6-nd";
-
-  /* L2TP */
-  pm->proto_configs[OSVBNG_PUNT_PROTO_L2TP].ethertype = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_L2TP].ip_protocol = IP_PROTOCOL_UDP;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_L2TP].l4_port = 1701;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_L2TP].use_feature_arc = 0;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_L2TP].arc_name = NULL;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_L2TP].node_name = "osvbng-punt-l2tp";
+  clib_warning ("OSVBNG punt registered for ARP (0x0806), "
+		"PPPoE Discovery (0x8863), PPPoE Session (0x8864)");
 }
 
 static clib_error_t *
@@ -297,7 +174,6 @@ osvbng_punt_init (vlib_main_t * vm)
   pm->socket_path = NULL;
   pm->socket_fd = -1;
 
-  /* Initialize per-protocol enable bitmaps */
   for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
     {
       pm->enabled_interfaces[i] = hash_create (0, sizeof (uword));
@@ -305,15 +181,13 @@ osvbng_punt_init (vlib_main_t * vm)
       pm->packets_dropped[i] = 0;
     }
 
-  /* Initialize protocol configurations */
-  osvbng_punt_init_proto_configs (pm);
+  osvbng_punt_register_ethertypes (vm);
 
   return 0;
 }
 
 VLIB_INIT_FUNCTION (osvbng_punt_init);
 
-/* CLI command to enable/disable punt */
 static clib_error_t *
 osvbng_punt_enable_disable_command_fn (vlib_main_t * vm,
 				       unformat_input_t * input,
@@ -369,14 +243,7 @@ osvbng_punt_enable_disable_command_fn (vlib_main_t * vm,
       return clib_error_return (0, "Please specify a protocol");
     }
 
-  if (enable && !socket_path && !pm->socket_path)
-    {
-      return clib_error_return (0,
-				"Please specify socket path when enabling");
-    }
-
-  rv = osvbng_punt_enable_disable (sw_if_index, protocol, socket_path,
-				   enable);
+  rv = osvbng_punt_enable_disable (sw_if_index, protocol, socket_path, enable);
 
   vec_free (socket_path);
 
@@ -384,16 +251,13 @@ osvbng_punt_enable_disable_command_fn (vlib_main_t * vm,
     {
     case 0:
       break;
-
     case VNET_API_ERROR_INVALID_SW_IF_INDEX:
       return clib_error_return (0, "Invalid interface");
-
     case VNET_API_ERROR_INVALID_VALUE:
       return clib_error_return (0, "Invalid protocol");
-
     default:
-      return clib_error_return (0,
-				"osvbng_punt_enable_disable returned %d", rv);
+      return clib_error_return (0, "osvbng_punt_enable_disable returned %d",
+				rv);
     }
   return 0;
 }
@@ -401,11 +265,10 @@ osvbng_punt_enable_disable_command_fn (vlib_main_t * vm,
 VLIB_CLI_COMMAND (osvbng_punt_enable_disable_command, static) = {
   .path = "osvbng punt",
   .short_help =
-    "osvbng punt [enable|disable] <interface> protocol <dhcpv4|dhcpv6|arp|pppoe-disc|pppoe-sess|ipv6-nd|l2tp> [socket <path>]",
+    "osvbng punt [enable|disable] <interface> protocol <arp|pppoe-disc|pppoe-sess|dhcpv4|dhcpv6|ipv6-nd|l2tp> [socket <path>]",
   .function = osvbng_punt_enable_disable_command_fn,
 };
 
-/* CLI command to show punt statistics */
 static clib_error_t *
 osvbng_punt_show_stats_command_fn (vlib_main_t * vm,
 				   unformat_input_t * input,
@@ -437,6 +300,48 @@ VLIB_CLI_COMMAND (osvbng_punt_show_stats_command, static) = {
   .path = "show osvbng punt stats",
   .short_help = "show osvbng punt stats",
   .function = osvbng_punt_show_stats_command_fn,
+};
+
+static clib_error_t *
+osvbng_punt_show_interfaces_command_fn (vlib_main_t * vm,
+					unformat_input_t * input,
+					vlib_cli_command_t * cmd)
+{
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
+  char *proto_names[] = {
+    "DHCPv4", "DHCPv6", "ARP", "PPPoE-Disc", "PPPoE-Sess", "IPv6-ND", "L2TP"
+  };
+
+  vlib_cli_output (vm, "OSVBNG Punt Enabled Interfaces:\n");
+
+  for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
+    {
+      uword *p;
+      u32 sw_if_index;
+      int count = 0;
+
+      vlib_cli_output (vm, "\n%s:", proto_names[i]);
+
+      hash_foreach (sw_if_index, p, pm->enabled_interfaces[i],
+      ({
+        vnet_sw_interface_t *si = vnet_get_sw_interface (pm->vnet_main, sw_if_index);
+        vlib_cli_output (vm, "  sw_if_index %d (%U)",
+                         sw_if_index,
+                         format_vnet_sw_interface_name, pm->vnet_main, si);
+        count++;
+      }));
+
+      if (count == 0)
+	vlib_cli_output (vm, "  (none)");
+    }
+
+  return 0;
+}
+
+VLIB_CLI_COMMAND (osvbng_punt_show_interfaces_command, static) = {
+  .path = "show osvbng punt interfaces",
+  .short_help = "show osvbng punt interfaces",
+  .function = osvbng_punt_show_interfaces_command_fn,
 };
 
 VLIB_PLUGIN_REGISTER () = {

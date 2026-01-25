@@ -13,28 +13,40 @@
  * limitations under the License.
  */
 
+/*
+ * PPPoE Discovery (0x8863) handler
+ *
+ * This node is registered via ethernet_register_input_type() to handle
+ * all PPPoE Discovery ethertype traffic (PADI, PADO, PADR, PADS, PADT),
+ * replacing VPP's native pppoe-cp-dispatch for discovery.
+ *
+ * Packet flow:
+ * - If punt enabled on sw_if_index: send full L2 frame to userspace
+ *   via unix socket, then drop
+ * - If punt not enabled: drop (no useful fallback for discovery)
+ *
+ * Buffer position: ethernet-input delivers packets with buffer advanced
+ * past ethernet+VLAN headers. sw_if_index is already set to the correct
+ * sub-interface after VLAN classification.
+ */
+
 #include <vlib/vlib.h>
 #include <vnet/vnet.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/ethernet/packet.h>
-#include <vnet/feature/feature.h>
 #include <osvbng_punt/osvbng_punt.h>
-
-#define ETHERNET_TYPE_PPPOE_DISCOVERY 0x8863
-#define ETHERNET_TYPE_VLAN            0x8100
-#define ETHERNET_TYPE_DOT1AD          0x88a8
 
 typedef struct
 {
   u32 sw_if_index;
   u8 punted;
-  u8 is_pppoe_disc;
+  u8 not_enabled;
 } osvbng_punt_pppoe_disc_trace_t;
 
 #define foreach_osvbng_punt_pppoe_disc_error \
   _(PUNTED, "PPPoE Discovery packets punted") \
   _(DROPPED, "PPPoE Discovery packets dropped (socket error)") \
-  _(PASSED, "Non-PPPoE Discovery packets passed")
+  _(NOT_ENABLED, "PPPoE Discovery packets dropped (punt not enabled)")
 
 typedef enum
 {
@@ -64,32 +76,11 @@ format_osvbng_punt_pppoe_disc_trace (u8 * s, va_list * args)
   osvbng_punt_pppoe_disc_trace_t *t =
     va_arg (*args, osvbng_punt_pppoe_disc_trace_t *);
 
-  s = format (s, "sw_if_index %d %s",
+  s = format (s, "OSVBNG-PUNT-PPPOE-DISC: sw_if_index %d %s",
 	      t->sw_if_index,
-	      t->is_pppoe_disc ? (t->punted ? "punted" : "dropped") : "passed");
+	      t->not_enabled ? "not-enabled" : (t->punted ? "punted" :
+						"dropped"));
   return s;
-}
-
-always_inline u16
-get_ethertype (vlib_buffer_t * b0)
-{
-  ethernet_header_t *eth0 = vlib_buffer_get_current (b0);
-  u16 ethertype = clib_net_to_host_u16 (eth0->type);
-
-  if (ethertype == ETHERNET_TYPE_VLAN || ethertype == ETHERNET_TYPE_DOT1AD)
-    {
-      ethernet_vlan_header_t *vlan0 = (ethernet_vlan_header_t *) (eth0 + 1);
-      ethertype = clib_net_to_host_u16 (vlan0->type);
-
-      if (ethertype == ETHERNET_TYPE_VLAN)
-	{
-	  vlan0 = (ethernet_vlan_header_t *) ((u8 *) vlan0 +
-					      sizeof (ethernet_vlan_header_t));
-	  ethertype = clib_net_to_host_u16 (vlan0->type);
-	}
-    }
-
-  return ethertype;
 }
 
 static_always_inline uword
@@ -97,9 +88,10 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 			       vlib_node_runtime_t * node,
 			       vlib_frame_t * frame)
 {
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
   u32 n_left_from, *from, *to_next;
   u32 next_index;
-  u32 pkts_punted = 0, pkts_dropped = 0, pkts_passed = 0;
+  u32 pkts_punted = 0, pkts_dropped = 0, pkts_not_enabled = 0;
 
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
@@ -115,11 +107,12 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 	{
 	  u32 bi0, bi1;
 	  vlib_buffer_t *b0, *b1;
-	  u32 next0, next1;
+	  u32 next0 = OSVBNG_PUNT_PPPOE_DISC_NEXT_DROP;
+	  u32 next1 = OSVBNG_PUNT_PPPOE_DISC_NEXT_DROP;
 	  u32 sw_if_index0, sw_if_index1;
-	  u16 ethertype0, ethertype1;
 	  u8 punted0 = 0, punted1 = 0;
-	  u8 is_disc0 = 0, is_disc1 = 0;
+	  u8 not_enabled0 = 0, not_enabled1 = 0;
+	  uword *p0, *p1;
 
 	  {
 	    vlib_buffer_t *p2, *p3;
@@ -146,17 +139,20 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 	  sw_if_index1 = vnet_buffer (b1)->sw_if_index[VLIB_RX];
 
-	  vnet_feature_next (&next0, b0);
-	  vnet_feature_next (&next1, b1);
+	  p0 =
+	    hash_get (pm->enabled_interfaces
+		      [OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY], sw_if_index0);
+	  p1 =
+	    hash_get (pm->enabled_interfaces
+		      [OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY], sw_if_index1);
 
-	  ethertype0 = get_ethertype (b0);
-	  ethertype1 = get_ethertype (b1);
-
-	  if (ethertype0 == ETHERNET_TYPE_PPPOE_DISCOVERY)
+	  if (p0)
 	    {
-	      is_disc0 = 1;
+	      /* Reset buffer to ethernet header for full L2 frame punt */
+	      vlib_buffer_reset (b0);
 	      if (osvbng_punt_send_packet (b0, sw_if_index0,
-					   OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY) == 0)
+					   OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY)
+		  == 0)
 		{
 		  pkts_punted++;
 		  punted0 = 1;
@@ -165,18 +161,20 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 		{
 		  pkts_dropped++;
 		}
-	      next0 = OSVBNG_PUNT_PPPOE_DISC_NEXT_DROP;
 	    }
 	  else
 	    {
-	      pkts_passed++;
+	      pkts_not_enabled++;
+	      not_enabled0 = 1;
 	    }
 
-	  if (ethertype1 == ETHERNET_TYPE_PPPOE_DISCOVERY)
+	  if (p1)
 	    {
-	      is_disc1 = 1;
+	      /* Reset buffer to ethernet header for full L2 frame punt */
+	      vlib_buffer_reset (b1);
 	      if (osvbng_punt_send_packet (b1, sw_if_index1,
-					   OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY) == 0)
+					   OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY)
+		  == 0)
 		{
 		  pkts_punted++;
 		  punted1 = 1;
@@ -185,11 +183,11 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 		{
 		  pkts_dropped++;
 		}
-	      next1 = OSVBNG_PUNT_PPPOE_DISC_NEXT_DROP;
 	    }
 	  else
 	    {
-	      pkts_passed++;
+	      pkts_not_enabled++;
+	      not_enabled1 = 1;
 	    }
 
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE)))
@@ -200,7 +198,7 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 		    vlib_add_trace (vm, node, b0, sizeof (*t));
 		  t->sw_if_index = sw_if_index0;
 		  t->punted = punted0;
-		  t->is_pppoe_disc = is_disc0;
+		  t->not_enabled = not_enabled0;
 		}
 	      if (b1->flags & VLIB_BUFFER_IS_TRACED)
 		{
@@ -208,7 +206,7 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 		    vlib_add_trace (vm, node, b1, sizeof (*t));
 		  t->sw_if_index = sw_if_index1;
 		  t->punted = punted1;
-		  t->is_pppoe_disc = is_disc1;
+		  t->not_enabled = not_enabled1;
 		}
 	    }
 
@@ -221,11 +219,11 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 	{
 	  u32 bi0;
 	  vlib_buffer_t *b0;
-	  u32 next0;
+	  u32 next0 = OSVBNG_PUNT_PPPOE_DISC_NEXT_DROP;
 	  u32 sw_if_index0;
-	  u16 ethertype0;
 	  u8 punted0 = 0;
-	  u8 is_disc0 = 0;
+	  u8 not_enabled0 = 0;
+	  uword *p0;
 
 	  bi0 = from[0];
 	  to_next[0] = bi0;
@@ -237,15 +235,17 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 	  b0 = vlib_get_buffer (vm, bi0);
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
-	  vnet_feature_next (&next0, b0);
+	  p0 =
+	    hash_get (pm->enabled_interfaces
+		      [OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY], sw_if_index0);
 
-	  ethertype0 = get_ethertype (b0);
-
-	  if (ethertype0 == ETHERNET_TYPE_PPPOE_DISCOVERY)
+	  if (p0)
 	    {
-	      is_disc0 = 1;
+	      /* Reset buffer to ethernet header for full L2 frame punt */
+	      vlib_buffer_reset (b0);
 	      if (osvbng_punt_send_packet (b0, sw_if_index0,
-					   OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY) == 0)
+					   OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY)
+		  == 0)
 		{
 		  pkts_punted++;
 		  punted0 = 1;
@@ -254,11 +254,11 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 		{
 		  pkts_dropped++;
 		}
-	      next0 = OSVBNG_PUNT_PPPOE_DISC_NEXT_DROP;
 	    }
 	  else
 	    {
-	      pkts_passed++;
+	      pkts_not_enabled++;
+	      not_enabled0 = 1;
 	    }
 
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE)
@@ -268,7 +268,7 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 		vlib_add_trace (vm, node, b0, sizeof (*t));
 	      t->sw_if_index = sw_if_index0;
 	      t->punted = punted0;
-	      t->is_pppoe_disc = is_disc0;
+	      t->not_enabled = not_enabled0;
 	    }
 
 	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
@@ -286,8 +286,8 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 			       OSVBNG_PUNT_PPPOE_DISC_ERROR_DROPPED,
 			       pkts_dropped);
   vlib_node_increment_counter (vm, node->node_index,
-			       OSVBNG_PUNT_PPPOE_DISC_ERROR_PASSED,
-			       pkts_passed);
+			       OSVBNG_PUNT_PPPOE_DISC_ERROR_NOT_ENABLED,
+			       pkts_not_enabled);
 
   return frame->n_vectors;
 }
@@ -310,12 +310,6 @@ VLIB_REGISTER_NODE (osvbng_punt_pppoe_disc_node) = {
   .next_nodes = {
     [OSVBNG_PUNT_PPPOE_DISC_NEXT_DROP] = "error-drop",
   },
-};
-
-VNET_FEATURE_INIT (osvbng_punt_pppoe_disc, static) = {
-  .arc_name = "device-input",
-  .node_name = "osvbng-punt-pppoe-disc",
-  .runs_before = VNET_FEATURES ("ethernet-input"),
 };
 
 /*
