@@ -1,0 +1,66 @@
+/*
+ * Copyright (c) 2025 Veesix Networks
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+option version = "1.0.0";
+
+import "vnet/interface_types.api";
+
+/** \brief Enable/disable OSVBNG punt for a protocol on an interface
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - interface index
+    @param protocol - protocol type (0=DHCPv4, 1=DHCPv6, 2=ARP, 3=PPPoE-Disc, 4=PPPoE-Sess, 5=IPv6-ND, 6=L2TP)
+    @param enable - true to enable, false to disable
+    @param socket_path - unix socket path for punted packets
+*/
+autoreply define osvbng_punt_enable_disable
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  u8 protocol;
+  bool enable;
+  string socket_path[256];
+};
+
+/** \brief Get OSVBNG punt statistics
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+*/
+define osvbng_punt_stats_dump
+{
+  u32 client_index;
+  u32 context;
+};
+
+/** \brief OSVBNG punt statistics details
+    @param context - sender context, to match reply w/ request
+    @param protocol - protocol type
+    @param packets_punted - number of packets successfully punted
+    @param packets_dropped - number of packets dropped (socket error)
+*/
+define osvbng_punt_stats_details
+{
+  u32 context;
+  u8 protocol;
+  u64 packets_punted;
+  u64 packets_dropped;
+};
+
+/*
+ * Local Variables:
+ * eval: (c-set-style "gnu")
+ * End:
+ */
