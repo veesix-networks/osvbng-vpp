@@ -259,13 +259,13 @@ osvbng_punt_init_proto_configs (osvbng_punt_main_t * pm)
   pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY].node_name =
     "osvbng-punt-pppoe-disc";
 
-  /* PPPoE Session */
+  /* PPPoE Session - runs on device-input BEFORE pppoe-input */
+  /* Only punts control plane (LCP/PAP/CHAP/IPCP/IPv6CP), passes IP to fast path */
   pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].ethertype = 0x8864;
   pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].ip_protocol = 0;
   pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].l4_port = 0;
   pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].use_feature_arc = 1;
-  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].arc_name =
-    "ethernet-input";
+  pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].arc_name = "device-input";
   pm->proto_configs[OSVBNG_PUNT_PROTO_PPPOE_SESSION].node_name =
     "osvbng-punt-pppoe-sess";
 
