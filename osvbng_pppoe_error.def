@@ -1,0 +1,8 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2017 Intel and/or its affiliates.
+ * Copyright (c) 2025 veesix ::networks
+ */
+
+pppoe_error (DECAPSULATED, "good packets decapsulated")
+pppoe_error (NO_SUCH_SESSION, "no such session")
+pppoe_error (BAD_VER_TYPE, "bad version/type field")
