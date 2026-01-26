@@ -327,10 +327,6 @@ int vnet_osvbng_pppoe_add_del_session
       pfx.fp_proto = FIB_PROTOCOL_IP6;
     }
 
-  /* Validate encap_if_index - must be valid interface */
-  if (pool_is_free_index (vnm->interface_main.sw_interfaces, a->encap_if_index))
-    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
-
   /* lookup session_table */
   pppoe_lookup_1 (&pem->session_table, &cached_key, &cached_result,
                   a->client_mac, clib_host_to_net_u16 (a->session_id),
@@ -341,6 +337,10 @@ int vnet_osvbng_pppoe_add_del_session
       /* adding a session: session must not already exist */
       if (result.fields.session_index != ~0)
         return VNET_API_ERROR_TUNNEL_EXIST;
+
+      /* Validate encap_if_index - must be valid interface (only for add) */
+      if (pool_is_free_index (vnm->interface_main.sw_interfaces, a->encap_if_index))
+        return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
       /* if not set explicitly, default to ip4 */
       if (!pppoe_decap_next_is_valid (pem, is_ip6, a->decap_fib_index))
