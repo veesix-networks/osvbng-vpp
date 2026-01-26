@@ -13,6 +13,7 @@
 
 #include <vlib/vlib.h>
 #include <vlib/unix/unix.h>
+#include <vlib/log.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/fib/fib_entry.h>
 #include <vnet/fib/fib_table.h>
@@ -30,6 +31,7 @@
 osvbng_pppoe_main_t osvbng_pppoe_main;
 
 static fib_source_t pppoe_fib_src;
+static vlib_log_class_t osvbng_pppoe_log;
 
 u8 *
 format_osvbng_pppoe_session (u8 * s, va_list * args)
@@ -729,16 +731,24 @@ osvbng_pppoe_init (vlib_main_t * vm)
 {
   osvbng_pppoe_main_t *pem = &osvbng_pppoe_main;
 
+  osvbng_pppoe_log = vlib_log_register_class ("osvbng_pppoe", 0);
+
+  vlib_log_info (osvbng_pppoe_log, "initializing...");
+
   pem->vnet_main = vnet_get_main ();
   pem->vlib_main = vm;
 
   /* Create the session hash table */
   BV (clib_bihash_init) (&pem->session_table, "osvbng pppoe session table",
                          PPPOE_NUM_BUCKETS, PPPOE_MEMORY_SIZE);
+  vlib_log_debug (osvbng_pppoe_log, "session hash table created");
 
   pppoe_fib_src = fib_source_allocate ("osvbng-pppoe",
                                        FIB_SOURCE_PRIORITY_HI,
                                        FIB_SOURCE_BH_API);
+  vlib_log_debug (osvbng_pppoe_log, "FIB source allocated");
+
+  vlib_log_notice (osvbng_pppoe_log, "initialized successfully");
 
   return 0;
 }
