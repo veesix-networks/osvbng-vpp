@@ -97,6 +97,8 @@ osvbng_punt_send_packet (vlib_buffer_t * b, u32 sw_if_index,
   sent = sendmsg (pm->socket_fd, &msg, 0);
   if (sent < 0)
     {
+      vlib_log_warn (osvbng_punt_log, "sendmsg failed: %s (errno=%d, protocol=%d, len=%d)",
+                     strerror (errno), errno, protocol, len);
       pm->packets_dropped[protocol]++;
       return -1;
     }
