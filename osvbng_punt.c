@@ -34,15 +34,19 @@ osvbng_punt_socket_init_internal (osvbng_punt_main_t * pm, u8 * socket_path)
   if (pm->socket_fd >= 0)
     return;
 
-  fd = socket (AF_UNIX, SOCK_DGRAM, 0);
+  fd = socket (AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0);
   if (fd < 0)
     {
       vlib_log_err (osvbng_punt_log, "Failed to create punt socket: %s", strerror (errno));
       return;
     }
 
-  int flags = fcntl (fd, F_GETFL, 0);
-  fcntl (fd, F_SETFL, flags | O_NONBLOCK);
+  /* Set socket send buffer size to match VPP native punt (64KB) */
+  int sndbuf = 0x10000;
+  if (setsockopt (fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof (sndbuf)) < 0)
+    {
+      vlib_log_warn (osvbng_punt_log, "Failed to set SO_SNDBUF: %s", strerror (errno));
+    }
 
   clib_memset (&pm->dest_addr, 0, sizeof (pm->dest_addr));
   pm->dest_addr.sun_family = AF_UNIX;
