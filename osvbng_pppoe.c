@@ -440,11 +440,8 @@ int vnet_osvbng_pppoe_add_del_session
 
       pem->session_index_by_sw_if_index[t->sw_if_index] = ~0;
 
-      /* update pppoe fib with session_index=~0 */
-      result.fields.session_index = ~0;
-      pppoe_update_1 (&pem->session_table,
-                      a->client_mac, clib_host_to_net_u16 (a->session_id),
-                      &key, &bucket, &result);
+      pppoe_delete_1 (&pem->session_table,
+                      a->client_mac, clib_host_to_net_u16 (a->session_id));
 
       /* delete reverse route for client ip */
       fib_table_entry_path_remove (a->decap_fib_index, &pfx,

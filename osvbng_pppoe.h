@@ -259,4 +259,15 @@ pppoe_update_1 (BVT (clib_bihash) * table,
   BV (clib_bihash_add_del) (table, &kv, 1 /* is_add */ );
 }
 
+static_always_inline void
+pppoe_delete_1 (BVT (clib_bihash) * table,
+                u8 * mac0,
+                u16 session_id0)
+{
+  BVT (clib_bihash_kv) kv;
+  kv.key = pppoe_make_key (mac0, session_id0);
+  kv.value = 0;
+  BV (clib_bihash_add_del) (table, &kv, 0 /* is_add */ );
+}
+
 #endif /* __included_osvbng_pppoe_h__ */
