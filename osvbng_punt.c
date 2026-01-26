@@ -186,7 +186,7 @@ osvbng_punt_init (vlib_main_t * vm)
 }
 
 VLIB_INIT_FUNCTION (osvbng_punt_init) = {
-  .runs_after = VLIB_INITS ("pppoe_init"),
+  .runs_after = VLIB_INITS ("osvbng_pppoe_init"),
 };
 
 static clib_error_t *

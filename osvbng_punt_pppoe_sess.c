@@ -416,7 +416,7 @@ VLIB_REGISTER_NODE (osvbng_punt_pppoe_sess_node) = {
   .n_next_nodes = OSVBNG_PUNT_PPPOE_SESS_N_NEXT,
   .next_nodes = {
     [OSVBNG_PUNT_PPPOE_SESS_NEXT_DROP] = "error-drop",
-    [OSVBNG_PUNT_PPPOE_SESS_NEXT_PPPOE_INPUT] = "pppoe-input",
+    [OSVBNG_PUNT_PPPOE_SESS_NEXT_PPPOE_INPUT] = "osvbng-pppoe-input",
   },
 };
 
