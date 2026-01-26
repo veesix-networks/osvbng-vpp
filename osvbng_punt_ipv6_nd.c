@@ -152,6 +152,9 @@ osvbng_punt_enable_ipv6_nd (u32 sw_if_index, u8 *socket_path)
   vlib_main_t *vm = pm->vlib_main;
   u32 node_index;
 
+  if (socket_path && !pm->socket_path)
+    osvbng_punt_socket_init (socket_path);
+
   node_index = osvbng_punt_ipv6_nd_node.index;
 
   /* Register ICMPv6 Neighbor Discovery types */

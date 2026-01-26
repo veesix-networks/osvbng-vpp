@@ -136,6 +136,9 @@ osvbng_punt_enable_dhcpv4 (u32 sw_if_index, u8 *socket_path)
   vlib_main_t *vm = pm->vlib_main;
   u32 node_index;
 
+  if (socket_path && !pm->socket_path)
+    osvbng_punt_socket_init (socket_path);
+
   node_index = osvbng_punt_dhcp_node.index;
 
   udp_register_dst_port (vm, 67, node_index, 1);

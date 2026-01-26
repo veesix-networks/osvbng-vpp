@@ -148,6 +148,9 @@ osvbng_punt_enable_l2tp (u32 sw_if_index, u8 *socket_path)
   vlib_main_t *vm = pm->vlib_main;
   u32 node_index;
 
+  if (socket_path && !pm->socket_path)
+    osvbng_punt_socket_init (socket_path);
+
   node_index = osvbng_punt_l2tp_node.index;
 
   /* Register L2TP control port (1701) */
