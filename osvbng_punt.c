@@ -19,10 +19,12 @@
 #include <vlibapi/api.h>
 #include <vlibmemory/api.h>
 #include <vpp/app/version.h>
+#include <vlib/log.h>
 
 #include <osvbng_punt/osvbng_punt.h>
 
 osvbng_punt_main_t osvbng_punt_main;
+static vlib_log_class_t osvbng_punt_log;
 
 static void
 osvbng_punt_socket_init_internal (osvbng_punt_main_t * pm, u8 * socket_path)
@@ -35,7 +37,7 @@ osvbng_punt_socket_init_internal (osvbng_punt_main_t * pm, u8 * socket_path)
   fd = socket (AF_UNIX, SOCK_DGRAM, 0);
   if (fd < 0)
     {
-      clib_warning ("Failed to create punt socket: %s", strerror (errno));
+      vlib_log_err (osvbng_punt_log, "Failed to create punt socket: %s", strerror (errno));
       return;
     }
 
@@ -50,7 +52,7 @@ osvbng_punt_socket_init_internal (osvbng_punt_main_t * pm, u8 * socket_path)
   pm->socket_fd = fd;
   pm->socket_path = vec_dup (socket_path);
 
-  clib_warning ("OSVBNG punt socket initialized: %s", socket_path);
+  vlib_log_info (osvbng_punt_log, "punt socket initialized: %s", socket_path);
 }
 
 int
@@ -128,14 +130,14 @@ osvbng_punt_enable_disable (u32 sw_if_index,
 
       hash_set (pm->enabled_interfaces[protocol], sw_if_index, 1);
 
-      clib_warning ("OSVBNG punt enabled: protocol %d on sw_if_index %d",
+      vlib_log_info (osvbng_punt_log, "punt enabled: protocol %d on sw_if_index %d",
 		    protocol, sw_if_index);
     }
   else
     {
       hash_unset (pm->enabled_interfaces[protocol], sw_if_index);
 
-      clib_warning ("OSVBNG punt disabled: protocol %d on sw_if_index %d",
+      vlib_log_info (osvbng_punt_log, "punt disabled: protocol %d on sw_if_index %d",
 		    protocol, sw_if_index);
     }
 
@@ -147,26 +149,34 @@ osvbng_punt_register_ethertypes (vlib_main_t * vm)
 {
   osvbng_punt_main_t *pm = &osvbng_punt_main;
 
+  vlib_log_info (osvbng_punt_log, "registering ethertypes...");
+
   ethernet_register_input_type (vm, ETHERNET_TYPE_ARP,
 				osvbng_punt_arp_node.index);
   pm->original_arp_node = 0;
+  vlib_log_debug (osvbng_punt_log, "registered ARP (0x0806) -> node %d", osvbng_punt_arp_node.index);
 
   ethernet_register_input_type (vm, ETHERNET_TYPE_PPPOE_DISCOVERY,
 				osvbng_punt_pppoe_disc_node.index);
   pm->original_pppoe_disc_node = 0;
+  vlib_log_debug (osvbng_punt_log, "registered PPPoE Discovery (0x8863) -> node %d", osvbng_punt_pppoe_disc_node.index);
 
   ethernet_register_input_type (vm, ETHERNET_TYPE_PPPOE_SESSION,
 				osvbng_punt_pppoe_sess_node.index);
   pm->original_pppoe_sess_node = 0;
+  vlib_log_debug (osvbng_punt_log, "registered PPPoE Session (0x8864) -> node %d", osvbng_punt_pppoe_sess_node.index);
 
-  clib_warning ("OSVBNG punt registered for ARP (0x0806), "
-		"PPPoE Discovery (0x8863), PPPoE Session (0x8864)");
+  vlib_log_notice (osvbng_punt_log, "ethertypes registered: ARP, PPPoE-Discovery, PPPoE-Session");
 }
 
 static clib_error_t *
 osvbng_punt_init (vlib_main_t * vm)
 {
   osvbng_punt_main_t *pm = &osvbng_punt_main;
+
+  osvbng_punt_log = vlib_log_register_class ("osvbng_punt", 0);
+
+  vlib_log_info (osvbng_punt_log, "initializing...");
 
   pm->vlib_main = vm;
   pm->vnet_main = vnet_get_main ();
@@ -182,12 +192,12 @@ osvbng_punt_init (vlib_main_t * vm)
 
   osvbng_punt_register_ethertypes (vm);
 
+  vlib_log_notice (osvbng_punt_log, "initialized successfully");
+
   return 0;
 }
 
-VLIB_INIT_FUNCTION (osvbng_punt_init) = {
-  .runs_after = VLIB_INITS ("osvbng_pppoe_init"),
-};
+VLIB_INIT_FUNCTION (osvbng_punt_init);
 
 static clib_error_t *
 osvbng_punt_enable_disable_command_fn (vlib_main_t * vm,
