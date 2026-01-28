@@ -21,6 +21,9 @@
 
 ipoe_main_t ipoe_main;
 
+/* FIB source for IPoE subscriber routes */
+static fib_source_t ipoe_fib_src;
+
 char *ipoe_error_strings[] = {
 #define ipoe_error(n,s) s,
 #include <osvbng_ipoe/osvbng_ipoe_error.def>
@@ -267,14 +270,14 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
       hi->hw_instance = hi->dev_instance;
 
       /* Clear counters */
-      vnet_interface_counter_lock (vnm);
+      vnet_interface_counter_lock (&vnm->interface_main);
       vlib_zero_combined_counter (
         &vnm->interface_main.combined_sw_if_counters[VNET_INTERFACE_COUNTER_TX],
         hi->sw_if_index);
       vlib_zero_combined_counter (
         &vnm->interface_main.combined_sw_if_counters[VNET_INTERFACE_COUNTER_RX],
         hi->sw_if_index);
-      vnet_interface_counter_unlock (vnm);
+      vnet_interface_counter_unlock (&vnm->interface_main);
     }
   else
     {
@@ -339,7 +342,7 @@ vnet_ipoe_set_session_ipv4 (u32 sw_if_index, ip4_address_t *addr, u8 is_add)
     {
       /* Add /32 route pointing to ipoe_session */
       fib_table_entry_path_add (
-        s->decap_fib_index, &pfx, FIB_SOURCE_PLUGIN_LOW, FIB_ENTRY_FLAG_NONE,
+        s->decap_fib_index, &pfx, ipoe_fib_src, FIB_ENTRY_FLAG_NONE,
         DPO_PROTO_IP4, NULL, sw_if_index, ~0, 1, NULL, FIB_ROUTE_PATH_FLAG_NONE);
 
       s->client_ipv4 = *addr;
@@ -349,7 +352,7 @@ vnet_ipoe_set_session_ipv4 (u32 sw_if_index, ip4_address_t *addr, u8 is_add)
     {
       /* Remove route */
       fib_table_entry_path_remove (
-        s->decap_fib_index, &pfx, FIB_SOURCE_PLUGIN_LOW, DPO_PROTO_IP4, NULL,
+        s->decap_fib_index, &pfx, ipoe_fib_src, DPO_PROTO_IP4, NULL,
         sw_if_index, ~0, 1, FIB_ROUTE_PATH_FLAG_NONE);
 
       clib_memset (&s->client_ipv4, 0, sizeof (s->client_ipv4));
@@ -388,7 +391,7 @@ vnet_ipoe_set_session_ipv6 (u32 sw_if_index, ip6_address_t *addr, u8 is_add)
     {
       /* Add /128 route pointing to ipoe_session */
       fib_table_entry_path_add (
-        s->decap_fib_index, &pfx, FIB_SOURCE_PLUGIN_LOW, FIB_ENTRY_FLAG_NONE,
+        s->decap_fib_index, &pfx, ipoe_fib_src, FIB_ENTRY_FLAG_NONE,
         DPO_PROTO_IP6, NULL, sw_if_index, ~0, 1, NULL, FIB_ROUTE_PATH_FLAG_NONE);
 
       s->client_ipv6 = *addr;
@@ -398,7 +401,7 @@ vnet_ipoe_set_session_ipv6 (u32 sw_if_index, ip6_address_t *addr, u8 is_add)
     {
       /* Remove route */
       fib_table_entry_path_remove (
-        s->decap_fib_index, &pfx, FIB_SOURCE_PLUGIN_LOW, DPO_PROTO_IP6, NULL,
+        s->decap_fib_index, &pfx, ipoe_fib_src, DPO_PROTO_IP6, NULL,
         sw_if_index, ~0, 1, FIB_ROUTE_PATH_FLAG_NONE);
 
       clib_memset (&s->client_ipv6, 0, sizeof (s->client_ipv6));
@@ -439,7 +442,7 @@ vnet_ipoe_set_delegated_prefix (u32 sw_if_index, ip6_address_t *prefix,
     {
       /* Add prefix route pointing to ipoe_session */
       fib_table_entry_path_add (
-        s->decap_fib_index, &pfx, FIB_SOURCE_PLUGIN_LOW, FIB_ENTRY_FLAG_NONE,
+        s->decap_fib_index, &pfx, ipoe_fib_src, FIB_ENTRY_FLAG_NONE,
         DPO_PROTO_IP6, NULL, sw_if_index, ~0, 1, NULL, FIB_ROUTE_PATH_FLAG_NONE);
 
       s->delegated_prefix = *prefix;
@@ -450,7 +453,7 @@ vnet_ipoe_set_delegated_prefix (u32 sw_if_index, ip6_address_t *prefix,
     {
       /* Remove route */
       fib_table_entry_path_remove (
-        s->decap_fib_index, &pfx, FIB_SOURCE_PLUGIN_LOW, DPO_PROTO_IP6, NULL,
+        s->decap_fib_index, &pfx, ipoe_fib_src, DPO_PROTO_IP6, NULL,
         sw_if_index, ~0, 1, FIB_ROUTE_PATH_FLAG_NONE);
 
       clib_memset (&s->delegated_prefix, 0, sizeof (s->delegated_prefix));
@@ -468,9 +471,8 @@ int
 vnet_ipoe_enable_disable (u32 sw_if_index, u8 enable)
 {
   ipoe_main_t *im = &ipoe_main;
-  vnet_main_t *vnm = im->vnet_main;
 
-  if (!vnet_sw_if_index_is_api_valid (sw_if_index))
+  if (!vnet_sw_interface_is_api_valid (im->vnet_main, sw_if_index))
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
   if (enable)
@@ -507,6 +509,11 @@ ipoe_init (vlib_main_t *vm)
   /* Initialize session table */
   clib_bihash_init_16_8 (&im->session_table, "ipoe session table",
                          IPOE_NUM_BUCKETS, IPOE_MEMORY_SIZE);
+
+  /* Register FIB source for IPoE subscriber routes */
+  ipoe_fib_src = fib_source_allocate ("osvbng-ipoe",
+                                      FIB_SOURCE_PRIORITY_HI,
+                                      FIB_SOURCE_BH_API);
 
   return 0;
 }
