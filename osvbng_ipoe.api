@@ -1,0 +1,187 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2025 veesix ::networks
+ *
+ * osvbng IPoE Plugin API
+ * Per-subscriber virtual interfaces for IPoE subscribers.
+ */
+
+option version = "1.0.0";
+import "vnet/interface_types.api";
+import "vnet/ethernet/ethernet_types.api";
+import "vnet/ip/ip_types.api";
+
+/** \brief Add or delete an IPoE session
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add session if non-zero, else delete
+    @param encap_if_index - parent S-VLAN sub-interface
+    @param client_mac - subscriber MAC address
+    @param local_mac - BNG MAC address (src in TX frames)
+    @param outer_vlan - S-VLAN tag for TX rewrite (0 if untagged)
+    @param inner_vlan - C-VLAN tag for lookup + TX rewrite (0 if none)
+    @param decap_vrf_id - VRF for subscriber traffic
+*/
+define osvbng_ipoe_add_del_session
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  vl_api_interface_index_t encap_if_index;
+  vl_api_mac_address_t client_mac;
+  vl_api_mac_address_t local_mac;
+  u16 outer_vlan;
+  u16 inner_vlan;
+  u32 decap_vrf_id;
+};
+
+/** \brief Reply for add/delete IPoE session
+    @param context - sender context, to match reply w/ request
+    @param retval - return code
+    @param sw_if_index - ipoe_session interface index
+*/
+define osvbng_ipoe_add_del_session_reply
+{
+  u32 context;
+  i32 retval;
+  vl_api_interface_index_t sw_if_index;
+};
+
+/** \brief Set/clear IPv4 address binding for IPoE session (after DHCPv4)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - ipoe_session interface
+    @param client_ip - assigned IPv4 address
+    @param is_add - add (1) or remove (0) binding
+*/
+define osvbng_ipoe_set_session_ipv4
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  vl_api_ip4_address_t client_ip;
+  bool is_add;
+};
+
+define osvbng_ipoe_set_session_ipv4_reply
+{
+  u32 context;
+  i32 retval;
+};
+
+/** \brief Set/clear IPv6 WAN address binding for IPoE session (after DHCPv6 IA_NA)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - ipoe_session interface
+    @param client_ip - assigned IPv6 address
+    @param is_add - add (1) or remove (0) binding
+*/
+define osvbng_ipoe_set_session_ipv6
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  vl_api_ip6_address_t client_ip;
+  bool is_add;
+};
+
+define osvbng_ipoe_set_session_ipv6_reply
+{
+  u32 context;
+  i32 retval;
+};
+
+/** \brief Set/clear delegated prefix for IPoE session (after DHCPv6 IA_PD)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - ipoe_session interface
+    @param prefix - delegated prefix
+    @param next_hop - next-hop for prefix route (link-local or IA_NA address)
+    @param is_add - add (1) or remove (0) binding
+*/
+define osvbng_ipoe_set_delegated_prefix
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  vl_api_prefix_t prefix;
+  vl_api_ip6_address_t next_hop;
+  bool is_add;
+};
+
+define osvbng_ipoe_set_delegated_prefix_reply
+{
+  u32 context;
+  i32 retval;
+};
+
+/** \brief Enable/disable IPoE processing on interface
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - interface to enable/disable on
+    @param enable - enable (1) or disable (0)
+*/
+define osvbng_ipoe_enable_disable
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  bool enable;
+};
+
+define osvbng_ipoe_enable_disable_reply
+{
+  u32 context;
+  i32 retval;
+};
+
+/** \brief Dump all IPoE sessions
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - specific session to dump (~0 for all)
+*/
+define osvbng_ipoe_session_dump
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+};
+
+/** \brief IPoE session details
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - ipoe_session interface
+    @param encap_if_index - parent S-VLAN sub-interface
+    @param client_mac - subscriber MAC address
+    @param local_mac - BNG MAC address
+    @param outer_vlan - S-VLAN tag
+    @param inner_vlan - C-VLAN tag
+    @param client_ipv4 - IPv4 address (0.0.0.0 if not bound)
+    @param ipv4_bound - IPv4 binding active
+    @param client_ipv6 - IPv6 address (:: if not bound)
+    @param ipv6_bound - IPv6 binding active
+    @param delegated_prefix - delegated prefix (0/0 if no PD)
+    @param pd_next_hop - next-hop for PD route
+    @param decap_vrf_id - VRF for subscriber traffic
+*/
+define osvbng_ipoe_session_details
+{
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  vl_api_interface_index_t encap_if_index;
+  vl_api_mac_address_t client_mac;
+  vl_api_mac_address_t local_mac;
+  u16 outer_vlan;
+  u16 inner_vlan;
+  vl_api_ip4_address_t client_ipv4;
+  bool ipv4_bound;
+  vl_api_ip6_address_t client_ipv6;
+  bool ipv6_bound;
+  vl_api_prefix_t delegated_prefix;
+  vl_api_ip6_address_t pd_next_hop;
+  u32 decap_vrf_id;
+};
+
+/*
+ * Local Variables:
+ * eval: (c-set-style "gnu")
+ * End:
+ */

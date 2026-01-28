@@ -1,0 +1,8 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2025 veesix ::networks
+ */
+
+ipoe_error(DECAPSULATED, "IPoE packets decapsulated")
+ipoe_error(NO_SUCH_SESSION, "No such IPoE session")
+ipoe_error(NOT_ENABLED, "IPoE not enabled on interface")
+ipoe_error(BAD_ETHERTYPE, "Unsupported ethertype")
