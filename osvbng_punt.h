@@ -71,6 +71,7 @@ extern osvbng_punt_main_t osvbng_punt_main;
 
 extern vlib_node_registration_t osvbng_punt_arp_node;
 extern vlib_node_registration_t osvbng_punt_dhcp_node;
+extern vlib_node_registration_t osvbng_punt_dhcp6_node;
 extern vlib_node_registration_t osvbng_punt_pppoe_disc_node;
 extern vlib_node_registration_t osvbng_punt_pppoe_sess_node;
 extern vlib_node_registration_t osvbng_punt_l2tp_node;
@@ -87,6 +88,8 @@ int osvbng_punt_socket_init (u8 * socket_path);
 
 int osvbng_punt_enable_dhcpv4 (u32 sw_if_index, u8 *socket_path);
 int osvbng_punt_disable_dhcpv4 (u32 sw_if_index);
+int osvbng_punt_enable_dhcpv6 (u32 sw_if_index, u8 *socket_path);
+int osvbng_punt_disable_dhcpv6 (u32 sw_if_index);
 int osvbng_punt_enable_l2tp (u32 sw_if_index, u8 *socket_path);
 int osvbng_punt_disable_l2tp (u32 sw_if_index);
 int osvbng_punt_enable_ipv6_nd (u32 sw_if_index, u8 *socket_path);

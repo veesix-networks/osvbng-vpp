@@ -16,6 +16,7 @@ add_vpp_plugin(osvbng_punt
   osvbng_punt.c
   osvbng_punt_arp.c
   osvbng_punt_dhcp.c
+  osvbng_punt_dhcp6.c
   osvbng_punt_pppoe_disc.c
   osvbng_punt_pppoe_sess.c
   osvbng_punt_l2tp.c
