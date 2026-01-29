@@ -98,10 +98,7 @@ vl_api_osvbng_ipoe_set_delegated_prefix_t_handler (
   vl_api_osvbng_ipoe_set_delegated_prefix_reply_t *rmp;
   int rv = 0;
 
-  ip6_address_t prefix, next_hop;
-  ip_prefix_decode (&mp->prefix, (fib_prefix_t *) &prefix);
-
-  /* Extract prefix address and length */
+  ip6_address_t next_hop;
   fib_prefix_t fib_pfx;
   ip_prefix_decode (&mp->prefix, &fib_pfx);
 

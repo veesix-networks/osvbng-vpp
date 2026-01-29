@@ -70,7 +70,14 @@ ipoe_build_rewrite (vnet_main_t *vnm, u32 sw_if_index, vnet_link_t link_type,
   int len;
   u32 session_index;
 
+  /* Safety check: verify sw_if_index is valid */
+  if (sw_if_index >= vec_len (im->session_index_by_sw_if_index))
+    return NULL;
+
   session_index = im->session_index_by_sw_if_index[sw_if_index];
+  if (session_index == ~0)
+    return NULL;
+
   s = pool_elt_at_index (im->sessions, session_index);
 
   /* Calculate rewrite length */
@@ -149,8 +156,15 @@ ipoe_update_adj (vnet_main_t *vnm, u32 sw_if_index, adj_index_t ai)
   dpo_id_t dpo = DPO_INVALID;
   ip_adjacency_t *adj;
 
-  adj = adj_get (ai);
+  /* Safety check: verify sw_if_index is valid */
+  if (sw_if_index >= vec_len (im->session_index_by_sw_if_index))
+    return;
+
   session_index = im->session_index_by_sw_if_index[sw_if_index];
+  if (session_index == ~0)
+    return;
+
+  adj = adj_get (ai);
   s = pool_elt_at_index (im->sessions, session_index);
 
   /* Update midchain rewrite - no fixup needed for IPoE (unlike PPPoE) */
@@ -225,14 +239,15 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
       ipoe_session_table_del (&im->session_table, a->encap_if_index,
                               a->inner_vlan, a->client_mac);
 
-      /* Clear reverse lookup */
-      im->session_index_by_sw_if_index[s->sw_if_index] = ~0;
-
-      /* Delete interface */
+      /* Delete interface first (before clearing reverse lookup, as callbacks may need it) */
+      u32 hw_if_index_to_recycle = s->hw_if_index;
       vnet_delete_hw_interface (vnm, s->hw_if_index);
 
+      /* Clear reverse lookup after interface deletion */
+      im->session_index_by_sw_if_index[s->sw_if_index] = ~0;
+
       /* Recycle hw_if_index */
-      vec_add1 (im->free_ipoe_session_hw_if_indices, s->hw_if_index);
+      vec_add1 (im->free_ipoe_session_hw_if_indices, hw_if_index_to_recycle);
 
       /* Free session */
       pool_put (im->sessions, s);
