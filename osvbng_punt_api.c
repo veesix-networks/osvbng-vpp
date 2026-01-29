@@ -50,6 +50,12 @@ static void
       else
 	rv = osvbng_punt_disable_dhcpv4 (sw_if_index);
       break;
+    case OSVBNG_PUNT_PROTO_DHCPV6:
+      if (mp->enable)
+	rv = osvbng_punt_enable_dhcpv6 (sw_if_index, socket_path);
+      else
+	rv = osvbng_punt_disable_dhcpv6 (sw_if_index);
+      break;
     case OSVBNG_PUNT_PROTO_L2TP:
       if (mp->enable)
 	rv = osvbng_punt_enable_l2tp (sw_if_index, socket_path);
