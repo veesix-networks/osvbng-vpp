@@ -59,6 +59,28 @@ define osvbng_punt_stats_details
   u64 packets_dropped;
 };
 
+/** \brief Dump OSVBNG punt registrations
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+*/
+define osvbng_punt_registration_dump
+{
+  u32 client_index;
+  u32 context;
+};
+
+/** \brief OSVBNG punt registration details
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - interface index
+    @param protocol - protocol type (0=DHCPv4, 1=DHCPv6, 2=ARP, 3=PPPoE-Disc, 4=PPPoE-Sess, 5=IPv6-ND, 6=L2TP)
+*/
+define osvbng_punt_registration_details
+{
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  u8 protocol;
+};
+
 /*
  * Local Variables:
  * eval: (c-set-style "gnu")

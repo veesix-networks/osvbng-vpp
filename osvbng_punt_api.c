@@ -105,6 +105,37 @@ vl_api_osvbng_punt_stats_dump_t_handler (vl_api_osvbng_punt_stats_dump_t * mp)
     }
 }
 
+static void
+vl_api_osvbng_punt_registration_dump_t_handler (vl_api_osvbng_punt_registration_dump_t * mp)
+{
+  vl_api_osvbng_punt_registration_details_t *rmp;
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
+  vl_api_registration_t *reg;
+
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
+
+  for (int proto = 0; proto < OSVBNG_PUNT_N_PROTO; proto++)
+    {
+      u32 sw_if_index;
+      uword *p;
+
+      hash_foreach (sw_if_index, p, pm->enabled_interfaces[proto],
+      ({
+        rmp = vl_msg_api_alloc (sizeof (*rmp));
+        clib_memset (rmp, 0, sizeof (*rmp));
+        rmp->_vl_msg_id =
+          ntohs (VL_API_OSVBNG_PUNT_REGISTRATION_DETAILS + pm->msg_id_base);
+        rmp->context = mp->context;
+        rmp->sw_if_index = htonl (sw_if_index);
+        rmp->protocol = proto;
+
+        vl_api_send_msg (reg, (u8 *) rmp);
+      }));
+    }
+}
+
 #include <osvbng_punt/osvbng_punt.api.c>
 
 static clib_error_t *
