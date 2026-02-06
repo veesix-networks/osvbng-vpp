@@ -65,7 +65,6 @@ VLIB_NODE_FN (osvbng_egress_node)
   osvbng_punt_main_t *pm = &osvbng_punt_main;
   vnet_main_t *vnm = pm->vnet_main;
   osvbng_ring_header_t *ring;
-  osvbng_shm_header_t *shm_hdr;
   uint64_t head, tail;
   uint64_t mask;
   u32 n_tx = 0;
@@ -74,7 +73,6 @@ VLIB_NODE_FN (osvbng_egress_node)
     return 0;
 
   ring = pm->egress_ring;
-  shm_hdr = (osvbng_shm_header_t *) pm->shm;
   mask = pm->egress_ring_size - 1;
 
   /* Read head (what osvbng has written) */

@@ -88,38 +88,30 @@ _Static_assert (sizeof (osvbng_ring_header_t) == 64,
 
 /*
  * Punt descriptor - describes a packet punted from VPP to osvbng
- * 32 bytes for cache efficiency
+ * Layout matches natural alignment (like snort's daq_vpp_desc_t)
  */
 typedef struct
 {
   uint32_t data_offset;          /* Offset from shm base to frame data */
-  uint16_t data_length;          /* Frame length (including L2 header) */
   uint32_t sw_if_index;          /* VPP software interface index */
+  uint16_t data_length;          /* Frame length (including L2 header) */
   uint8_t protocol;              /* osvbng_punt_protocol_t */
   uint8_t flags;                 /* Reserved flags */
   uint16_t outer_vlan;           /* Outer VLAN tag (0 if none) */
   uint16_t inner_vlan;           /* Inner VLAN tag (0 if none) */
   uint64_t timestamp;            /* VPP timestamp (nanoseconds) */
-  uint8_t reserved[6];           /* Pad to 32 bytes */
-} __attribute__ ((packed)) osvbng_punt_desc_t;
-
-_Static_assert (sizeof (osvbng_punt_desc_t) == 32,
-		"punt descriptor must be 32 bytes");
+} osvbng_punt_desc_t;
 
 /*
  * Egress descriptor - describes a packet to transmit from osvbng
- * 32 bytes for cache efficiency
  */
 typedef struct
 {
   uint32_t data_offset;          /* Offset from shm base to frame data */
-  uint16_t data_length;          /* Frame length (including L2 header) */
   uint32_t sw_if_index;          /* Target VPP interface for TX */
-  uint8_t reserved[22];          /* Pad to 32 bytes */
-} __attribute__ ((packed)) osvbng_egress_desc_t;
-
-_Static_assert (sizeof (osvbng_egress_desc_t) == 32,
-		"egress descriptor must be 32 bytes");
+  uint16_t data_length;          /* Frame length (including L2 header) */
+  uint16_t reserved;             /* Alignment padding */
+} osvbng_egress_desc_t;
 
 /*
  * Helper macros for ring operations
