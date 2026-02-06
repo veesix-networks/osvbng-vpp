@@ -32,48 +32,40 @@ static void
   vl_api_osvbng_punt_enable_disable_reply_t *rmp;
   osvbng_punt_main_t *pm = &osvbng_punt_main;
   int rv;
-  u8 *socket_path = NULL;
   u32 sw_if_index = ntohl (mp->sw_if_index);
 
   VALIDATE_SW_IF_INDEX (mp);
-
-  if (mp->socket_path[0] != 0)
-    {
-      socket_path = format (0, "%s%c", mp->socket_path, 0);
-    }
 
   switch (mp->protocol)
     {
     case OSVBNG_PUNT_PROTO_DHCPV4:
       if (mp->enable)
-	rv = osvbng_punt_enable_dhcpv4 (sw_if_index, socket_path);
+	rv = osvbng_punt_enable_dhcpv4 (sw_if_index);
       else
 	rv = osvbng_punt_disable_dhcpv4 (sw_if_index);
       break;
     case OSVBNG_PUNT_PROTO_DHCPV6:
       if (mp->enable)
-	rv = osvbng_punt_enable_dhcpv6 (sw_if_index, socket_path);
+	rv = osvbng_punt_enable_dhcpv6 (sw_if_index);
       else
 	rv = osvbng_punt_disable_dhcpv6 (sw_if_index);
       break;
     case OSVBNG_PUNT_PROTO_L2TP:
       if (mp->enable)
-	rv = osvbng_punt_enable_l2tp (sw_if_index, socket_path);
+	rv = osvbng_punt_enable_l2tp (sw_if_index);
       else
 	rv = osvbng_punt_disable_l2tp (sw_if_index);
       break;
     case OSVBNG_PUNT_PROTO_IPV6_ND:
       if (mp->enable)
-	rv = osvbng_punt_enable_ipv6_nd (sw_if_index, socket_path);
+	rv = osvbng_punt_enable_ipv6_nd (sw_if_index);
       else
 	rv = osvbng_punt_disable_ipv6_nd (sw_if_index);
       break;
     default:
-      rv = osvbng_punt_enable_disable (sw_if_index, mp->protocol, socket_path, mp->enable);
+      rv = osvbng_punt_enable_disable (sw_if_index, mp->protocol, mp->enable);
       break;
     }
-
-  vec_free (socket_path);
 
   BAD_SW_IF_INDEX_LABEL;
   REPLY_MACRO (VL_API_OSVBNG_PUNT_ENABLE_DISABLE_REPLY);

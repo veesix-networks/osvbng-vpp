@@ -14,6 +14,8 @@
 add_vpp_plugin(osvbng_punt
   SOURCES
   osvbng_punt.c
+  osvbng_punt_shm.c
+  osvbng_punt_egress.c
   osvbng_punt_arp.c
   osvbng_punt_dhcp.c
   osvbng_punt_dhcp6.c

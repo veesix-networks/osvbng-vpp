@@ -111,7 +111,7 @@ osvbng_punt_arp_inline (vlib_main_t * vm,
 	      /* Reset buffer to ethernet header for full L2 frame punt */
 	      vlib_buffer_reset (b0);
 	      if (osvbng_punt_send_packet
-		  (b0, sw_if_index0, OSVBNG_PUNT_PROTO_ARP) == 0)
+		  (vm, b0, sw_if_index0, OSVBNG_PUNT_PROTO_ARP) == 0)
 		{
 		  pkts_punted++;
 		  punted = 1;

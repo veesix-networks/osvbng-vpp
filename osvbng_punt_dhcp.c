@@ -84,7 +84,7 @@ osvbng_punt_dhcp_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
 	  vlib_buffer_advance (b0, -rewind);
 
-	  osvbng_punt_send_packet (b0, sw_if_index0,
+	  osvbng_punt_send_packet (vm, b0, sw_if_index0,
 				   OSVBNG_PUNT_PROTO_DHCPV4);
 	  pm->packets_punted[OSVBNG_PUNT_PROTO_DHCPV4]++;
 

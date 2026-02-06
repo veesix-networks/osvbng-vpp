@@ -197,7 +197,7 @@ osvbng_punt_pppoe_sess_inline (vlib_main_t * vm,
 		    {
 		      /* Reset buffer to ethernet header for full L2 frame punt */
 		      vlib_buffer_reset (b0);
-		      if (osvbng_punt_send_packet (b0, sw_if_index0,
+		      if (osvbng_punt_send_packet (vm, b0, sw_if_index0,
 						   OSVBNG_PUNT_PROTO_PPPOE_SESSION)
 			  == 0)
 			{
@@ -240,7 +240,7 @@ osvbng_punt_pppoe_sess_inline (vlib_main_t * vm,
 		  if (p1)
 		    {
 		      vlib_buffer_reset (b1);
-		      if (osvbng_punt_send_packet (b1, sw_if_index1,
+		      if (osvbng_punt_send_packet (vm, b1, sw_if_index1,
 						   OSVBNG_PUNT_PROTO_PPPOE_SESSION)
 			  == 0)
 			{
@@ -338,7 +338,7 @@ osvbng_punt_pppoe_sess_inline (vlib_main_t * vm,
 		  if (p0)
 		    {
 		      vlib_buffer_reset (b0);
-		      if (osvbng_punt_send_packet (b0, sw_if_index0,
+		      if (osvbng_punt_send_packet (vm, b0, sw_if_index0,
 						   OSVBNG_PUNT_PROTO_PPPOE_SESSION)
 			  == 0)
 			{

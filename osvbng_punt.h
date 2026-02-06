@@ -16,13 +16,13 @@
 #ifndef __OSVBNG_PUNT_H__
 #define __OSVBNG_PUNT_H__
 
-#include <sys/un.h>
-
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vppinfra/hash.h>
 #include <vppinfra/error.h>
+
+#include <osvbng_punt/osvbng_punt_shared.h>
 
 typedef enum
 {
@@ -51,10 +51,46 @@ typedef struct
 
   uword *enabled_interfaces[OSVBNG_PUNT_N_PROTO];
 
-  u8 *socket_path;
-  int socket_fd;
+  /* Shared memory dataplane */
+  void *shm;                           /* mmap'd shared memory region */
+  int shm_fd;                          /* shared memory file descriptor */
+  u32 shm_size;                        /* total shm size in bytes */
+  u8 shm_initialized;                  /* 1 if shm is ready */
+  u8 client_connected;                 /* 1 if osvbng has connected */
 
-  struct sockaddr_un dest_addr;
+  /* Ring configuration */
+  u32 punt_ring_size;                  /* number of punt descriptors */
+  u32 egress_ring_size;                /* number of egress descriptors */
+  u32 data_slots;                      /* total data slots */
+  u32 slot_size;                       /* size of each data slot */
+  u32 punt_data_slots;                 /* data slots for punt */
+  u32 egress_data_slots;               /* data slots for egress */
+  u32 egress_data_offset;              /* offset to egress data region */
+
+  /* Ring pointers (into shm) */
+  osvbng_ring_header_t *punt_ring;     /* punt ring header */
+  osvbng_punt_desc_t *punt_descs;      /* punt descriptors array */
+  osvbng_ring_header_t *egress_ring;   /* egress ring header */
+  osvbng_egress_desc_t *egress_descs;  /* egress descriptors array */
+  u8 *data_region;                     /* data region start */
+
+  /* Eventfds for signaling */
+  int punt_eventfd;                    /* VPP writes, osvbng reads */
+  int egress_eventfd;                  /* osvbng writes, VPP reads */
+
+  /* Eventfd socket for passing fds to osvbng */
+  int eventfd_listen_fd;
+  u32 eventfd_listen_file_index;
+  u32 egress_file_index;
+
+  /* Egress state */
+  u64 egress_tail;                     /* local copy of egress tail */
+
+  /* Statistics */
+  u64 punt_ring_full;                  /* punt ring full drops */
+  u64 punt_truncated;                  /* packets truncated */
+  u64 egress_transmitted;              /* packets transmitted */
+  u64 egress_alloc_fail;               /* buffer allocation failures */
 
   u32 original_arp_node;
   u32 original_pppoe_disc_node;
@@ -63,6 +99,7 @@ typedef struct
   u64 packets_punted[OSVBNG_PUNT_N_PROTO];
   u64 packets_dropped[OSVBNG_PUNT_N_PROTO];
 
+  vlib_log_class_t log_class;
   vnet_main_t *vnet_main;
   vlib_main_t *vlib_main;
 } osvbng_punt_main_t;
@@ -79,20 +116,35 @@ extern vlib_node_registration_t osvbng_punt_ipv6_nd_node;
 
 int osvbng_punt_enable_disable (u32 sw_if_index,
 				osvbng_punt_protocol_t protocol,
-				u8 *socket_path, int enable_disable);
+				int enable_disable);
 
-int osvbng_punt_send_packet (vlib_buffer_t * b, u32 sw_if_index,
-			     osvbng_punt_protocol_t protocol);
-
-int osvbng_punt_socket_init (u8 * socket_path);
-
-int osvbng_punt_enable_dhcpv4 (u32 sw_if_index, u8 *socket_path);
+int osvbng_punt_enable_dhcpv4 (u32 sw_if_index);
 int osvbng_punt_disable_dhcpv4 (u32 sw_if_index);
-int osvbng_punt_enable_dhcpv6 (u32 sw_if_index, u8 *socket_path);
+int osvbng_punt_enable_dhcpv6 (u32 sw_if_index);
 int osvbng_punt_disable_dhcpv6 (u32 sw_if_index);
-int osvbng_punt_enable_l2tp (u32 sw_if_index, u8 *socket_path);
+int osvbng_punt_enable_l2tp (u32 sw_if_index);
 int osvbng_punt_disable_l2tp (u32 sw_if_index);
-int osvbng_punt_enable_ipv6_nd (u32 sw_if_index, u8 *socket_path);
+int osvbng_punt_enable_ipv6_nd (u32 sw_if_index);
 int osvbng_punt_disable_ipv6_nd (u32 sw_if_index);
+
+/* Shared memory functions */
+int osvbng_punt_shm_init (vlib_main_t *vm);
+int osvbng_punt_eventfd_socket_init (vlib_main_t *vm);
+int osvbng_punt_egress_init (vlib_main_t *vm);
+void osvbng_punt_shm_cleanup (void);
+int osvbng_punt_to_shm (vlib_main_t *vm, vlib_buffer_t *b, u32 sw_if_index,
+			osvbng_punt_protocol_t protocol, u16 outer_vlan,
+			u16 inner_vlan);
+
+/* Wrapper for punt nodes - calls osvbng_punt_to_shm with zero VLANs */
+static inline int
+osvbng_punt_send_packet (vlib_main_t *vm, vlib_buffer_t *b, u32 sw_if_index,
+			 osvbng_punt_protocol_t protocol)
+{
+  return osvbng_punt_to_shm (vm, b, sw_if_index, protocol, 0, 0);
+}
+
+/* Egress node registration */
+extern vlib_node_registration_t osvbng_egress_node;
 
 #endif /* __OSVBNG_PUNT_H__ */
