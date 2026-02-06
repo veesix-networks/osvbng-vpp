@@ -96,10 +96,11 @@ typedef struct
   uint16_t data_length;          /* Frame length (including L2 header) */
   uint32_t sw_if_index;          /* VPP software interface index */
   uint8_t protocol;              /* osvbng_punt_protocol_t */
+  uint8_t flags;                 /* Reserved flags */
   uint16_t outer_vlan;           /* Outer VLAN tag (0 if none) */
   uint16_t inner_vlan;           /* Inner VLAN tag (0 if none) */
   uint64_t timestamp;            /* VPP timestamp (nanoseconds) */
-  uint8_t reserved[5];           /* Pad to 32 bytes */
+  uint8_t reserved[6];           /* Pad to 32 bytes */
 } __attribute__ ((packed)) osvbng_punt_desc_t;
 
 _Static_assert (sizeof (osvbng_punt_desc_t) == 32,

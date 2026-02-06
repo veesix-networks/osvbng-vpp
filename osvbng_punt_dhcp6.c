@@ -151,14 +151,11 @@ VLIB_REGISTER_NODE (osvbng_punt_dhcp6_node) = {
 };
 
 int
-osvbng_punt_enable_dhcpv6 (u32 sw_if_index, u8 *socket_path)
+osvbng_punt_enable_dhcpv6 (u32 sw_if_index)
 {
   osvbng_punt_main_t *pm = &osvbng_punt_main;
   vlib_main_t *vm = pm->vlib_main;
   u32 node_index;
-
-  if (socket_path && !pm->socket_path)
-    osvbng_punt_socket_init (socket_path);
 
   node_index = osvbng_punt_dhcp6_node.index;
 

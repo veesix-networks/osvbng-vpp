@@ -23,6 +23,7 @@
 
 #include <vlib/vlib.h>
 #include <vlib/unix/unix.h>
+#include <vlib/file.h>
 #include <vnet/vnet.h>
 #include <vnet/ethernet/ethernet.h>
 #include <sys/eventfd.h>
@@ -122,13 +123,14 @@ VLIB_NODE_FN (osvbng_egress_node)
 
       /* Copy frame from shared memory */
       data_ptr = (u8 *) pm->shm + desc->data_offset;
-      if (PREDICT_FALSE (desc->data_length > VLIB_BUFFER_DATA_SIZE))
+      u32 max_len = vlib_buffer_get_default_data_size (vm);
+      if (PREDICT_FALSE (desc->data_length > max_len))
 	{
 	  vlib_log_warn (pm->log_class,
 			 "egress: frame too large (%d > %d), truncating",
-			 desc->data_length, VLIB_BUFFER_DATA_SIZE);
-	  clib_memcpy_fast (b->data, data_ptr, VLIB_BUFFER_DATA_SIZE);
-	  b->current_length = VLIB_BUFFER_DATA_SIZE;
+			 desc->data_length, max_len);
+	  clib_memcpy_fast (b->data, data_ptr, max_len);
+	  b->current_length = max_len;
 	}
       else
 	{

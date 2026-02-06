@@ -25,55 +25,6 @@
 
 osvbng_punt_main_t osvbng_punt_main;
 
-/* Protocol-specific enable/disable helpers */
-int
-osvbng_punt_enable_dhcpv4 (u32 sw_if_index)
-{
-  return osvbng_punt_enable_disable (sw_if_index, OSVBNG_PUNT_PROTO_DHCPV4, 1);
-}
-
-int
-osvbng_punt_disable_dhcpv4 (u32 sw_if_index)
-{
-  return osvbng_punt_enable_disable (sw_if_index, OSVBNG_PUNT_PROTO_DHCPV4, 0);
-}
-
-int
-osvbng_punt_enable_dhcpv6 (u32 sw_if_index)
-{
-  return osvbng_punt_enable_disable (sw_if_index, OSVBNG_PUNT_PROTO_DHCPV6, 1);
-}
-
-int
-osvbng_punt_disable_dhcpv6 (u32 sw_if_index)
-{
-  return osvbng_punt_enable_disable (sw_if_index, OSVBNG_PUNT_PROTO_DHCPV6, 0);
-}
-
-int
-osvbng_punt_enable_l2tp (u32 sw_if_index)
-{
-  return osvbng_punt_enable_disable (sw_if_index, OSVBNG_PUNT_PROTO_L2TP, 1);
-}
-
-int
-osvbng_punt_disable_l2tp (u32 sw_if_index)
-{
-  return osvbng_punt_enable_disable (sw_if_index, OSVBNG_PUNT_PROTO_L2TP, 0);
-}
-
-int
-osvbng_punt_enable_ipv6_nd (u32 sw_if_index)
-{
-  return osvbng_punt_enable_disable (sw_if_index, OSVBNG_PUNT_PROTO_IPV6_ND, 1);
-}
-
-int
-osvbng_punt_disable_ipv6_nd (u32 sw_if_index)
-{
-  return osvbng_punt_enable_disable (sw_if_index, OSVBNG_PUNT_PROTO_IPV6_ND, 0);
-}
-
 int
 osvbng_punt_enable_disable (u32 sw_if_index,
 			    osvbng_punt_protocol_t protocol,
