@@ -61,7 +61,7 @@ osvbng_punt_policer_configure (osvbng_punt_protocol_t protocol, f64 rate,
   return 0;
 }
 
-always_inline int
+int
 osvbng_punt_policer_allow (osvbng_punt_protocol_t protocol)
 {
   osvbng_punt_main_t *pm = &osvbng_punt_main;
