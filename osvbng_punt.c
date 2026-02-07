@@ -25,6 +25,69 @@
 
 osvbng_punt_main_t osvbng_punt_main;
 
+void
+osvbng_punt_policer_init (void)
+{
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
+
+  /* Default rates: packets per second, burst size */
+  f64 default_rates[] = { 1000, 1000, 500, 1000, 1000, 500, 500 };
+  u32 default_bursts[] = { 100, 100, 50, 100, 100, 50, 50 };
+
+  for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
+    {
+      pm->policers[i].rate = default_rates[i];
+      pm->policers[i].burst = default_bursts[i];
+      pm->policers[i].tokens = (f64) default_bursts[i];
+      pm->policers[i].last_update = vlib_time_now (pm->vlib_main);
+      pm->policers[i].policed = 0;
+    }
+}
+
+int
+osvbng_punt_policer_configure (osvbng_punt_protocol_t protocol, f64 rate,
+			       u32 burst)
+{
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
+
+  if (protocol >= OSVBNG_PUNT_N_PROTO)
+    return -1;
+
+  pm->policers[protocol].rate = rate;
+  pm->policers[protocol].burst = burst;
+  pm->policers[protocol].tokens = (f64) burst;
+  pm->policers[protocol].last_update = vlib_time_now (pm->vlib_main);
+
+  return 0;
+}
+
+always_inline int
+osvbng_punt_policer_allow (osvbng_punt_protocol_t protocol)
+{
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
+  osvbng_punt_policer_t *p = &pm->policers[protocol];
+
+  if (p->rate == 0)
+    return 1;
+
+  f64 now = vlib_time_now (pm->vlib_main);
+  f64 elapsed = now - p->last_update;
+  p->last_update = now;
+
+  p->tokens += elapsed * p->rate;
+  if (p->tokens > (f64) p->burst)
+    p->tokens = (f64) p->burst;
+
+  if (p->tokens >= 1.0)
+    {
+      p->tokens -= 1.0;
+      return 1;
+    }
+
+  p->policed++;
+  return 0;
+}
+
 int
 osvbng_punt_enable_disable (u32 sw_if_index,
 			    osvbng_punt_protocol_t protocol,
@@ -126,6 +189,8 @@ osvbng_punt_init (vlib_main_t *vm)
       pm->packets_punted[i] = 0;
       pm->packets_dropped[i] = 0;
     }
+
+  osvbng_punt_policer_init ();
 
   osvbng_punt_register_ethertypes (vm);
 
@@ -247,13 +312,17 @@ osvbng_punt_show_stats_command_fn (vlib_main_t *vm,
   vlib_cli_output (vm, "Client Connected: %s\n",
 		   pm->client_connected ? "yes" : "no");
 
-  vlib_cli_output (vm, "%-15s %15s %15s", "Protocol", "Punted", "Dropped");
-  vlib_cli_output (vm, "%-15s %15s %15s", "--------", "------", "-------");
+  vlib_cli_output (vm, "%-15s %15s %15s %15s %10s %10s", "Protocol", "Punted",
+		   "Dropped", "Policed", "Rate", "Burst");
+  vlib_cli_output (vm, "%-15s %15s %15s %15s %10s %10s", "--------", "------",
+		   "-------", "-------", "----", "-----");
 
   for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
     {
-      vlib_cli_output (vm, "%-15s %15llu %15llu", proto_names[i],
-		       pm->packets_punted[i], pm->packets_dropped[i]);
+      vlib_cli_output (vm, "%-15s %15llu %15llu %15llu %10.0f %10u",
+		       proto_names[i], pm->packets_punted[i],
+		       pm->packets_dropped[i], pm->policers[i].policed,
+		       pm->policers[i].rate, pm->policers[i].burst);
     }
 
   return 0;
@@ -263,6 +332,63 @@ VLIB_CLI_COMMAND (osvbng_punt_show_stats_command, static) = {
   .path = "show osvbng punt stats",
   .short_help = "show osvbng punt stats",
   .function = osvbng_punt_show_stats_command_fn,
+};
+
+static clib_error_t *
+osvbng_punt_policer_command_fn (vlib_main_t *vm, unformat_input_t *input,
+				vlib_cli_command_t *cmd)
+{
+  osvbng_punt_protocol_t protocol = OSVBNG_PUNT_N_PROTO;
+  f64 rate = 0;
+  u32 burst = 0;
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "protocol dhcpv4"))
+	protocol = OSVBNG_PUNT_PROTO_DHCPV4;
+      else if (unformat (input, "protocol dhcpv6"))
+	protocol = OSVBNG_PUNT_PROTO_DHCPV6;
+      else if (unformat (input, "protocol arp"))
+	protocol = OSVBNG_PUNT_PROTO_ARP;
+      else if (unformat (input, "protocol pppoe-disc"))
+	protocol = OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY;
+      else if (unformat (input, "protocol pppoe-sess"))
+	protocol = OSVBNG_PUNT_PROTO_PPPOE_SESSION;
+      else if (unformat (input, "protocol ipv6-nd"))
+	protocol = OSVBNG_PUNT_PROTO_IPV6_ND;
+      else if (unformat (input, "protocol l2tp"))
+	protocol = OSVBNG_PUNT_PROTO_L2TP;
+      else if (unformat (input, "rate %f", &rate))
+	;
+      else if (unformat (input, "burst %u", &burst))
+	;
+      else
+	break;
+    }
+
+  if (protocol == OSVBNG_PUNT_N_PROTO)
+    return clib_error_return (0, "Please specify a protocol");
+
+  if (rate == 0 && burst == 0)
+    return clib_error_return (0, "Please specify rate and/or burst");
+
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
+
+  if (rate > 0)
+    pm->policers[protocol].rate = rate;
+  if (burst > 0)
+    pm->policers[protocol].burst = burst;
+
+  pm->policers[protocol].tokens = (f64) pm->policers[protocol].burst;
+
+  return 0;
+}
+
+VLIB_CLI_COMMAND (osvbng_punt_policer_command, static) = {
+  .path = "osvbng punt policer",
+  .short_help =
+    "osvbng punt policer protocol <proto> rate <pps> burst <packets>",
+  .function = osvbng_punt_policer_command_fn,
 };
 
 static clib_error_t *

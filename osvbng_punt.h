@@ -36,6 +36,15 @@ typedef enum
   OSVBNG_PUNT_N_PROTO,
 } osvbng_punt_protocol_t;
 
+typedef struct
+{
+  f64 rate;
+  u32 burst;
+  f64 tokens;
+  f64 last_update;
+  u64 policed;
+} osvbng_punt_policer_t;
+
 typedef struct __attribute__ ((packed))
 {
   u32 sw_if_index;
@@ -99,6 +108,8 @@ typedef struct
   u64 packets_punted[OSVBNG_PUNT_N_PROTO];
   u64 packets_dropped[OSVBNG_PUNT_N_PROTO];
 
+  osvbng_punt_policer_t policers[OSVBNG_PUNT_N_PROTO];
+
   vlib_log_class_t log_class;
   vnet_main_t *vnet_main;
   vlib_main_t *vlib_main;
@@ -126,6 +137,12 @@ int osvbng_punt_enable_l2tp (u32 sw_if_index);
 int osvbng_punt_disable_l2tp (u32 sw_if_index);
 int osvbng_punt_enable_ipv6_nd (u32 sw_if_index);
 int osvbng_punt_disable_ipv6_nd (u32 sw_if_index);
+
+/* Control plane policing */
+void osvbng_punt_policer_init (void);
+int osvbng_punt_policer_configure (osvbng_punt_protocol_t protocol, f64 rate,
+				   u32 burst);
+int osvbng_punt_policer_allow (osvbng_punt_protocol_t protocol);
 
 /* Shared memory functions */
 int osvbng_punt_shm_init (vlib_main_t *vm);

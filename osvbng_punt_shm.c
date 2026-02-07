@@ -380,6 +380,11 @@ osvbng_punt_to_shm (vlib_main_t *vm, vlib_buffer_t *b, u32 sw_if_index,
       return -1;
     }
 
+  if (PREDICT_FALSE (!osvbng_punt_policer_allow (protocol)))
+    {
+      return -1;
+    }
+
   ring = pm->punt_ring;
   mask = pm->punt_ring_size - 1;
 

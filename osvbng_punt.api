@@ -48,6 +48,9 @@ define osvbng_punt_stats_dump
     @param protocol - protocol type
     @param packets_punted - number of packets successfully punted
     @param packets_dropped - number of packets dropped (socket error)
+    @param packets_policed - number of packets dropped by policer
+    @param policer_rate - current policer rate (pps)
+    @param policer_burst - current policer burst size
 */
 define osvbng_punt_stats_details
 {
@@ -55,6 +58,25 @@ define osvbng_punt_stats_details
   u8 protocol;
   u64 packets_punted;
   u64 packets_dropped;
+  u64 packets_policed;
+  f64 policer_rate;
+  u32 policer_burst;
+};
+
+/** \brief Configure OSVBNG punt policer
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param protocol - protocol type
+    @param rate - packets per second (0 to disable)
+    @param burst - burst size in packets
+*/
+autoreply define osvbng_punt_policer_configure
+{
+  u32 client_index;
+  u32 context;
+  u8 protocol;
+  f64 rate;
+  u32 burst;
 };
 
 /** \brief Dump OSVBNG punt registrations

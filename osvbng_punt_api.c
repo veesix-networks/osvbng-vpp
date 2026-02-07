@@ -92,9 +92,33 @@ vl_api_osvbng_punt_stats_dump_t_handler (vl_api_osvbng_punt_stats_dump_t * mp)
       rmp->protocol = i;
       rmp->packets_punted = clib_host_to_net_u64 (pm->packets_punted[i]);
       rmp->packets_dropped = clib_host_to_net_u64 (pm->packets_dropped[i]);
+      rmp->packets_policed = clib_host_to_net_u64 (pm->policers[i].policed);
+      rmp->policer_rate = pm->policers[i].rate;
+      rmp->policer_burst = htonl (pm->policers[i].burst);
 
       vl_api_send_msg (reg, (u8 *) rmp);
     }
+}
+
+static void
+  vl_api_osvbng_punt_policer_configure_t_handler
+  (vl_api_osvbng_punt_policer_configure_t * mp)
+{
+  vl_api_osvbng_punt_policer_configure_reply_t *rmp;
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
+  int rv = 0;
+
+  if (mp->protocol >= OSVBNG_PUNT_N_PROTO)
+    {
+      rv = VNET_API_ERROR_INVALID_VALUE;
+    }
+  else
+    {
+      rv = osvbng_punt_policer_configure (mp->protocol, mp->rate,
+					  ntohl (mp->burst));
+    }
+
+  REPLY_MACRO (VL_API_OSVBNG_PUNT_POLICER_CONFIGURE_REPLY);
 }
 
 static void
