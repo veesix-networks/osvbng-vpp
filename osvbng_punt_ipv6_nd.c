@@ -111,8 +111,19 @@ osvbng_punt_ipv6_nd_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
 	  if (p)
 	    {
-	      /* Reset buffer to ethernet header for full L2 frame punt */
-	      vlib_buffer_reset (b0);
+	      /* Buffer points to ICMPv6 header after ip6-icmp-input dispatch.
+	       * Rewind to include IPv6 + Ethernet headers for full L2 frame punt.
+	       * Cannot use vlib_buffer_reset() here — unlike ARP which sits right
+	       * after ethernet-input, ICMPv6 arrives after ip6-input has advanced
+	       * the buffer, so offset 0 lands in pre-data space, not Ethernet. */
+	      i16 rewind = sizeof (ip6_header_t) + sizeof (ethernet_header_t);
+
+	      if (b0->flags & VNET_BUFFER_F_VLAN_2_DEEP)
+		rewind += 2 * sizeof (ethernet_vlan_header_t);
+	      else if (b0->flags & VNET_BUFFER_F_VLAN_1_DEEP)
+		rewind += sizeof (ethernet_vlan_header_t);
+
+	      vlib_buffer_advance (b0, -rewind);
 	      if (osvbng_punt_send_packet
 		  (vm, b0, sw_if_index0, OSVBNG_PUNT_PROTO_IPV6_ND) == 0)
 		{
