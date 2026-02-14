@@ -414,6 +414,15 @@ int vnet_osvbng_pppoe_add_del_session
       vnet_set_interface_l3_output_node (vnm->vlib_main, sw_if_index,
                                          (u8 *) "tunnel-output");
 
+      /* Bind interface to VRF table so ip4-input/ip6-input resolve correct FIB */
+      if (a->decap_fib_index != 0)
+        {
+          u32 table_id =
+            fib_table_get_table_id (a->decap_fib_index, FIB_PROTOCOL_IP4);
+          ip_table_bind (FIB_PROTOCOL_IP4, sw_if_index, table_id);
+          ip_table_bind (FIB_PROTOCOL_IP6, sw_if_index, table_id);
+        }
+
       /* add reverse route for client ip */
       fib_table_entry_path_add (a->decap_fib_index, &pfx,
                                 pppoe_fib_src, FIB_ENTRY_FLAG_NONE,
