@@ -317,6 +317,15 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
   vec_validate_init_empty (im->session_index_by_sw_if_index, sw_if_index, ~0);
   im->session_index_by_sw_if_index[sw_if_index] = s - im->sessions;
 
+  /* Bind interface to VRF table so ip4-input/ip6-input resolve correct FIB */
+  if (s->decap_fib_index != 0)
+    {
+      u32 table_id =
+        fib_table_get_table_id (s->decap_fib_index, FIB_PROTOCOL_IP4);
+      ip_table_bind (FIB_PROTOCOL_IP4, sw_if_index, table_id);
+      ip_table_bind (FIB_PROTOCOL_IP6, sw_if_index, table_id);
+    }
+
   /* Add to lookup table */
   result.fields.sw_if_index = sw_if_index;
   result.fields.session_index = s - im->sessions;

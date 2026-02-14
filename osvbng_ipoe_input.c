@@ -153,7 +153,7 @@ VLIB_NODE_FN (ipoe_input_node)
                   s0 = pool_elt_at_index (im->sessions,
                                           result0.fields.session_index);
 
-                  /* Set RX interface to ipoe_session for counters */
+                  /* Set RX interface to ipoe_session for counters + FIB */
                   vnet_buffer (b0)->sw_if_index[VLIB_RX] = s0->sw_if_index;
 
                   /* Increment RX counters on ipoe_session */
@@ -163,17 +163,30 @@ VLIB_NODE_FN (ipoe_input_node)
                     vm->thread_index, s0->sw_if_index, 1,
                     vlib_buffer_length_in_chain (vm, b0));
 
+                  /* Strip L2 headers (Eth + VLANs) to expose IP header */
+                  {
+                    u32 l2_len = sizeof (ethernet_header_t);
+                    if (s0->outer_vlan != 0 && s0->inner_vlan != 0)
+                      l2_len += 2 * sizeof (ethernet_vlan_header_t);
+                    else if (s0->outer_vlan != 0 || s0->inner_vlan != 0)
+                      l2_len += sizeof (ethernet_vlan_header_t);
+                    vlib_buffer_advance (b0, l2_len);
+                  }
+
+                  /* Dispatch directly to IP input */
+                  next0 = (ethertype0 == ETHERNET_TYPE_IP4) ?
+                    IPOE_INPUT_NEXT_IP4_INPUT : IPOE_INPUT_NEXT_IP6_INPUT;
+
                   pkts_processed++;
                 }
               else
                 {
-                  /* No session - let packet continue (punt will handle DHCP) */
+                  /* No session - pass to ethernet-input (punt handles DHCP) */
                   pkts_no_session++;
                 }
             }
 
-          /* Continue to ethernet-input for normal processing */
-          next0 = IPOE_INPUT_NEXT_ETHERNET_INPUT;
+          /* Non-IP and unmatched packets: next0 stays ETHERNET_INPUT (default) */
 
           if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
                              (b0->flags & VLIB_BUFFER_IS_TRACED)))

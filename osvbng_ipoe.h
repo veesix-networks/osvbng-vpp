@@ -73,7 +73,9 @@ typedef struct
  */
 #define foreach_ipoe_input_next        \
 _(DROP, "error-drop")                   \
-_(ETHERNET_INPUT, "ethernet-input")
+_(ETHERNET_INPUT, "ethernet-input")     \
+_(IP4_INPUT, "ip4-input")               \
+_(IP6_INPUT, "ip6-input")
 
 typedef enum
 {
