@@ -226,6 +226,8 @@ VLIB_REGISTER_NODE (ipoe_input_node) = {
   .next_nodes = {
     [IPOE_INPUT_NEXT_DROP] = "error-drop",
     [IPOE_INPUT_NEXT_ETHERNET_INPUT] = "ethernet-input",
+    [IPOE_INPUT_NEXT_IP4_INPUT] = "ip4-input",
+    [IPOE_INPUT_NEXT_IP6_INPUT] = "ip6-input",
   },
 };
 
