@@ -29,7 +29,7 @@ typedef struct
 #define foreach_osvbng_punt_arp_error \
   _(PUNTED, "ARP packets punted")  \
   _(DROPPED, "ARP packets dropped (socket error)") \
-  _(NOT_ENABLED, "ARP packets dropped (punt not enabled)")
+  _(NOT_ENABLED, "ARP packets passed through (punt not enabled)")
 
 typedef enum
 {
@@ -48,6 +48,7 @@ static char *osvbng_punt_arp_error_strings[] = {
 typedef enum
 {
   OSVBNG_PUNT_ARP_NEXT_DROP,
+  OSVBNG_PUNT_ARP_NEXT_ARP_INPUT,
   OSVBNG_PUNT_ARP_N_NEXT,
 } osvbng_punt_arp_next_t;
 
@@ -123,6 +124,8 @@ osvbng_punt_arp_inline (vlib_main_t * vm,
 	    }
 	  else
 	    {
+	      /* Not enabled for punt — pass to VPP's default ARP handler */
+	      next0 = OSVBNG_PUNT_ARP_NEXT_ARP_INPUT;
 	      pkts_not_enabled++;
 	      not_enabled = 1;
 	    }
@@ -173,6 +176,7 @@ VLIB_REGISTER_NODE (osvbng_punt_arp_node) = {
   .n_next_nodes = OSVBNG_PUNT_ARP_N_NEXT,
   .next_nodes = {
     [OSVBNG_PUNT_ARP_NEXT_DROP] = "error-drop",
+    [OSVBNG_PUNT_ARP_NEXT_ARP_INPUT] = "arp-input",
   },
 };
 
