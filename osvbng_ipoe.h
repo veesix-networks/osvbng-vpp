@@ -61,6 +61,7 @@ typedef struct
 
   /* VRF */
   u32 decap_fib_index;
+  u32 decap_fib_index_ip6;
 
   /* VPP interface indices */
   u32 sw_if_index;              /* ipoe_session virtual interface */

@@ -10,6 +10,7 @@
 #include <vnet/fib/fib_table.h>
 #include <vnet/fib/fib_entry.h>
 #include <vnet/fib/fib_source.h>
+#include <vnet/mfib/mfib_table.h>
 #include <vnet/dpo/interface_tx_dpo.h>
 #include <vnet/adj/adj_midchain.h>
 #include <vnet/adj/adj.h>
@@ -273,8 +274,11 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
   s->decap_fib_index = a->decap_fib_index;
 
   /* Create virtual interface */
+  u8 is_recycled = 0;
   if (vec_len (im->free_ipoe_session_hw_if_indices) > 0)
     {
+      is_recycled = 1;
+
       /* Recycle old hw_if_index */
       hw_if_index = im->free_ipoe_session_hw_if_indices
         [vec_len (im->free_ipoe_session_hw_if_indices) - 1];
@@ -317,14 +321,51 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
   vec_validate_init_empty (im->session_index_by_sw_if_index, sw_if_index, ~0);
   im->session_index_by_sw_if_index[sw_if_index] = s - im->sessions;
 
-  /* Bind interface to VRF table so ip4-input/ip6-input resolve correct FIB */
-  if (s->decap_fib_index != 0)
-    {
-      u32 table_id =
+  /* Bind interface to correct IP table (VRF) */
+  {
+    u32 table_id = 0;
+    if (s->decap_fib_index != 0)
+      table_id =
         fib_table_get_table_id (s->decap_fib_index, FIB_PROTOCOL_IP4);
-      ip_table_bind (FIB_PROTOCOL_IP4, sw_if_index, table_id);
-      ip_table_bind (FIB_PROTOCOL_IP6, sw_if_index, table_id);
-    }
+
+    if (is_recycled)
+      {
+        /*
+         * vnet_delete_hw_interface cleared fib/mfib indices to ~0.
+         * ip_table_bind tries to fib_table_unlock the old binding which
+         * crashes on ~0. Directly restore the bindings and lock the tables.
+         */
+        u32 fib6 = fib_table_find (FIB_PROTOCOL_IP6, table_id);
+        u32 mfib4 = mfib_table_find (FIB_PROTOCOL_IP4, table_id);
+        u32 mfib6 = mfib_table_find (FIB_PROTOCOL_IP6, table_id);
+
+        ip4_main.fib_index_by_sw_if_index[sw_if_index] = s->decap_fib_index;
+        fib_table_lock (s->decap_fib_index, FIB_PROTOCOL_IP4,
+                        FIB_SOURCE_INTERFACE);
+
+        ip6_main.fib_index_by_sw_if_index[sw_if_index] = fib6;
+        fib_table_lock (fib6, FIB_PROTOCOL_IP6, FIB_SOURCE_INTERFACE);
+
+        ip4_main.mfib_index_by_sw_if_index[sw_if_index] = mfib4;
+        mfib_table_lock (mfib4, FIB_PROTOCOL_IP4, MFIB_SOURCE_DEFAULT_ROUTE);
+
+        ip6_main.mfib_index_by_sw_if_index[sw_if_index] = mfib6;
+        mfib_table_lock (mfib6, FIB_PROTOCOL_IP6, MFIB_SOURCE_DEFAULT_ROUTE);
+
+        s->decap_fib_index_ip6 = fib6;
+      }
+    else
+      {
+        /* New interface: VPP set default VRF bindings during creation. */
+        if (table_id != 0)
+          {
+            ip_table_bind (FIB_PROTOCOL_IP4, sw_if_index, table_id);
+            ip_table_bind (FIB_PROTOCOL_IP6, sw_if_index, table_id);
+          }
+        s->decap_fib_index_ip6 =
+          fib_table_find (FIB_PROTOCOL_IP6, table_id);
+      }
+  }
 
   /* Add to lookup table */
   result.fields.sw_if_index = sw_if_index;
@@ -429,7 +470,7 @@ vnet_ipoe_set_session_ipv6 (u32 sw_if_index, ip6_address_t *addr, u8 is_add)
         vnet_ipoe_set_session_ipv6 (sw_if_index, &s->client_ipv6, 0);
 
       fib_table_entry_path_add (
-        s->decap_fib_index, &pfx, ipoe_fib_src, FIB_ENTRY_FLAG_NONE,
+        s->decap_fib_index_ip6, &pfx, ipoe_fib_src, FIB_ENTRY_FLAG_NONE,
         DPO_PROTO_IP6, NULL, sw_if_index, ~0, 1, NULL, FIB_ROUTE_PATH_FLAG_NONE);
 
       s->client_ipv6 = *addr;
@@ -441,7 +482,7 @@ vnet_ipoe_set_session_ipv6 (u32 sw_if_index, ip6_address_t *addr, u8 is_add)
         return 0;
 
       fib_table_entry_path_remove (
-        s->decap_fib_index, &pfx, ipoe_fib_src, DPO_PROTO_IP6, NULL,
+        s->decap_fib_index_ip6, &pfx, ipoe_fib_src, DPO_PROTO_IP6, NULL,
         sw_if_index, ~0, 1, FIB_ROUTE_PATH_FLAG_NONE);
 
       clib_memset (&s->client_ipv6, 0, sizeof (s->client_ipv6));
@@ -490,7 +531,7 @@ vnet_ipoe_set_delegated_prefix (u32 sw_if_index, ip6_address_t *prefix,
                                         &s->pd_next_hop, 0);
 
       fib_table_entry_path_add (
-        s->decap_fib_index, &pfx, ipoe_fib_src, FIB_ENTRY_FLAG_NONE,
+        s->decap_fib_index_ip6, &pfx, ipoe_fib_src, FIB_ENTRY_FLAG_NONE,
         DPO_PROTO_IP6, NULL, sw_if_index, ~0, 1, NULL, FIB_ROUTE_PATH_FLAG_NONE);
 
       s->delegated_prefix = *prefix;
@@ -503,7 +544,7 @@ vnet_ipoe_set_delegated_prefix (u32 sw_if_index, ip6_address_t *prefix,
         return 0;
 
       fib_table_entry_path_remove (
-        s->decap_fib_index, &pfx, ipoe_fib_src, DPO_PROTO_IP6, NULL,
+        s->decap_fib_index_ip6, &pfx, ipoe_fib_src, DPO_PROTO_IP6, NULL,
         sw_if_index, ~0, 1, FIB_ROUTE_PATH_FLAG_NONE);
 
       clib_memset (&s->delegated_prefix, 0, sizeof (s->delegated_prefix));
