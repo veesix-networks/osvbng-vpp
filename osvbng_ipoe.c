@@ -364,7 +364,13 @@ vnet_ipoe_set_session_ipv4 (u32 sw_if_index, ip4_address_t *addr, u8 is_add)
 
   if (is_add)
     {
-      /* Add /32 route pointing to ipoe_session */
+      if (s->ipv4_bound &&
+          !clib_memcmp (&s->client_ipv4, addr, sizeof (ip4_address_t)))
+        return 0;
+
+      if (s->ipv4_bound)
+        vnet_ipoe_set_session_ipv4 (sw_if_index, &s->client_ipv4, 0);
+
       fib_table_entry_path_add (
         s->decap_fib_index, &pfx, ipoe_fib_src, FIB_ENTRY_FLAG_NONE,
         DPO_PROTO_IP4, NULL, sw_if_index, ~0, 1, NULL, FIB_ROUTE_PATH_FLAG_NONE);
@@ -374,7 +380,9 @@ vnet_ipoe_set_session_ipv4 (u32 sw_if_index, ip4_address_t *addr, u8 is_add)
     }
   else
     {
-      /* Remove route */
+      if (!s->ipv4_bound)
+        return 0;
+
       fib_table_entry_path_remove (
         s->decap_fib_index, &pfx, ipoe_fib_src, DPO_PROTO_IP4, NULL,
         sw_if_index, ~0, 1, FIB_ROUTE_PATH_FLAG_NONE);
@@ -413,7 +421,13 @@ vnet_ipoe_set_session_ipv6 (u32 sw_if_index, ip6_address_t *addr, u8 is_add)
 
   if (is_add)
     {
-      /* Add /128 route pointing to ipoe_session */
+      if (s->ipv6_bound &&
+          !clib_memcmp (&s->client_ipv6, addr, sizeof (ip6_address_t)))
+        return 0;
+
+      if (s->ipv6_bound)
+        vnet_ipoe_set_session_ipv6 (sw_if_index, &s->client_ipv6, 0);
+
       fib_table_entry_path_add (
         s->decap_fib_index, &pfx, ipoe_fib_src, FIB_ENTRY_FLAG_NONE,
         DPO_PROTO_IP6, NULL, sw_if_index, ~0, 1, NULL, FIB_ROUTE_PATH_FLAG_NONE);
@@ -423,7 +437,9 @@ vnet_ipoe_set_session_ipv6 (u32 sw_if_index, ip6_address_t *addr, u8 is_add)
     }
   else
     {
-      /* Remove route */
+      if (!s->ipv6_bound)
+        return 0;
+
       fib_table_entry_path_remove (
         s->decap_fib_index, &pfx, ipoe_fib_src, DPO_PROTO_IP6, NULL,
         sw_if_index, ~0, 1, FIB_ROUTE_PATH_FLAG_NONE);
@@ -464,7 +480,15 @@ vnet_ipoe_set_delegated_prefix (u32 sw_if_index, ip6_address_t *prefix,
 
   if (is_add)
     {
-      /* Add prefix route pointing to ipoe_session */
+      if (s->delegated_prefix_len == prefix_len &&
+          !clib_memcmp (&s->delegated_prefix, prefix, sizeof (ip6_address_t)))
+        return 0;
+
+      if (s->delegated_prefix_len)
+        vnet_ipoe_set_delegated_prefix (sw_if_index, &s->delegated_prefix,
+                                        s->delegated_prefix_len,
+                                        &s->pd_next_hop, 0);
+
       fib_table_entry_path_add (
         s->decap_fib_index, &pfx, ipoe_fib_src, FIB_ENTRY_FLAG_NONE,
         DPO_PROTO_IP6, NULL, sw_if_index, ~0, 1, NULL, FIB_ROUTE_PATH_FLAG_NONE);
@@ -475,7 +499,9 @@ vnet_ipoe_set_delegated_prefix (u32 sw_if_index, ip6_address_t *prefix,
     }
   else
     {
-      /* Remove route */
+      if (!s->delegated_prefix_len)
+        return 0;
+
       fib_table_entry_path_remove (
         s->decap_fib_index, &pfx, ipoe_fib_src, DPO_PROTO_IP6, NULL,
         sw_if_index, ~0, 1, FIB_ROUTE_PATH_FLAG_NONE);
