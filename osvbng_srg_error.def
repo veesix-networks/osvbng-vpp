@@ -1,0 +1,13 @@
+/* Copyright 2025 Veesix Networks Ltd
+ * Licensed under the GNU General Public License v3.0 or later.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+srg_error(NONE, "No error")
+srg_error(SRG_EXISTS, "SRG already exists")
+srg_error(SRG_NOT_FOUND, "SRG not found")
+srg_error(IF_ALREADY_ASSIGNED, "Interface already assigned to another SRG")
+srg_error(INVALID_INTERFACE, "Invalid interface index")
+srg_error(MAC_ADD_FAILED, "Failed to add virtual MAC to hardware interface")
+srg_error(MAC_DEL_FAILED, "Failed to remove virtual MAC from hardware interface")
+srg_error(BUFFER_ALLOC_FAILED, "Buffer allocation failed")

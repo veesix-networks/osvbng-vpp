@@ -1,0 +1,116 @@
+/* Copyright 2025 Veesix Networks Ltd
+ * Licensed under the GNU General Public License v3.0 or later.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * osvbng SRG Plugin API
+ * Subscriber Resilience Group dataplane management.
+ */
+
+option version = "1.0.0";
+import "vnet/interface_types.api";
+import "vnet/ethernet/ethernet_types.api";
+import "vnet/ip/ip_types.api";
+
+/** \brief GARP/NA entry for batch send
+    @param sw_if_index - sub-interface to send on
+    @param ip_address - IPv4 triggers GARP, IPv6 triggers unsolicited NA
+*/
+typedef osvbng_srg_garp_entry
+{
+  vl_api_interface_index_t sw_if_index;
+  vl_api_address_t ip_address;
+};
+
+/** \brief Per-SRG counters
+    @param srg_name - SRG name
+    @param garp_sent - gratuitous ARPs sent
+    @param na_sent - unsolicited NAs sent
+    @param mac_adds - virtual MAC add operations
+    @param mac_removes - virtual MAC remove operations
+*/
+typedef osvbng_srg_counters
+{
+  string srg_name[64];
+  u64 garp_sent;
+  u64 na_sent;
+  u64 mac_adds;
+  u64 mac_removes;
+};
+
+/** \brief Register or deregister an SRG with virtual MAC and sub-interface list
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add SRG if true, delete if false
+    @param srg_name - unique SRG name (up to 63 chars)
+    @param virtual_mac - virtual MAC address for this SRG
+    @param sw_if_count - number of sub-interfaces
+    @param sw_if_indices - sub-interface indices belonging to this SRG
+*/
+autoreply define osvbng_srg_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  string srg_name[64];
+  vl_api_mac_address_t virtual_mac;
+  u32 sw_if_count;
+  vl_api_interface_index_t sw_if_indices[sw_if_count];
+};
+
+/** \brief Set SRG state to ACTIVE or STANDBY
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param srg_name - SRG name
+    @param is_active - true for ACTIVE (add vMAC), false for STANDBY (remove vMAC)
+*/
+autoreply define osvbng_srg_set_state
+{
+  u32 client_index;
+  u32 context;
+  string srg_name[64];
+  bool is_active;
+};
+
+/** \brief Batch send GARP (IPv4) and unsolicited NA (IPv6) packets
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param srg_name - SRG name (for counter attribution)
+    @param count - number of entries
+    @param entries - array of (sw_if_index, ip_address) pairs
+*/
+autoreply define osvbng_srg_send_garp
+{
+  u32 client_index;
+  u32 context;
+  string srg_name[64];
+  u32 count;
+  vl_api_osvbng_srg_garp_entry_t entries[count];
+};
+
+/** \brief Dump per-SRG counters
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param srg_name - specific SRG name (empty string for all)
+*/
+define osvbng_srg_counter_dump
+{
+  u32 client_index;
+  u32 context;
+  string srg_name[64];
+};
+
+/** \brief Per-SRG counter details
+    @param context - sender context, to match reply w/ request
+    @param counters - counter values for one SRG
+*/
+define osvbng_srg_counter_details
+{
+  u32 context;
+  vl_api_osvbng_srg_counters_t counters;
+};
+
+/*
+ * Local Variables:
+ * eval: (c-set-style "gnu")
+ * End:
+ */
