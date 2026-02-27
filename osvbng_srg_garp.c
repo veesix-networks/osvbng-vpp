@@ -185,13 +185,12 @@ osvbng_srg_send_garp_batch (vlib_main_t *vm, u8 *srg_name,
   while (offset < count)
     {
       u32 batch = clib_min (count - offset, VLIB_FRAME_SIZE);
-      u32 *bi;
+      u32 *bi = 0;
       u32 n_alloc;
       vlib_frame_t *to_frame;
       u32 *to_next;
 
       vec_validate (bi, batch - 1);
-      _vec_len (bi) = batch;
 
       n_alloc = vlib_buffer_alloc (vm, bi, batch);
       if (PREDICT_FALSE (n_alloc == 0))
@@ -199,7 +198,7 @@ osvbng_srg_send_garp_batch (vlib_main_t *vm, u8 *srg_name,
 	  vlib_log_warn (sm->log_class,
 			 "GARP batch: buffer alloc failed, 0 of %u", batch);
 	  vec_free (bi);
-	  return VNET_API_ERROR_BUFFER_ALLOC_FAIL;
+	  return -1;
 	}
 
       if (PREDICT_FALSE (n_alloc < batch))
@@ -207,7 +206,6 @@ osvbng_srg_send_garp_batch (vlib_main_t *vm, u8 *srg_name,
 	  vlib_log_warn (sm->log_class,
 			 "GARP batch: partial alloc %u of %u", n_alloc, batch);
 	  batch = n_alloc;
-	  vec_set_len (bi, batch);
 	}
 
       to_frame =
