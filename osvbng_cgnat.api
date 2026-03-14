@@ -60,10 +60,6 @@ typedef osvbng_cgnat_inside_prefix
     @param port_reuse_timeout - seconds before port reuse (default 120)
     @param alg_bitmask - per-pool ALG enable flags (bit 0=FTP, 1=TFTP, 2=PPTP, 3=SIP, 4=RTSP, 5=DNS)
     @param timeouts - protocol-specific session timeouts
-    @param inside_prefix_count - number of inside prefixes
-    @param inside_prefixes - array of inside prefix + VRF
-    @param outside_address_count - number of outside addresses
-    @param outside_addresses - array of outside address ranges (as /32 or prefix)
 */
 autoreply define osvbng_cgnat_pool_add_del
 {
@@ -82,10 +78,40 @@ autoreply define osvbng_cgnat_pool_add_del
   u16 port_reuse_timeout;
   u8 alg_bitmask;
   vl_api_osvbng_cgnat_timeouts_t timeouts;
-  u32 inside_prefix_count;
-  vl_api_osvbng_cgnat_inside_prefix_t inside_prefixes[inside_prefix_count];
-  u32 outside_address_count;
-  vl_api_prefix_t outside_addresses[outside_address_count];
+};
+
+/** \brief Add or delete an inside prefix on a pool
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add prefix if true, delete if false
+    @param pool_id - pool identifier
+    @param prefix - inside prefix (e.g. 100.64.0.0/16)
+    @param vrf_id - VRF for this inside prefix
+*/
+autoreply define osvbng_cgnat_pool_add_del_inside_prefix
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  u32 pool_id;
+  vl_api_prefix_t prefix;
+  u32 vrf_id;
+};
+
+/** \brief Add or delete an outside address range on a pool
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add range if true, delete if false
+    @param pool_id - pool identifier
+    @param prefix - outside address range (e.g. 203.0.113.0/24)
+*/
+autoreply define osvbng_cgnat_pool_add_del_outside_address
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  u32 pool_id;
+  vl_api_prefix_t prefix;
 };
 
 /** \brief Set the outside FIB index for a pool

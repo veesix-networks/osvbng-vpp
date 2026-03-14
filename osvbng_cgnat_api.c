@@ -60,52 +60,98 @@ vl_api_osvbng_cgnat_pool_add_del_t_handler (
   if (cfg.timeouts[CGNAT_PROTO_ICMP] == 0)
     cfg.timeouts[CGNAT_PROTO_ICMP] = 60;
 
-  /* Build deterministic params from inside/outside prefixes */
-  if (mp->is_add && cfg.mode == CGNAT_POOL_MODE_DETERMINISTIC)
-    {
-      u32 in_count = ntohl (mp->inside_prefix_count);
-      u32 out_count = ntohl (mp->outside_address_count);
-
-      if (in_count > 0 && out_count > 0)
-	{
-	  /* For Phase 1: support single inside/outside prefix pair */
-	  ip4_address_t in_base;
-	  u8 in_len;
-	  ip4_address_decode (mp->inside_prefixes[0].prefix.address.un.ip4,
-			      &in_base);
-	  in_len = mp->inside_prefixes[0].prefix.len;
-
-	  ip4_address_t out_base;
-	  u8 out_len;
-	  ip4_address_decode (mp->outside_addresses[0].address.un.ip4,
-			      &out_base);
-	  out_len = mp->outside_addresses[0].len;
-
-	  cgnat_det_params_t dp;
-	  clib_memset (&dp, 0, sizeof (dp));
-	  dp.inside_base.as_u32 = in_base.as_u32;
-	  dp.inside_count = 1 << (32 - in_len);
-	  dp.outside_base.as_u32 = out_base.as_u32;
-	  dp.outside_count = 1 << (32 - out_len);
-	  dp.sharing_ratio = dp.inside_count / dp.outside_count;
-	  if (dp.sharing_ratio == 0)
-	    dp.sharing_ratio = 1;
-	  u32 usable_ports =
-	    cfg.port_range_end - cfg.port_range_start + 1;
-	  dp.ports_per_host = usable_ports / dp.sharing_ratio;
-	  dp.port_range_start = cfg.port_range_start;
-	  dp.port_range_end = cfg.port_range_end;
-
-	  vec_add1 (cfg.det_params, dp);
-	  cfg.n_det_params = 1;
-	}
-    }
-
   rv = cgnat_pool_add_del (&cfg, mp->is_add);
 
-  vec_free (cfg.det_params);
-
   REPLY_MACRO (VL_API_OSVBNG_CGNAT_POOL_ADD_DEL_REPLY);
+}
+
+static void
+vl_api_osvbng_cgnat_pool_add_del_inside_prefix_t_handler (
+  vl_api_osvbng_cgnat_pool_add_del_inside_prefix_t *mp)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  vl_api_osvbng_cgnat_pool_add_del_inside_prefix_reply_t *rmp;
+  int rv = 0;
+
+  u32 pool_id = ntohl (mp->pool_id);
+  uword *p = hash_get (cm->pool_by_id, pool_id);
+  if (!p)
+    {
+      rv = VNET_API_ERROR_NO_SUCH_ENTRY;
+      goto reply;
+    }
+
+  u32 pool_index = p[0];
+  cgnat_pool_t *pool = pool_elt_at_index (cm->pools, pool_index);
+
+  ip4_address_t base;
+  ip4_address_decode (mp->prefix.address.un.ip4, &base);
+  u8 len = mp->prefix.len;
+  u32 vrf_id = ntohl (mp->vrf_id);
+
+  if (mp->is_add && pool->mode == CGNAT_POOL_MODE_DETERMINISTIC)
+    {
+      cgnat_det_params_t dp;
+      clib_memset (&dp, 0, sizeof (dp));
+      dp.inside_base.as_u32 = base.as_u32;
+      dp.inside_count = 1 << (32 - len);
+      dp.port_range_start = pool->port_range_start;
+      dp.port_range_end = pool->port_range_end;
+
+      vec_add1 (pool->det_params, dp);
+      pool->n_det_params = vec_len (pool->det_params);
+    }
+
+  vlib_log_notice (cm->log_class, "pool %u inside prefix %U/%u vrf %u %s",
+		   pool_id, format_ip4_address, &base, len, vrf_id,
+		   mp->is_add ? "added" : "removed");
+
+reply:
+  REPLY_MACRO (VL_API_OSVBNG_CGNAT_POOL_ADD_DEL_INSIDE_PREFIX_REPLY);
+}
+
+static void
+vl_api_osvbng_cgnat_pool_add_del_outside_address_t_handler (
+  vl_api_osvbng_cgnat_pool_add_del_outside_address_t *mp)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  vl_api_osvbng_cgnat_pool_add_del_outside_address_reply_t *rmp;
+  int rv = 0;
+
+  u32 pool_id = ntohl (mp->pool_id);
+  uword *p = hash_get (cm->pool_by_id, pool_id);
+  if (!p)
+    {
+      rv = VNET_API_ERROR_NO_SUCH_ENTRY;
+      goto reply;
+    }
+
+  u32 pool_index = p[0];
+  cgnat_pool_t *pool = pool_elt_at_index (cm->pools, pool_index);
+
+  ip4_address_t base;
+  ip4_address_decode (mp->prefix.address.un.ip4, &base);
+  u8 len = mp->prefix.len;
+
+  if (mp->is_add && pool->mode == CGNAT_POOL_MODE_DETERMINISTIC &&
+      pool->n_det_params > 0)
+    {
+      cgnat_det_params_t *dp = &pool->det_params[pool->n_det_params - 1];
+      dp->outside_base.as_u32 = base.as_u32;
+      dp->outside_count = 1 << (32 - len);
+      dp->sharing_ratio = dp->inside_count / dp->outside_count;
+      if (dp->sharing_ratio == 0)
+	dp->sharing_ratio = 1;
+      u32 usable_ports = dp->port_range_end - dp->port_range_start + 1;
+      dp->ports_per_host = usable_ports / dp->sharing_ratio;
+    }
+
+  vlib_log_notice (cm->log_class, "pool %u outside address %U/%u %s",
+		   pool_id, format_ip4_address, &base, len,
+		   mp->is_add ? "added" : "removed");
+
+reply:
+  REPLY_MACRO (VL_API_OSVBNG_CGNAT_POOL_ADD_DEL_OUTSIDE_ADDRESS_REPLY);
 }
 
 static void
