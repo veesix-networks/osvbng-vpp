@@ -52,7 +52,6 @@ cgnat_out2in_ip4_checksum_update (ip4_header_t *ip, ip4_address_t old_addr,
 VLIB_NODE_FN (cgnat_out2in_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
-  cgnat_main_t *cm = &cgnat_main;
   u32 n_left_from, *from, *to_next;
   cgnat_out2in_next_t next_index;
   u32 pkts_translated = 0;

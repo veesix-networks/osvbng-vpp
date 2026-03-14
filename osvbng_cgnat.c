@@ -160,7 +160,7 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
 			       0.0);
 
       kv.value = mapping_index;
-      clib_bihash_add_del_8_8 (&cm->inside_lookup, &kv, 1, NULL);
+      clib_bihash_add_del_8_8 (&cm->inside_lookup, &kv, 1);
 
       if (enable_feature)
 	vnet_feature_enable_disable ("ip4-unicast", "cgnat-in2out",
@@ -193,7 +193,7 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
       /* TODO: walk and delete all sessions for this mapping */
 
       vec_free (m->port_reuse_timestamps);
-      clib_bihash_add_del_8_8 (&cm->inside_lookup, &kv, 0, NULL);
+      clib_bihash_add_del_8_8 (&cm->inside_lookup, &kv, 0);
       pool_put (cm->mappings, m);
 
       vlib_log_notice (cm->log_class,
@@ -268,7 +268,7 @@ cgnat_add_del_bypass (ip4_address_t *ip, u32 vrf_id, u8 is_add)
       bp->inside_fib_index = fib_index;
 
       kv.value = bp - cm->bypasses;
-      clib_bihash_add_del_8_8 (&cm->bypass_table, &kv, 1, NULL);
+      clib_bihash_add_del_8_8 (&cm->bypass_table, &kv, 1);
     }
   else
     {
@@ -276,7 +276,7 @@ cgnat_add_del_bypass (ip4_address_t *ip, u32 vrf_id, u8 is_add)
 	{
 	  u32 idx = (u32) kv.value;
 	  pool_put_index (cm->bypasses, idx);
-	  clib_bihash_add_del_8_8 (&cm->bypass_table, &kv, 0, NULL);
+	  clib_bihash_add_del_8_8 (&cm->bypass_table, &kv, 0);
 	}
     }
 
