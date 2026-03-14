@@ -122,7 +122,6 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
     return VNET_API_ERROR_NO_SUCH_ENTRY;
 
   u32 pool_index = p[0];
-  cgnat_pool_t *pool = pool_elt_at_index (cm->pools, pool_index);
 
   u32 fib_index =
     fib_table_find (FIB_PROTOCOL_IP4, inside_vrf_id);
