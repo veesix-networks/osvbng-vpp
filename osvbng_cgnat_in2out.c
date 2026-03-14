@@ -83,7 +83,7 @@ cgnat_is_hairpin (cgnat_main_t *cm, ip4_address_t *dst_ip)
   kv.key = key.as_u64;
 
   /* Quick check: is the destination also a mapped inside IP? */
-  if (clib_bihash_search_inline (&cm->inside_lookup, &kv) == 0)
+  if (clib_bihash_search_inline_8_8 (&cm->inside_lookup, &kv) == 0)
     return 1;
 
   return 0;
@@ -322,15 +322,15 @@ VLIB_NODE_FN (cgnat_in2out_node)
       vlib_put_next_frame (vm, node, next_index, n_left_to_next);
     }
 
-  vlib_node_increment_counter (vm, cgnat_in2out_node.index,
+  vlib_node_increment_counter (vm, node->node_index,
 			       CGNAT_ERROR_TRANSLATED, pkts_translated);
-  vlib_node_increment_counter (vm, cgnat_in2out_node.index,
+  vlib_node_increment_counter (vm, node->node_index,
 			       CGNAT_ERROR_BYPASSED, pkts_bypassed);
-  vlib_node_increment_counter (vm, cgnat_in2out_node.index,
+  vlib_node_increment_counter (vm, node->node_index,
 			       CGNAT_ERROR_SESSION_CREATE, pkts_created);
-  vlib_node_increment_counter (vm, cgnat_in2out_node.index, CGNAT_ERROR_DROP,
+  vlib_node_increment_counter (vm, node->node_index, CGNAT_ERROR_DROP,
 			       pkts_dropped);
-  vlib_node_increment_counter (vm, cgnat_in2out_node.index,
+  vlib_node_increment_counter (vm, node->node_index,
 			       CGNAT_ERROR_HAIRPINNED, pkts_hairpinned);
 
   return frame->n_vectors;

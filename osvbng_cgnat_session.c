@@ -50,7 +50,7 @@ cgnat_session_lookup_in2out (ip4_address_t *src_ip, ip4_address_t *dst_ip,
 			  fib_index);
   clib_memcpy (&kv.key, &key, 16);
 
-  if (clib_bihash_search_inline (&cm->session_table_in2out, &kv) == 0)
+  if (clib_bihash_search_inline_16_8 (&cm->session_table_in2out, &kv) == 0)
     return pool_elt_at_index (cm->sessions, (u32) kv.value);
 
   return NULL;
@@ -69,7 +69,7 @@ cgnat_session_lookup_out2in (ip4_address_t *dst_ip, ip4_address_t *src_ip,
 			  fib_index);
   clib_memcpy (&kv.key, &key, 16);
 
-  if (clib_bihash_search_inline (&cm->session_table_out2in, &kv) == 0)
+  if (clib_bihash_search_inline_16_8 (&cm->session_table_out2in, &kv) == 0)
     return pool_elt_at_index (cm->sessions, (u32) kv.value);
 
   return NULL;
@@ -180,7 +180,7 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
 			    mapping->inside_fib_index);
     clib_memcpy (&kv.key, &key, 16);
     kv.value = session_index;
-    clib_bihash_add_del_inline (&cm->session_table_in2out, &kv, 1, NULL);
+    clib_bihash_add_del_16_8 (&cm->session_table_in2out, &kv, 1, NULL);
   }
 
   /* Install out2in entry: (outside_ip, remote_ip, outside_port, remote_port) */
@@ -192,7 +192,7 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
 			    outside_port, remote_port, proto, out_fib);
     clib_memcpy (&kv.key, &key, 16);
     kv.value = session_index;
-    clib_bihash_add_del_inline (&cm->session_table_out2in, &kv, 1, NULL);
+    clib_bihash_add_del_16_8 (&cm->session_table_out2in, &kv, 1, NULL);
   }
 
   mapping->session_count++;
@@ -215,7 +215,7 @@ cgnat_session_delete (cgnat_session_t *s)
 			    s->inside_port, s->remote_port, s->proto,
 			    s->inside_fib_index);
     clib_memcpy (&kv.key, &key, 16);
-    clib_bihash_add_del_inline (&cm->session_table_in2out, &kv, 0, NULL);
+    clib_bihash_add_del_16_8 (&cm->session_table_in2out, &kv, 0, NULL);
   }
 
   /* Remove out2in entry */
@@ -227,7 +227,7 @@ cgnat_session_delete (cgnat_session_t *s)
 			    s->outside_port, s->remote_port, s->proto,
 			    out_fib);
     clib_memcpy (&kv.key, &key, 16);
-    clib_bihash_add_del_inline (&cm->session_table_out2in, &kv, 0, NULL);
+    clib_bihash_add_del_16_8 (&cm->session_table_out2in, &kv, 0, NULL);
   }
 
   cgnat_port_free (m, s->outside_port);

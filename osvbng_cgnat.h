@@ -12,6 +12,7 @@
 #include <vnet/plugin/plugin.h>
 #include <vppinfra/error.h>
 #include <vppinfra/hash.h>
+#include <vppinfra/bihash_8_8.h>
 #include <vppinfra/bihash_16_8.h>
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
@@ -59,10 +60,6 @@ typedef enum
 
 extern char *cgnat_error_strings[];
 
-/*
- * NAT session entry — one per translated flow.
- * Indexed via bihash by 5-tuple from both directions.
- */
 typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
@@ -87,10 +84,6 @@ typedef struct
   u64 total_bytes;
 } cgnat_session_t;
 
-/*
- * Session lookup key: (src_ip, dst_ip, src_port, dst_port, proto, fib_index) = 16 bytes
- * Packed into two u64s for bihash_16_8.
- */
 typedef struct
 {
   union
@@ -111,10 +104,6 @@ typedef struct
 
 STATIC_ASSERT_SIZEOF (cgnat_session_key_t, 16);
 
-/*
- * Per-subscriber mapping — programmed by control plane (PBA mode)
- * or computed algorithmically (deterministic mode).
- */
 typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
@@ -134,14 +123,6 @@ typedef struct
   u64 *port_reuse_timestamps;
 } cgnat_mapping_t;
 
-/*
- * Per-subscriber session counter for limit enforcement.
- * Keyed by mapping_index.
- */
-
-/*
- * Bypass entry — static IP subscribers that skip NAT.
- */
 typedef struct
 {
   ip4_address_t inside_ip;
@@ -149,9 +130,6 @@ typedef struct
   u32 inside_fib_index;
 } cgnat_bypass_t;
 
-/*
- * Bypass lookup key: (inside_ip, fib_index) packed into u64
- */
 typedef struct
 {
   union
@@ -165,9 +143,6 @@ typedef struct
   };
 } cgnat_bypass_key_t;
 
-/*
- * Deterministic mapping parameters for a pool.
- */
 typedef struct
 {
   ip4_address_t inside_base;
@@ -180,9 +155,6 @@ typedef struct
   u16 port_range_end;
 } cgnat_det_params_t;
 
-/*
- * CGNAT pool — contains all state for one NAT pool.
- */
 typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
@@ -209,10 +181,6 @@ typedef struct
   u32 n_det_params;
 } cgnat_pool_t;
 
-/*
- * Inside lookup key for mapping table:
- * (inside_ip, fib_index) → mapping_index
- */
 typedef struct
 {
   union
@@ -225,11 +193,6 @@ typedef struct
     u64 as_u64;
   };
 } cgnat_inside_key_t;
-
-/*
- * Outside lookup key for out2in:
- * (outside_ip, outside_port) → session_index
- */
 
 typedef enum
 {
@@ -246,9 +209,6 @@ typedef enum
   CGNAT_OUT2IN_N_NEXT,
 } cgnat_out2in_next_t;
 
-/*
- * Plugin main structure
- */
 typedef struct
 {
   cgnat_pool_t *pools;
@@ -276,7 +236,6 @@ typedef struct
 
 extern cgnat_main_t cgnat_main;
 
-/* osvbng_cgnat.c */
 int cgnat_pool_add_del (cgnat_pool_t *cfg, u8 is_add);
 int cgnat_set_outside_fib (u32 pool_id, u32 fib_index);
 int cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
@@ -291,7 +250,6 @@ int cgnat_add_del_bypass (ip4_address_t *ip, u32 vrf_id, u8 is_add);
 int cgnat_pool_update (u32 pool_id, u32 max_sessions, u8 alg_bitmask,
 		       u32 *timeouts);
 
-/* osvbng_cgnat_session.c */
 cgnat_session_t *cgnat_session_create (cgnat_mapping_t *mapping,
 				       ip4_address_t *remote_ip,
 				       u16 remote_port, u8 proto,
@@ -310,28 +268,23 @@ void cgnat_port_free (cgnat_mapping_t *m, u16 port);
 void cgnat_session_expire_walk (vlib_main_t *vm, f64 now);
 void cgnat_session_table_init (void);
 
-/* Mapping lookup */
 always_inline cgnat_mapping_t *
 cgnat_mapping_lookup (ip4_address_t *inside_ip, u32 fib_index)
 {
   cgnat_main_t *cm = &cgnat_main;
-  clib_bihash_kv_8_8_t kv, value;
+  clib_bihash_kv_8_8_t kv;
   cgnat_inside_key_t key;
 
   key.ip.as_u32 = inside_ip->as_u32;
   key.fib_index = fib_index;
   kv.key = key.as_u64;
+  kv.value = ~0ULL;
 
-  if (clib_bihash_search_inline (&cm->inside_lookup, &kv) == 0)
-    {
-      value.key = kv.key;
-      value.value = kv.value;
-      return pool_elt_at_index (cm->mappings, (u32) value.value);
-    }
+  if (clib_bihash_search_inline_8_8 (&cm->inside_lookup, &kv) == 0)
+    return pool_elt_at_index (cm->mappings, (u32) kv.value);
   return NULL;
 }
 
-/* Bypass lookup */
 always_inline int
 cgnat_bypass_check (ip4_address_t *inside_ip, u32 fib_index)
 {
@@ -342,11 +295,11 @@ cgnat_bypass_check (ip4_address_t *inside_ip, u32 fib_index)
   key.ip.as_u32 = inside_ip->as_u32;
   key.fib_index = fib_index;
   kv.key = key.as_u64;
+  kv.value = 0;
 
-  return (clib_bihash_search_inline (&cm->bypass_table, &kv) == 0);
+  return (clib_bihash_search_inline_8_8 (&cm->bypass_table, &kv) == 0);
 }
 
-/* Protocol mapping */
 always_inline u8
 cgnat_proto_from_ip (u8 ip_proto)
 {
@@ -371,7 +324,6 @@ cgnat_session_timeout (cgnat_pool_t *pool, u8 proto)
   return pool->timeouts[CGNAT_PROTO_UDP];
 }
 
-/* Deterministic mode: forward mapping */
 always_inline int
 cgnat_det_forward (cgnat_det_params_t *dp, ip4_address_t *inside_ip,
 		   ip4_address_t *outside_ip_out, u16 *port_start_out,
@@ -396,7 +348,6 @@ cgnat_det_forward (cgnat_det_params_t *dp, ip4_address_t *inside_ip,
   return 0;
 }
 
-/* Deterministic mode: reverse mapping */
 always_inline int
 cgnat_det_reverse (cgnat_det_params_t *dp, ip4_address_t *outside_ip,
 		   u16 port, ip4_address_t *inside_ip_out)
@@ -423,7 +374,6 @@ cgnat_det_reverse (cgnat_det_params_t *dp, ip4_address_t *outside_ip,
   return 0;
 }
 
-/* Check if an outside_ip belongs to any pool's outside range */
 always_inline cgnat_pool_t *
 cgnat_pool_for_outside_ip (ip4_address_t *outside_ip)
 {

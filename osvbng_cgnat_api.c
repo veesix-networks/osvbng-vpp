@@ -32,9 +32,9 @@ vl_api_osvbng_cgnat_pool_add_del_t_handler (
   clib_memset (&cfg, 0, sizeof (cfg));
 
   cfg.pool_id = ntohl (mp->pool_id);
-  cfg.mode = mp->mode;
-  cfg.address_pooling = mp->address_pooling;
-  cfg.filtering = mp->filtering;
+  cfg.mode = (cgnat_pool_mode_t) mp->mode;
+  cfg.address_pooling = (cgnat_address_pooling_t) mp->address_pooling;
+  cfg.filtering = (cgnat_filtering_t) mp->filtering;
   cfg.block_size = ntohs (mp->block_size);
   cfg.max_blocks_per_sub = mp->max_blocks_per_sub;
   cfg.max_sessions_per_sub = ntohl (mp->max_sessions_per_sub);

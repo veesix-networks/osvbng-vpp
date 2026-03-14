@@ -223,9 +223,9 @@ VLIB_NODE_FN (cgnat_out2in_node)
       vlib_put_next_frame (vm, node, next_index, n_left_to_next);
     }
 
-  vlib_node_increment_counter (vm, cgnat_out2in_node.index,
+  vlib_node_increment_counter (vm, node->node_index,
 			       CGNAT_ERROR_TRANSLATED, pkts_translated);
-  vlib_node_increment_counter (vm, cgnat_out2in_node.index, CGNAT_ERROR_DROP,
+  vlib_node_increment_counter (vm, node->node_index, CGNAT_ERROR_DROP,
 			       pkts_dropped);
 
   return frame->n_vectors;
