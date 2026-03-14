@@ -1,0 +1,17 @@
+/* Copyright 2026 Veesix Networks Ltd
+ * Licensed under the GNU General Public License v3.0 or later.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+cgnat_error(NONE, "No error")
+cgnat_error(TRANSLATED, "Packets translated")
+cgnat_error(NO_MAPPING, "No subscriber mapping found")
+cgnat_error(NO_SESSION, "Session lookup failed (out2in)")
+cgnat_error(SESSION_CREATE, "New session created")
+cgnat_error(PORT_EXHAUSTED, "Port block exhausted")
+cgnat_error(SESSION_LIMIT, "Per-subscriber session limit reached")
+cgnat_error(BYPASSED, "Packets bypassed (static IP)")
+cgnat_error(HAIRPINNED, "Packets hairpinned")
+cgnat_error(DROP, "Packets dropped")
+cgnat_error(NO_POOL, "No pool configured")
+cgnat_error(COOLDOWN, "Port in reuse cooldown")

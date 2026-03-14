@@ -1,0 +1,254 @@
+/* Copyright 2026 Veesix Networks Ltd
+ * Licensed under the GNU General Public License v3.0 or later.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * osvbng CGNAT Plugin API
+ * Carrier-Grade NAT with PBA and Deterministic modes.
+ */
+
+option version = "1.0.0";
+import "vnet/interface_types.api";
+import "vnet/ip/ip_types.api";
+
+enum osvbng_cgnat_pool_mode : u8
+{
+  OSVBNG_CGNAT_POOL_MODE_PBA = 0,
+  OSVBNG_CGNAT_POOL_MODE_DETERMINISTIC = 1,
+};
+
+enum osvbng_cgnat_address_pooling : u8
+{
+  OSVBNG_CGNAT_ADDRESS_POOLING_PAIRED = 0,
+  OSVBNG_CGNAT_ADDRESS_POOLING_ARBITRARY = 1,
+};
+
+enum osvbng_cgnat_filtering : u8
+{
+  OSVBNG_CGNAT_FILTERING_ENDPOINT_INDEPENDENT = 0,
+  OSVBNG_CGNAT_FILTERING_ENDPOINT_DEPENDENT = 1,
+};
+
+/** \brief Session timeout configuration */
+typedef osvbng_cgnat_timeouts
+{
+  u32 tcp_established;
+  u32 tcp_transitory;
+  u32 udp;
+  u32 icmp;
+};
+
+/** \brief Per-pool inside prefix */
+typedef osvbng_cgnat_inside_prefix
+{
+  vl_api_prefix_t prefix;
+  u32 vrf_id;
+};
+
+/** \brief Add or delete a CGNAT pool
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add pool if true, delete if false
+    @param pool_id - unique pool identifier (assigned by control plane)
+    @param mode - PBA or deterministic
+    @param address_pooling - paired or arbitrary
+    @param filtering - endpoint-independent or endpoint-dependent
+    @param block_size - ports per block (PBA mode)
+    @param max_blocks_per_sub - max port blocks per subscriber (PBA mode)
+    @param max_sessions_per_sub - max concurrent sessions per subscriber
+    @param port_range_start - first usable port (default 1024)
+    @param port_range_end - last usable port (default 65535)
+    @param port_reuse_timeout - seconds before port reuse (default 120)
+    @param alg_bitmask - per-pool ALG enable flags (bit 0=FTP, 1=TFTP, 2=PPTP, 3=SIP, 4=RTSP, 5=DNS)
+    @param timeouts - protocol-specific session timeouts
+    @param inside_prefix_count - number of inside prefixes
+    @param inside_prefixes - array of inside prefix + VRF
+    @param outside_address_count - number of outside addresses
+    @param outside_addresses - array of outside address ranges (as /32 or prefix)
+*/
+autoreply define osvbng_cgnat_pool_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  u32 pool_id;
+  vl_api_osvbng_cgnat_pool_mode_t mode;
+  vl_api_osvbng_cgnat_address_pooling_t address_pooling;
+  vl_api_osvbng_cgnat_filtering_t filtering;
+  u16 block_size;
+  u8 max_blocks_per_sub;
+  u32 max_sessions_per_sub;
+  u16 port_range_start;
+  u16 port_range_end;
+  u16 port_reuse_timeout;
+  u8 alg_bitmask;
+  vl_api_osvbng_cgnat_timeouts_t timeouts;
+  u32 inside_prefix_count;
+  vl_api_osvbng_cgnat_inside_prefix_t inside_prefixes[inside_prefix_count];
+  u32 outside_address_count;
+  vl_api_prefix_t outside_addresses[outside_address_count];
+};
+
+/** \brief Set the outside FIB index for a pool
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param pool_id - pool identifier
+    @param fib_index - precomputed VPP FIB index for outside routing
+*/
+autoreply define osvbng_cgnat_set_outside_fib
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+  u32 fib_index;
+};
+
+/** \brief Add or delete a subscriber mapping (PBA mode)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add mapping if true, delete if false
+    @param pool_id - pool this mapping belongs to
+    @param sw_if_index - subscriber's per-session P2P interface
+    @param inside_ip - subscriber inside IP
+    @param inside_vrf_id - subscriber inside VRF
+    @param outside_ip - allocated outside IP
+    @param port_block_start - first port in allocated block
+    @param port_block_end - last port in allocated block
+    @param enable_feature - also enable cgnat-in2out feature on sw_if_index
+*/
+autoreply define osvbng_cgnat_add_del_subscriber_mapping
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  u32 pool_id;
+  vl_api_interface_index_t sw_if_index;
+  vl_api_ip4_address_t inside_ip;
+  u32 inside_vrf_id;
+  vl_api_ip4_address_t outside_ip;
+  u16 port_block_start;
+  u16 port_block_end;
+  bool enable_feature;
+};
+
+/** \brief Bulk add subscriber mappings (for restart recovery)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param pool_id - pool these mappings belong to
+    @param count - number of mappings
+*/
+typedef osvbng_cgnat_bulk_mapping_entry
+{
+  vl_api_interface_index_t sw_if_index;
+  vl_api_ip4_address_t inside_ip;
+  u32 inside_vrf_id;
+  vl_api_ip4_address_t outside_ip;
+  u16 port_block_start;
+  u16 port_block_end;
+  bool enable_feature;
+};
+
+autoreply define osvbng_cgnat_add_subscriber_mapping_bulk
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+  u32 count;
+  vl_api_osvbng_cgnat_bulk_mapping_entry_t mappings[count];
+};
+
+/** \brief Enable CGNAT on a subscriber session (deterministic mode)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_enable - enable or disable
+    @param pool_id - pool to use
+    @param sw_if_index - subscriber's per-session P2P interface
+*/
+autoreply define osvbng_cgnat_enable_on_session
+{
+  u32 client_index;
+  u32 context;
+  bool is_enable;
+  u32 pool_id;
+  vl_api_interface_index_t sw_if_index;
+};
+
+/** \brief Enable/disable cgnat-out2in on an outside interface
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_enable - enable or disable
+    @param sw_if_index - outside interface
+    @param pool_id - pool to associate
+*/
+autoreply define osvbng_cgnat_set_outside_interface
+{
+  u32 client_index;
+  u32 context;
+  bool is_enable;
+  vl_api_interface_index_t sw_if_index;
+  u32 pool_id;
+};
+
+/** \brief Add or delete a bypass entry (static IP subscriber)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add bypass if true, delete if false
+    @param inside_ip - subscriber IP to bypass
+    @param inside_vrf_id - subscriber VRF
+*/
+autoreply define osvbng_cgnat_add_del_bypass
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  vl_api_ip4_address_t inside_ip;
+  u32 inside_vrf_id;
+};
+
+/** \brief Update pool parameters at runtime
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param pool_id - pool to update
+    @param max_sessions_per_sub - new session limit
+    @param alg_bitmask - new ALG flags
+    @param timeouts - new timeout values
+*/
+autoreply define osvbng_cgnat_pool_update
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+  u32 max_sessions_per_sub;
+  u8 alg_bitmask;
+  vl_api_osvbng_cgnat_timeouts_t timeouts;
+};
+
+/** \brief Dump subscriber mappings
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param pool_id - pool to dump (~0 for all)
+*/
+define osvbng_cgnat_subscriber_mapping_dump
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+};
+
+define osvbng_cgnat_subscriber_mapping_details
+{
+  u32 context;
+  u32 pool_id;
+  vl_api_interface_index_t sw_if_index;
+  vl_api_ip4_address_t inside_ip;
+  u32 inside_vrf_id;
+  vl_api_ip4_address_t outside_ip;
+  u16 port_block_start;
+  u16 port_block_end;
+  u32 active_sessions;
+};
+
+/*
+ * Local Variables:
+ * eval: (c-set-style "gnu")
+ * End:
+ */
