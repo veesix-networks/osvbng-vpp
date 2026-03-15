@@ -252,10 +252,11 @@ vl_api_osvbng_cgnat_add_del_bypass_t_handler (
   vl_api_osvbng_cgnat_add_del_bypass_reply_t *rmp;
   int rv = 0;
 
-  ip4_address_t ip;
-  ip4_address_decode (mp->inside_ip, &ip);
+  fib_prefix_t pfx;
+  clib_memset (&pfx, 0, sizeof (pfx));
+  ip_prefix_decode (&mp->prefix, &pfx);
 
-  rv = cgnat_add_del_bypass (&ip, ntohl (mp->inside_vrf_id), mp->is_add);
+  rv = cgnat_add_del_bypass (&pfx, ntohl (mp->inside_vrf_id), mp->is_add);
 
   REPLY_MACRO (VL_API_OSVBNG_CGNAT_ADD_DEL_BYPASS_REPLY);
 }

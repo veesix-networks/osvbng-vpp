@@ -245,43 +245,50 @@ cgnat_set_outside_interface (u32 sw_if_index, u32 pool_id, u8 is_enable)
 }
 
 int
-cgnat_add_del_bypass (ip4_address_t *ip, u32 vrf_id, u8 is_add)
+cgnat_add_del_bypass (fib_prefix_t *prefix, u32 vrf_id, u8 is_add)
 {
   cgnat_main_t *cm = &cgnat_main;
   u32 fib_index = fib_table_find (FIB_PROTOCOL_IP4, vrf_id);
   if (fib_index == ~0)
     fib_index = 0;
 
-  clib_bihash_kv_8_8_t kv;
-  cgnat_bypass_key_t key;
-  key.ip.as_u32 = ip->as_u32;
-  key.fib_index = fib_index;
-  kv.key = key.as_u64;
-
   if (is_add)
     {
-      cgnat_bypass_t *bp;
-      pool_get_zero (cm->bypasses, bp);
-      bp->inside_ip.as_u32 = ip->as_u32;
-      bp->inside_vrf_id = vrf_id;
-      bp->inside_fib_index = fib_index;
+      cgnat_bypass_entry_t *be;
+      pool_get_zero (cm->bypass_entries, be);
+      be->prefix = *prefix;
+      be->fib_index = fib_index;
 
-      kv.value = bp - cm->bypasses;
-      clib_bihash_add_del_8_8 (&cm->bypass_table, &kv, 1);
+      be->fib_entry_index = fib_table_entry_special_add (
+	fib_index, prefix, cm->bypass_fib_src, FIB_ENTRY_FLAG_DROP);
+      cm->bypass_entry_count++;
+
+      vlib_log_notice (cm->log_class, "bypass added: %U/%u vrf %u",
+		       format_ip4_address, &prefix->fp_addr.ip4, prefix->fp_len,
+		       vrf_id);
     }
   else
     {
-      if (clib_bihash_search_inline_8_8 (&cm->bypass_table, &kv) == 0)
+      cgnat_bypass_entry_t *be;
+      pool_foreach (be, cm->bypass_entries)
 	{
-	  u32 idx = (u32) kv.value;
-	  pool_put_index (cm->bypasses, idx);
-	  clib_bihash_add_del_8_8 (&cm->bypass_table, &kv, 0);
+	  if (be->fib_index == fib_index &&
+	      be->prefix.fp_len == prefix->fp_len &&
+	      be->prefix.fp_addr.ip4.as_u32 == prefix->fp_addr.ip4.as_u32)
+	    {
+	      fib_table_entry_special_remove (fib_index, prefix,
+					      cm->bypass_fib_src);
+	      pool_put (cm->bypass_entries, be);
+	      cm->bypass_entry_count--;
+
+	      vlib_log_notice (cm->log_class, "bypass removed: %U/%u vrf %u",
+			       format_ip4_address, &prefix->fp_addr.ip4,
+			       prefix->fp_len, vrf_id);
+	      break;
+	    }
 	}
     }
 
-  vlib_log_notice (cm->log_class, "bypass %s: %U vrf %u",
-		   is_add ? "added" : "removed", format_ip4_address, ip,
-		   vrf_id);
   return 0;
 }
 
@@ -385,8 +392,9 @@ osvbng_cgnat_init (vlib_main_t *vm)
   clib_bihash_init_8_8 (&cm->inside_lookup, "cgnat inside lookup", 1024,
 			 16 << 20);
 
-  clib_bihash_init_8_8 (&cm->bypass_table, "cgnat bypass table", 256,
-			 1 << 20);
+  cm->bypass_fib_src = fib_source_allocate ("cgnat-bypass",
+					    FIB_SOURCE_PRIORITY_HI,
+					    FIB_SOURCE_BH_DROP);
 
   vlib_log_notice (cm->log_class, "initialized");
 

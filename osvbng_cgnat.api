@@ -214,11 +214,11 @@ autoreply define osvbng_cgnat_set_outside_interface
   u32 pool_id;
 };
 
-/** \brief Add or delete a bypass entry (static IP subscriber)
+/** \brief Add or delete a bypass prefix (static IP subscribers skip NAT)
     @param client_index - opaque cookie to identify the sender
     @param context - sender context, to match reply w/ request
     @param is_add - add bypass if true, delete if false
-    @param inside_ip - subscriber IP to bypass
+    @param prefix - inside prefix to bypass (e.g. 203.0.113.0/24 or single /32)
     @param inside_vrf_id - subscriber VRF
 */
 autoreply define osvbng_cgnat_add_del_bypass
@@ -226,7 +226,7 @@ autoreply define osvbng_cgnat_add_del_bypass
   u32 client_index;
   u32 context;
   bool is_add;
-  vl_api_ip4_address_t inside_ip;
+  vl_api_prefix_t prefix;
   u32 inside_vrf_id;
 };
 

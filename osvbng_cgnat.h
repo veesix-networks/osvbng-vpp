@@ -17,6 +17,9 @@
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
 #include <vnet/ip/ip4_packet.h>
+#include <vnet/fib/fib_table.h>
+#include <vnet/fib/fib_entry.h>
+#include <vnet/fib/fib_source.h>
 #include <vlib/vlib.h>
 
 #define CGNAT_ALG_FTP  (1 << 0)
@@ -125,23 +128,10 @@ typedef struct
 
 typedef struct
 {
-  ip4_address_t inside_ip;
-  u32 inside_vrf_id;
-  u32 inside_fib_index;
-} cgnat_bypass_t;
-
-typedef struct
-{
-  union
-  {
-    struct
-    {
-      ip4_address_t ip;
-      u32 fib_index;
-    };
-    u64 as_u64;
-  };
-} cgnat_bypass_key_t;
+  fib_prefix_t prefix;
+  u32 fib_index;
+  fib_node_index_t fib_entry_index;
+} cgnat_bypass_entry_t;
 
 typedef struct
 {
@@ -221,8 +211,9 @@ typedef struct
   clib_bihash_16_8_t session_table_in2out;
   clib_bihash_16_8_t session_table_out2in;
 
-  cgnat_bypass_t *bypasses;
-  clib_bihash_8_8_t bypass_table;
+  cgnat_bypass_entry_t *bypass_entries;
+  u32 bypass_entry_count;
+  fib_source_t bypass_fib_src;
 
   u32 *outside_sw_if_indices;
   u32 *outside_pool_by_sw_if;
@@ -246,7 +237,7 @@ int cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
 				      u8 enable_feature, u8 is_add);
 int cgnat_enable_on_session (u32 pool_id, u32 sw_if_index, u8 is_enable);
 int cgnat_set_outside_interface (u32 sw_if_index, u32 pool_id, u8 is_enable);
-int cgnat_add_del_bypass (ip4_address_t *ip, u32 vrf_id, u8 is_add);
+int cgnat_add_del_bypass (fib_prefix_t *prefix, u32 vrf_id, u8 is_add);
 int cgnat_pool_update (u32 pool_id, u32 max_sessions, u8 alg_bitmask,
 		       u32 *timeouts);
 
@@ -289,15 +280,21 @@ always_inline int
 cgnat_bypass_check (ip4_address_t *inside_ip, u32 fib_index)
 {
   cgnat_main_t *cm = &cgnat_main;
-  clib_bihash_kv_8_8_t kv;
-  cgnat_bypass_key_t key;
 
-  key.ip.as_u32 = inside_ip->as_u32;
-  key.fib_index = fib_index;
-  kv.key = key.as_u64;
-  kv.value = 0;
+  if (PREDICT_TRUE (cm->bypass_entry_count == 0))
+    return 0;
 
-  return (clib_bihash_search_inline_8_8 (&cm->bypass_table, &kv) == 0);
+  fib_prefix_t pfx = {
+    .fp_proto = FIB_PROTOCOL_IP4,
+    .fp_len = 32,
+    .fp_addr.ip4.as_u32 = inside_ip->as_u32,
+  };
+
+  u32 fei = fib_table_lookup (fib_index, &pfx);
+  if (fei == FIB_NODE_INDEX_INVALID)
+    return 0;
+
+  return fib_entry_is_sourced (fei, cm->bypass_fib_src);
 }
 
 always_inline u8
