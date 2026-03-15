@@ -336,7 +336,7 @@ show_osvbng_cgnat_command_fn (vlib_main_t *vm, unformat_input_t *input,
 
   vlib_cli_output (vm, "\nMappings: %u  Sessions: %u  Bypasses: %u",
 		   pool_elts (cm->mappings), pool_elts (cm->sessions),
-		   pool_elts (cm->bypasses));
+		   cm->bypass_entry_count);
 
   return 0;
 }
