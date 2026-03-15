@@ -130,7 +130,7 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
   s->outside_ip.as_u32 = mapping->outside_ip.as_u32;
   s->remote_ip.as_u32 = remote_ip->as_u32;
   s->inside_port = 0;
-  s->outside_port = outside_port;
+  s->outside_port = clib_host_to_net_u16 (outside_port);
   s->remote_port = remote_port;
   s->proto = proto;
   s->inside_fib_index = mapping->inside_fib_index;
@@ -189,7 +189,8 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
     cgnat_session_key_t key;
     u32 out_fib = pool->outside_fib_valid ? pool->outside_fib_index : 0;
     cgnat_session_make_key (&key, &mapping->outside_ip, remote_ip,
-			    outside_port, remote_port, proto, out_fib);
+			    clib_host_to_net_u16 (outside_port), remote_port,
+			    proto, out_fib);
     clib_memcpy (&kv.key, &key, 16);
     kv.value = session_index;
     clib_bihash_add_del_16_8 (&cm->session_table_out2in, &kv, 1);
@@ -230,7 +231,7 @@ cgnat_session_delete (cgnat_session_t *s)
     clib_bihash_add_del_16_8 (&cm->session_table_out2in, &kv, 0);
   }
 
-  cgnat_port_free (m, s->outside_port);
+  cgnat_port_free (m, clib_net_to_host_u16 (s->outside_port));
 
   if (m->session_count > 0)
     m->session_count--;
