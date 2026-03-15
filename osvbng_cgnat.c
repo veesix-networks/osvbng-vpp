@@ -92,7 +92,7 @@ cgnat_pool_add_del (cgnat_pool_t *cfg, u8 is_add)
 }
 
 int
-cgnat_set_outside_fib (u32 pool_id, u32 fib_index)
+cgnat_set_outside_fib (u32 pool_id, u32 vrf_id)
 {
   cgnat_main_t *cm = &cgnat_main;
   uword *p = hash_get (cm->pool_by_id, pool_id);
@@ -100,12 +100,17 @@ cgnat_set_outside_fib (u32 pool_id, u32 fib_index)
   if (!p)
     return VNET_API_ERROR_NO_SUCH_ENTRY;
 
+  u32 fib_index = fib_table_find (FIB_PROTOCOL_IP4, vrf_id);
+  if (fib_index == ~0)
+    return VNET_API_ERROR_NO_SUCH_FIB;
+
   cgnat_pool_t *pool = pool_elt_at_index (cm->pools, p[0]);
   pool->outside_fib_index = fib_index;
   pool->outside_fib_valid = 1;
 
-  vlib_log_notice (cm->log_class, "pool %u outside FIB set to %u", pool_id,
-		   fib_index);
+  vlib_log_notice (cm->log_class,
+		   "pool %u outside FIB: vrf_id %u -> fib_index %u", pool_id,
+		   vrf_id, fib_index);
   return 0;
 }
 

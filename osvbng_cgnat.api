@@ -114,18 +114,18 @@ autoreply define osvbng_cgnat_pool_add_del_outside_address
   vl_api_prefix_t prefix;
 };
 
-/** \brief Set the outside FIB index for a pool
+/** \brief Set the outside VRF for a pool
     @param client_index - opaque cookie to identify the sender
     @param context - sender context, to match reply w/ request
     @param pool_id - pool identifier
-    @param fib_index - precomputed VPP FIB index for outside routing
+    @param vrf_id - VRF table ID for outside routing (0 = default)
 */
 autoreply define osvbng_cgnat_set_outside_fib
 {
   u32 client_index;
   u32 context;
   u32 pool_id;
-  u32 fib_index;
+  u32 vrf_id;
 };
 
 /** \brief Add or delete a subscriber mapping (PBA mode)

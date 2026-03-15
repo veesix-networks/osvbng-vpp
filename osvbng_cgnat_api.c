@@ -162,7 +162,7 @@ vl_api_osvbng_cgnat_set_outside_fib_t_handler (
   vl_api_osvbng_cgnat_set_outside_fib_reply_t *rmp;
   int rv = 0;
 
-  rv = cgnat_set_outside_fib (ntohl (mp->pool_id), ntohl (mp->fib_index));
+  rv = cgnat_set_outside_fib (ntohl (mp->pool_id), ntohl (mp->vrf_id));
 
   REPLY_MACRO (VL_API_OSVBNG_CGNAT_SET_OUTSIDE_FIB_REPLY);
 }

@@ -228,7 +228,7 @@ typedef struct
 extern cgnat_main_t cgnat_main;
 
 int cgnat_pool_add_del (cgnat_pool_t *cfg, u8 is_add);
-int cgnat_set_outside_fib (u32 pool_id, u32 fib_index);
+int cgnat_set_outside_fib (u32 pool_id, u32 vrf_id);
 int cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
 				      ip4_address_t *inside_ip,
 				      u32 inside_vrf_id,
