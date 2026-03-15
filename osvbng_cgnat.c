@@ -81,6 +81,18 @@ cgnat_pool_add_del (cgnat_pool_t *cfg, u8 is_add)
       u32 pool_index = p[0];
       cgnat_pool_t *pool = pool_elt_at_index (cm->pools, pool_index);
 
+      for (u32 i = 0; i < vec_len (pool->outside_prefixes); i++)
+	{
+	  if (pool->outside_fib_valid &&
+	      pool->outside_fib_entries[i] != FIB_NODE_INDEX_INVALID)
+	    fib_table_entry_special_remove (pool->outside_fib_index,
+					   &pool->outside_prefixes[i],
+					   cm->outside_fib_src);
+	}
+      vec_free (pool->outside_prefixes);
+      vec_free (pool->outside_fib_entries);
+      dpo_reset (&pool->dpo);
+
       vec_free (pool->det_params);
       hash_unset (cm->pool_by_id, pool->pool_id);
       pool_put (cm->pools, pool);
@@ -104,13 +116,39 @@ cgnat_set_outside_fib (u32 pool_id, u32 vrf_id)
   if (fib_index == ~0)
     return VNET_API_ERROR_NO_SUCH_FIB;
 
-  cgnat_pool_t *pool = pool_elt_at_index (cm->pools, p[0]);
+  u32 pool_index = p[0];
+  cgnat_pool_t *pool = pool_elt_at_index (cm->pools, pool_index);
+
+  if (pool->outside_fib_valid)
+    {
+      for (u32 i = 0; i < vec_len (pool->outside_prefixes); i++)
+	{
+	  if (pool->outside_fib_entries[i] != FIB_NODE_INDEX_INVALID)
+	    fib_table_entry_special_remove (pool->outside_fib_index,
+					   &pool->outside_prefixes[i],
+					   cm->outside_fib_src);
+	  pool->outside_fib_entries[i] = FIB_NODE_INDEX_INVALID;
+	}
+    }
+
   pool->outside_fib_index = fib_index;
   pool->outside_fib_valid = 1;
 
+  if (!dpo_id_is_valid (&pool->dpo))
+    {
+      dpo_set (&pool->dpo, cm->dpo_type, DPO_PROTO_IP4, pool_index);
+    }
+
+  for (u32 i = 0; i < vec_len (pool->outside_prefixes); i++)
+    {
+      pool->outside_fib_entries[i] = fib_table_entry_special_dpo_add (
+	fib_index, &pool->outside_prefixes[i], cm->outside_fib_src,
+	FIB_ENTRY_FLAG_EXCLUSIVE, &pool->dpo);
+    }
+
   vlib_log_notice (cm->log_class,
-		   "pool %u outside FIB: vrf_id %u -> fib_index %u", pool_id,
-		   vrf_id, fib_index);
+		   "pool %u outside FIB: vrf_id %u -> fib_index %u (%u prefixes installed)",
+		   pool_id, vrf_id, fib_index, vec_len (pool->outside_prefixes));
   return 0;
 }
 
@@ -226,27 +264,72 @@ cgnat_enable_on_session (u32 pool_id, u32 sw_if_index, u8 is_enable)
 }
 
 int
-cgnat_set_outside_interface (u32 sw_if_index, u32 pool_id, u8 is_enable)
+cgnat_pool_add_outside_prefix (u32 pool_id, fib_prefix_t *prefix)
 {
   cgnat_main_t *cm = &cgnat_main;
+  uword *p = hash_get (cm->pool_by_id, pool_id);
+  if (!p)
+    return VNET_API_ERROR_NO_SUCH_ENTRY;
 
-  vnet_feature_enable_disable ("ip4-unicast", "cgnat-out2in", sw_if_index,
-			       is_enable, 0, 0);
+  u32 pool_index = p[0];
+  cgnat_pool_t *pool = pool_elt_at_index (cm->pools, pool_index);
 
-  if (is_enable)
+  vec_add1 (pool->outside_prefixes, *prefix);
+  fib_node_index_t fei = FIB_NODE_INDEX_INVALID;
+
+  if (pool->outside_fib_valid)
     {
-      vec_validate_init_empty (cm->outside_pool_by_sw_if, sw_if_index, ~0);
-      cm->outside_pool_by_sw_if[sw_if_index] = pool_id;
-    }
-  else
-    {
-      if (sw_if_index < vec_len (cm->outside_pool_by_sw_if))
-	cm->outside_pool_by_sw_if[sw_if_index] = ~0;
+      if (!dpo_id_is_valid (&pool->dpo))
+	dpo_set (&pool->dpo, cm->dpo_type, DPO_PROTO_IP4, pool_index);
+
+      fei = fib_table_entry_special_dpo_add (
+	pool->outside_fib_index, prefix, cm->outside_fib_src,
+	FIB_ENTRY_FLAG_EXCLUSIVE, &pool->dpo);
     }
 
-  vlib_log_notice (cm->log_class, "cgnat-out2in %s on sw_if %u (pool %u)",
-		   is_enable ? "enabled" : "disabled", sw_if_index, pool_id);
+  vec_add1 (pool->outside_fib_entries, fei);
+
+  vlib_log_notice (cm->log_class,
+		   "pool %u outside prefix %U/%u added (fib_entry %s)",
+		   pool_id, format_ip4_address, &prefix->fp_addr.ip4,
+		   prefix->fp_len,
+		   fei != FIB_NODE_INDEX_INVALID ? "installed" : "deferred");
   return 0;
+}
+
+int
+cgnat_pool_del_outside_prefix (u32 pool_id, fib_prefix_t *prefix)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  uword *p = hash_get (cm->pool_by_id, pool_id);
+  if (!p)
+    return VNET_API_ERROR_NO_SUCH_ENTRY;
+
+  cgnat_pool_t *pool = pool_elt_at_index (cm->pools, p[0]);
+
+  for (u32 i = 0; i < vec_len (pool->outside_prefixes); i++)
+    {
+      if (pool->outside_prefixes[i].fp_len == prefix->fp_len &&
+	  pool->outside_prefixes[i].fp_addr.ip4.as_u32 ==
+	    prefix->fp_addr.ip4.as_u32)
+	{
+	  if (pool->outside_fib_valid &&
+	      pool->outside_fib_entries[i] != FIB_NODE_INDEX_INVALID)
+	    fib_table_entry_special_remove (pool->outside_fib_index, prefix,
+					   cm->outside_fib_src);
+
+	  vec_del1 (pool->outside_prefixes, i);
+	  vec_del1 (pool->outside_fib_entries, i);
+
+	  vlib_log_notice (cm->log_class,
+			   "pool %u outside prefix %U/%u removed", pool_id,
+			   format_ip4_address, &prefix->fp_addr.ip4,
+			   prefix->fp_len);
+	  return 0;
+	}
+    }
+
+  return VNET_API_ERROR_NO_SUCH_ENTRY;
 }
 
 int
@@ -380,6 +463,49 @@ VLIB_CLI_COMMAND (show_osvbng_cgnat_mappings_command, static) = {
   .function = show_osvbng_cgnat_mappings_command_fn,
 };
 
+static void
+cgnat_dpo_lock (dpo_id_t *dpo)
+{
+}
+
+static void
+cgnat_dpo_unlock (dpo_id_t *dpo)
+{
+}
+
+static u8 *
+format_cgnat_dpo (u8 *s, va_list *args)
+{
+  index_t index = va_arg (*args, index_t);
+  CLIB_UNUSED (u32 indent) = va_arg (*args, u32);
+
+  s = format (s, "cgnat-out2in pool:%d", index);
+  return s;
+}
+
+const static dpo_vft_t cgnat_dpo_vft = {
+  .dv_lock = cgnat_dpo_lock,
+  .dv_unlock = cgnat_dpo_unlock,
+  .dv_format = format_cgnat_dpo,
+};
+
+const static char *const cgnat_dpo_ip4_nodes[] = {
+  "cgnat-out2in",
+  NULL,
+};
+
+const static char *const *const cgnat_dpo_nodes[DPO_PROTO_NUM] = {
+  [DPO_PROTO_IP4] = cgnat_dpo_ip4_nodes,
+};
+
+void
+cgnat_dpo_module_init (void)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  cm->dpo_type =
+    dpo_register_new_type (&cgnat_dpo_vft, cgnat_dpo_nodes);
+}
+
 static clib_error_t *
 osvbng_cgnat_init (vlib_main_t *vm)
 {
@@ -400,6 +526,12 @@ osvbng_cgnat_init (vlib_main_t *vm)
   cm->bypass_fib_src = fib_source_allocate ("cgnat-bypass",
 					    FIB_SOURCE_PRIORITY_HI,
 					    FIB_SOURCE_BH_DROP);
+
+  cm->outside_fib_src = fib_source_allocate ("cgnat-outside",
+					     FIB_SOURCE_PRIORITY_HI,
+					     FIB_SOURCE_BH_API);
+
+  cgnat_dpo_module_init ();
 
   vlib_log_notice (cm->log_class, "initialized");
 

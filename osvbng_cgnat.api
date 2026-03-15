@@ -198,22 +198,6 @@ autoreply define osvbng_cgnat_enable_on_session
   vl_api_interface_index_t sw_if_index;
 };
 
-/** \brief Enable/disable cgnat-out2in on an outside interface
-    @param client_index - opaque cookie to identify the sender
-    @param context - sender context, to match reply w/ request
-    @param is_enable - enable or disable
-    @param sw_if_index - outside interface
-    @param pool_id - pool to associate
-*/
-autoreply define osvbng_cgnat_set_outside_interface
-{
-  u32 client_index;
-  u32 context;
-  bool is_enable;
-  vl_api_interface_index_t sw_if_index;
-  u32 pool_id;
-};
-
 /** \brief Add or delete a bypass prefix (static IP subscribers skip NAT)
     @param client_index - opaque cookie to identify the sender
     @param context - sender context, to match reply w/ request

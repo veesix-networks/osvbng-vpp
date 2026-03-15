@@ -20,6 +20,7 @@
 #include <vnet/fib/fib_table.h>
 #include <vnet/fib/fib_entry.h>
 #include <vnet/fib/fib_source.h>
+#include <vnet/dpo/dpo.h>
 #include <vlib/vlib.h>
 
 #define CGNAT_ALG_FTP  (1 << 0)
@@ -167,6 +168,10 @@ typedef struct
   u32 outside_fib_index;
   u8 outside_fib_valid;
 
+  fib_prefix_t *outside_prefixes;
+  fib_node_index_t *outside_fib_entries;
+  dpo_id_t dpo;
+
   cgnat_det_params_t *det_params;
   u32 n_det_params;
 } cgnat_pool_t;
@@ -215,8 +220,8 @@ typedef struct
   u32 bypass_entry_count;
   fib_source_t bypass_fib_src;
 
-  u32 *outside_sw_if_indices;
-  u32 *outside_pool_by_sw_if;
+  dpo_type_t dpo_type;
+  fib_source_t outside_fib_src;
 
   u16 msg_id_base;
 
@@ -236,8 +241,12 @@ int cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
 				      u16 port_start, u16 port_end,
 				      u8 enable_feature, u8 is_add);
 int cgnat_enable_on_session (u32 pool_id, u32 sw_if_index, u8 is_enable);
-int cgnat_set_outside_interface (u32 sw_if_index, u32 pool_id, u8 is_enable);
 int cgnat_add_del_bypass (fib_prefix_t *prefix, u32 vrf_id, u8 is_add);
+int cgnat_pool_add_outside_prefix (u32 pool_id, fib_prefix_t *prefix);
+int cgnat_pool_del_outside_prefix (u32 pool_id, fib_prefix_t *prefix);
+void cgnat_dpo_module_init (void);
+
+extern vlib_node_registration_t cgnat_out2in_node;
 int cgnat_pool_update (u32 pool_id, u32 max_sessions, u8 alg_bitmask,
 		       u32 *timeouts);
 

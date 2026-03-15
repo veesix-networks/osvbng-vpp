@@ -146,9 +146,16 @@ vl_api_osvbng_cgnat_pool_add_del_outside_address_t_handler (
       dp->ports_per_host = usable_ports / dp->sharing_ratio;
     }
 
-  vlib_log_notice (cm->log_class, "pool %u outside address %U/%u %s",
-		   pool_id, format_ip4_address, &base, len,
-		   mp->is_add ? "added" : "removed");
+  fib_prefix_t pfx;
+  clib_memset (&pfx, 0, sizeof (pfx));
+  pfx.fp_proto = FIB_PROTOCOL_IP4;
+  pfx.fp_len = len;
+  pfx.fp_addr.ip4.as_u32 = base.as_u32;
+
+  if (mp->is_add)
+    rv = cgnat_pool_add_outside_prefix (pool_id, &pfx);
+  else
+    rv = cgnat_pool_del_outside_prefix (pool_id, &pfx);
 
 reply:
   REPLY_MACRO (VL_API_OSVBNG_CGNAT_POOL_ADD_DEL_OUTSIDE_ADDRESS_REPLY);
@@ -230,19 +237,7 @@ vl_api_osvbng_cgnat_enable_on_session_t_handler (
   REPLY_MACRO (VL_API_OSVBNG_CGNAT_ENABLE_ON_SESSION_REPLY);
 }
 
-static void
-vl_api_osvbng_cgnat_set_outside_interface_t_handler (
-  vl_api_osvbng_cgnat_set_outside_interface_t *mp)
-{
-  cgnat_main_t *cm = &cgnat_main;
-  vl_api_osvbng_cgnat_set_outside_interface_reply_t *rmp;
-  int rv = 0;
 
-  rv = cgnat_set_outside_interface (ntohl (mp->sw_if_index),
-				    ntohl (mp->pool_id), mp->is_enable);
-
-  REPLY_MACRO (VL_API_OSVBNG_CGNAT_SET_OUTSIDE_INTERFACE_REPLY);
-}
 
 static void
 vl_api_osvbng_cgnat_add_del_bypass_t_handler (

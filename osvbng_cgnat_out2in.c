@@ -244,12 +244,6 @@ VLIB_REGISTER_NODE (cgnat_out2in_node) = {
   },
 };
 
-VNET_FEATURE_INIT (cgnat_out2in_feat, static) = {
-  .arc_name = "ip4-unicast",
-  .node_name = "cgnat-out2in",
-  .runs_before = VNET_FEATURES ("ip4-lookup"),
-};
-
 /*
  * Local Variables:
  * eval: (c-set-style "gnu")
