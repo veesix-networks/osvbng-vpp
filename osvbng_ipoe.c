@@ -555,9 +555,6 @@ vnet_ipoe_set_delegated_prefix (u32 sw_if_index, ip6_address_t *prefix,
   return 0;
 }
 
-/*
- * Enable/disable IPoE on interface
- */
 int
 vnet_ipoe_enable_disable (u32 sw_if_index, u8 enable)
 {
@@ -566,22 +563,22 @@ vnet_ipoe_enable_disable (u32 sw_if_index, u8 enable)
   if (!vnet_sw_interface_is_api_valid (im->vnet_main, sw_if_index))
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
-  if (enable)
+  if (enable && !im->ethertypes_registered)
     {
-      /* Enable IPoE input feature on interface */
-      vnet_feature_enable_disable ("device-input", "ipoe-input", sw_if_index,
-                                   1, 0, 0);
-      im->enabled_by_sw_if_index =
-        clib_bitmap_set (im->enabled_by_sw_if_index, sw_if_index, 1);
+      ethernet_main_t *em = &ethernet_main;
+      im->original_next_ip4 = em->l3_next.input_next_ip4;
+      im->original_next_ip6 = em->l3_next.input_next_ip6;
+
+      ethernet_register_input_type (im->vlib_main, ETHERNET_TYPE_IP4,
+				    ipoe_input_node.index);
+      ethernet_register_input_type (im->vlib_main, ETHERNET_TYPE_IP6,
+				    ipoe_input_node.index);
+
+      im->ethertypes_registered = 1;
     }
-  else
-    {
-      /* Disable IPoE input feature */
-      vnet_feature_enable_disable ("device-input", "ipoe-input", sw_if_index,
-                                   0, 0, 0);
-      im->enabled_by_sw_if_index =
-        clib_bitmap_set (im->enabled_by_sw_if_index, sw_if_index, 0);
-    }
+
+  im->enabled_by_sw_if_index =
+    clib_bitmap_set (im->enabled_by_sw_if_index, sw_if_index, enable);
 
   return 0;
 }

@@ -169,6 +169,11 @@ typedef struct
   /* Bitmap of interfaces with IPoE enabled */
   uword *enabled_by_sw_if_index;
 
+  /* Lazy ethertype registration (deferred until first BNG interface enable) */
+  u8 ethertypes_registered;
+  u32 original_next_ip4;
+  u32 original_next_ip6;
+
   /* API message ID base */
   u16 msg_id_base;
 
