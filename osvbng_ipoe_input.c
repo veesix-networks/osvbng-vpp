@@ -34,14 +34,16 @@ format_ipoe_input_trace (u8 *s, va_list *args)
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
   ipoe_input_trace_t *t = va_arg (*args, ipoe_input_trace_t *);
 
-  s = format (s, "ipoe-input: sw_if_index %d inner_vlan %d src_mac %U %s",
-	      t->sw_if_index, t->inner_vlan, format_ethernet_address,
-	      t->src_mac, t->is_ip4 ? "ip4" : "ip6");
-
   if (t->session_found)
-    s = format (s, " -> session sw_if_index %d", t->session_sw_if_index);
+    s = format (s,
+		"ipoe-input: sw_if_index %d inner_vlan %d src_mac %U %s "
+		"-> session sw_if_index %d",
+		t->sw_if_index, t->inner_vlan, format_ethernet_address,
+		t->src_mac, t->is_ip4 ? "ip4" : "ip6",
+		t->session_sw_if_index);
   else
-    s = format (s, " -> pass-through");
+    s = format (s, "ipoe-input: sw_if_index %d %s -> pass-through",
+		t->sw_if_index, t->is_ip4 ? "ip4" : "ip6");
 
   return s;
 }

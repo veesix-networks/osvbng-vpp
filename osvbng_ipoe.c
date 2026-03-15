@@ -367,9 +367,6 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
       }
   }
 
-  ip4_sw_interface_enable_disable (sw_if_index, 1);
-  ip6_sw_interface_enable_disable (sw_if_index, 1);
-
   /* Add to lookup table */
   result.fields.sw_if_index = sw_if_index;
   result.fields.session_index = s - im->sessions;
