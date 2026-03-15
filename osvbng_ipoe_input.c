@@ -151,6 +151,19 @@ VLIB_NODE_FN (ipoe_input_node)
 
 	    if (PREDICT_TRUE (result0.raw != ~0ULL))
 	      {
+		if (is_ip4)
+		  {
+		    if (PREDICT_FALSE (
+			  ip0->dst_address.as_u32 == 0xFFFFFFFF))
+		      goto trace;
+		  }
+		else
+		  {
+		    ip6_header_t *ip6_0 = (ip6_header_t *) ip0;
+		    if (PREDICT_FALSE (ip6_0->dst_address.as_u8[0] == 0xFF))
+		      goto trace;
+		  }
+
 		s0 = pool_elt_at_index (im->sessions,
 					result0.fields.session_index);
 
