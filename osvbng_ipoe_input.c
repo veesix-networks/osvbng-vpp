@@ -82,7 +82,6 @@ VLIB_NODE_FN (ipoe_input_node)
   u32 n_left_from, *from, *to_next;
   u32 next_index;
   u32 pkts_processed = 0;
-  u32 pkts_passthrough = 0;
   u32 pkts_no_session = 0;
 
   ipoe_entry_key_t cached_key;
@@ -130,7 +129,6 @@ VLIB_NODE_FN (ipoe_input_node)
 	  if (PREDICT_FALSE (
 		!clib_bitmap_get (im->enabled_by_sw_if_index, sw_if_index0)))
 	    {
-	      pkts_passthrough++;
 	      goto trace;
 	    }
 
