@@ -565,10 +565,6 @@ vnet_ipoe_enable_disable (u32 sw_if_index, u8 enable)
 
   if (enable && !im->ethertypes_registered)
     {
-      ethernet_main_t *em = &ethernet_main;
-      im->original_next_ip4 = em->l3_next.input_next_ip4;
-      im->original_next_ip6 = em->l3_next.input_next_ip6;
-
       ethernet_register_input_type (im->vlib_main, ETHERNET_TYPE_IP4,
 				    ipoe_input_node.index);
       ethernet_register_input_type (im->vlib_main, ETHERNET_TYPE_IP6,

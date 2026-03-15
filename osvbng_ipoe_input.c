@@ -124,7 +124,7 @@ VLIB_NODE_FN (ipoe_input_node)
 
 	  ip0 = vlib_buffer_get_current (b0);
 	  is_ip4 = (ip0->ip_version_and_header_length >> 4) == 4;
-	  next0 = is_ip4 ? im->original_next_ip4 : im->original_next_ip6;
+	  next0 = is_ip4 ? IPOE_INPUT_NEXT_IP4_INPUT : IPOE_INPUT_NEXT_IP6_INPUT;
 
 	  if (PREDICT_FALSE (
 		!clib_bitmap_get (im->enabled_by_sw_if_index, sw_if_index0)))
