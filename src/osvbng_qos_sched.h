@@ -9,7 +9,7 @@
  * Original authors: Dave Taht, Jonathan Morton, Toke Hoiland-Jorgensen,
  * Sebastian Moeller, Kevin Darbyshire-Bryant, Ryan Mounce.
  *
- * Phase 2: Per-flow queuing with set-associative hashing and DRR.
+ * Phase 2: Per-flow queuing, DRR, owner-thread handoff, ring buffers.
  */
 
 #ifndef __included_osvbng_qos_sched_h__
@@ -21,6 +21,7 @@
 #include <vppinfra/pool.h>
 #include <vppinfra/vec.h>
 #include <vppinfra/xxhash.h>
+#include <vppinfra/atomics.h>
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
 #include <vnet/buffer.h>
@@ -28,16 +29,20 @@
 
 #define CAKE_BUFFER_F_SCHEDULED VNET_BUFFER_F_AVAIL1
 
-#define CAKE_QUEUES	1024
-#define CAKE_SET_WAYS	8
-#define CAKE_SET_COUNT	(CAKE_QUEUES / CAKE_SET_WAYS)
+#define CAKE_QUEUES	  1024
+#define CAKE_SET_WAYS	  8
+#define CAKE_SET_COUNT	  (CAKE_QUEUES / CAKE_SET_WAYS)
 
 #define CAKE_FLOW_NONE	   0
 #define CAKE_FLOW_SPARSE   1
 #define CAKE_FLOW_BULK	   2
 #define CAKE_FLOW_DECAYING 3
 
-#define CAKE_QUANTUM_DEFAULT 1514
+#define CAKE_QUANTUM_DEFAULT	1514
+#define CAKE_FLOW_RING_SIZE	128
+#define CAKE_FLOW_RING_MASK	(CAKE_FLOW_RING_SIZE - 1)
+
+#define CAKE_OWNER_UNSET ((u32) ~0)
 
 typedef enum
 {
@@ -51,8 +56,9 @@ extern char *cake_error_strings[];
 
 typedef struct
 {
-  u32 *queue;
+  u32 *ring;
   u32 head;
+  u32 tail;
 
   i32 deficit;
   u32 next;
@@ -68,7 +74,10 @@ typedef struct
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
 
   cake_flow_t *flows;
+
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline_tags);
   u32 flow_tags[CAKE_QUEUES];
+
   u32 flow_count;
 
   u32 new_flow_head;
@@ -97,6 +106,7 @@ typedef struct
 
   u32 sw_if_index;
   u32 sched_index;
+  u32 owner_thread;
 
   i16 overhead_bytes;
   u8 atm_mode;
@@ -133,6 +143,9 @@ typedef struct
   u32 ip6_enqueue_node_index;
   u32 dequeue_node_index;
 
+  u32 fq_ip4_index;
+  u32 fq_ip6_index;
+
   u8 ip4_output_arc_index;
   u8 ip6_output_arc_index;
 
@@ -162,9 +175,12 @@ cake_overhead_adjust (cake_sched_t *cs, u32 pkt_len)
   return (u32) adjusted;
 }
 
-/*
- * Flow hashing: 5-tuple → xxhash → tag with non-zero sentinel.
- */
+static_always_inline u32
+cake_flow_queue_len (cake_flow_t *f)
+{
+  return f->tail - f->head;
+}
+
 static_always_inline u32
 cake_hash_flow (vlib_buffer_t *b, u8 is_ip4)
 {
@@ -209,10 +225,6 @@ cake_hash_flow (vlib_buffer_t *b, u8 is_ip4)
   return hash | 1;
 }
 
-/*
- * DRR doubly-linked list operations.
- * Lists are non-circular: head/prev/next use ~0 as nil.
- */
 static_always_inline void
 cake_flow_list_prepend (u32 *list_head, u32 *list_tail, cake_flow_t *flows,
 			u32 idx)
@@ -265,15 +277,44 @@ cake_flow_list_remove (u32 *list_head, u32 *list_tail, cake_flow_t *flows,
   f->prev = ~0;
 }
 
+static_always_inline void
+cake_flow_ring_alloc (cake_flow_t *f)
+{
+  f->ring =
+    clib_mem_alloc_aligned (CAKE_FLOW_RING_SIZE * sizeof (u32),
+			    CLIB_CACHE_LINE_BYTES);
+  f->head = 0;
+  f->tail = 0;
+}
+
+static_always_inline void
+cake_flow_ring_free (vlib_main_t *vm, cake_flow_t *f)
+{
+  if (PREDICT_FALSE (f->ring == NULL))
+    return;
+
+  while (f->head != f->tail)
+    {
+      vlib_buffer_free_one (vm,
+			    f->ring[f->head & CAKE_FLOW_RING_MASK]);
+      f->head++;
+    }
+
+  clib_mem_free (f->ring);
+  f->ring = NULL;
+  f->head = 0;
+  f->tail = 0;
+}
+
 /*
  * Set-associative flow lookup.
- * Returns flow index (0..CAKE_QUEUES-1).
+ * Returns flow index, or ~0 with *evict_slot set if eviction is needed.
  */
 static_always_inline u32
-cake_flow_lookup (cake_tin_t *tin, u32 tag, u32 set_base)
+cake_flow_lookup (cake_tin_t *tin, u32 tag, u32 set_base, u32 *evict_slot)
 {
   u32 empty_slot = ~0;
-  u32 evict_slot = ~0;
+  *evict_slot = ~0;
   u32 evict_backlog = ~0U;
 
   for (u32 i = 0; i < CAKE_SET_WAYS; i++)
@@ -293,34 +334,25 @@ cake_flow_lookup (cake_tin_t *tin, u32 tag, u32 set_base)
 	  if (bl < evict_backlog)
 	    {
 	      evict_backlog = bl;
-	      evict_slot = slot;
+	      *evict_slot = slot;
 	    }
 	}
     }
 
   if (empty_slot != ~0)
     {
+      *evict_slot = ~0;
       tin->flow_tags[empty_slot] = tag;
       return empty_slot;
     }
 
-  if (evict_slot != ~0)
-    {
-      cake_flow_t *ef = &tin->flows[evict_slot];
-      if (ef->queue)
-	vec_free (ef->queue);
-      clib_memset (ef, 0, sizeof (*ef));
-      ef->next = ~0;
-      ef->prev = ~0;
-      tin->flow_tags[evict_slot] = tag;
-      return evict_slot;
-    }
-
-  return set_base;
+  return ~0;
 }
 
 extern vlib_node_registration_t ip4_cake_enqueue_node;
 extern vlib_node_registration_t ip6_cake_enqueue_node;
+extern vlib_node_registration_t ip4_cake_handoff_node;
+extern vlib_node_registration_t ip6_cake_handoff_node;
 extern vlib_node_registration_t cake_dequeue_node;
 
 #endif /* __included_osvbng_qos_sched_h__ */

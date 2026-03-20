@@ -11,6 +11,7 @@ add_vpp_plugin(osvbng_qos_sched
   osvbng_qos_sched_api.c
   cake_enqueue.c
   cake_dequeue.c
+  cake_handoff.c
   cake_cobalt.c
   cake_overhead.c
 

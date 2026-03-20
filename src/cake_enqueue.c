@@ -5,9 +5,11 @@
  * osvbng QoS Scheduler Plugin - Enqueue node
  * ip4-output / ip6-output feature arc nodes.
  *
- * Phase 2: Per-flow queuing with set-associative hashing.
- * Classifies packets by 5-tuple hash into per-flow queues.
- * Manages DRR flow list insertion on arrival.
+ * Phase 2: Per-flow queuing, owner-thread handoff, ring buffers.
+ *
+ * Owner-thread model: each subscriber scheduler has one owner worker.
+ * Packets arriving on the wrong worker are handed off via frame queue.
+ * All scheduler state mutation happens exclusively on the owner thread.
  *
  * MULTIARCH: compiled with SIMD variants (AVX2, AVX-512, NEON).
  */
@@ -17,12 +19,19 @@
 
 #include <osvbng_qos_sched/osvbng_qos_sched.h>
 
+typedef enum
+{
+  CAKE_ENQUEUE_NEXT_HANDOFF,
+  CAKE_ENQUEUE_N_STATIC_NEXT,
+} cake_enqueue_static_next_t;
+
 typedef struct
 {
   u32 sw_if_index;
   u32 flow_idx;
   u8 enqueued;
   u8 scheduled;
+  u8 handoff;
 } cake_enqueue_trace_t;
 
 static u8 *
@@ -34,10 +43,44 @@ format_cake_enqueue_trace (u8 *s, va_list *args)
 
   s = format (s, "CAKE-ENQUEUE: sw_if_index %u flow %u, %s",
 	      t->sw_if_index, t->flow_idx,
+	      t->handoff	? "handoff" :
 	      t->scheduled ? "scheduled-passthrough" :
 	      t->enqueued  ? "enqueued" :
 			     "passthrough");
   return s;
+}
+
+static_always_inline void
+cake_flow_evict (vlib_main_t *vm, cake_tin_t *tin, u32 slot)
+{
+  cake_flow_t *ef = &tin->flows[slot];
+
+  cake_flow_ring_free (vm, ef);
+
+  if (ef->flow_state == CAKE_FLOW_SPARSE)
+    {
+      cake_flow_list_remove (&tin->new_flow_head, &tin->new_flow_tail,
+			     tin->flows, slot);
+      tin->sparse_flow_count--;
+    }
+  else if (ef->flow_state == CAKE_FLOW_BULK)
+    {
+      cake_flow_list_remove (&tin->old_flow_head, &tin->old_flow_tail,
+			     tin->flows, slot);
+      tin->bulk_flow_count--;
+    }
+  else if (ef->flow_state == CAKE_FLOW_DECAYING)
+    {
+      cake_flow_list_remove (&tin->decaying_flow_head,
+			     &tin->decaying_flow_tail, tin->flows, slot);
+    }
+
+  if (ef->flow_state != CAKE_FLOW_NONE)
+    tin->flow_count--;
+
+  clib_memset (ef, 0, sizeof (*ef));
+  ef->next = ~0;
+  ef->prev = ~0;
 }
 
 static_always_inline uword
@@ -52,6 +95,9 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
   u32 pass_bi[VLIB_FRAME_SIZE];
   u16 pass_nexts[VLIB_FRAME_SIZE];
   u32 n_pass = 0;
+
+  u32 handoff_bi[VLIB_FRAME_SIZE];
+  u32 n_handoff = 0;
 
   u32 n_enqueued = 0;
   u32 n_dropped = 0;
@@ -81,6 +127,7 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	      t->flow_idx = ~0;
 	      t->enqueued = 0;
 	      t->scheduled = 1;
+	      t->handoff = 0;
 	    }
 	  continue;
 	}
@@ -107,17 +154,63 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	      t->flow_idx = ~0;
 	      t->enqueued = 0;
 	      t->scheduled = 0;
+	      t->handoff = 0;
 	    }
 	  continue;
 	}
 
       cake_sched_t *cs = pool_elt_at_index (cm->schedulers, si);
+
+      /* Owner-thread check: CAS claim or handoff */
+      if (PREDICT_TRUE (cs->owner_thread == thread_index))
+	goto enqueue_local;
+
+      if (cs->owner_thread == CAKE_OWNER_UNSET)
+	{
+	  u32 expected = CAKE_OWNER_UNSET;
+	  if (__atomic_compare_exchange_n (&cs->owner_thread, &expected,
+					   thread_index, 0, __ATOMIC_ACQ_REL,
+					   __ATOMIC_ACQUIRE))
+	    {
+	      vlib_node_set_state (vm, cm->dequeue_node_index,
+				   VLIB_NODE_STATE_POLLING);
+	      goto enqueue_local;
+	    }
+	}
+
+      /* Wrong worker — collect for handoff */
+      handoff_bi[n_handoff++] = bi0;
+
+      if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
+	{
+	  cake_enqueue_trace_t *t =
+	    vlib_add_trace (vm, node, b0, sizeof (*t));
+	  t->sw_if_index = sw_if_index0;
+	  t->flow_idx = ~0;
+	  t->enqueued = 0;
+	  t->scheduled = 0;
+	  t->handoff = 1;
+	}
+      continue;
+
+    enqueue_local:;
       cake_tin_t *tin = &cs->tin;
       u32 pkt_len = vlib_buffer_length_in_chain (vm, b0);
 
       u32 tag = cake_hash_flow (b0, is_ip4);
       u32 set_base = (tag % CAKE_SET_COUNT) * CAKE_SET_WAYS;
-      u32 flow_idx = cake_flow_lookup (tin, tag, set_base);
+      u32 evict_slot;
+      u32 flow_idx = cake_flow_lookup (tin, tag, set_base, &evict_slot);
+
+      if (PREDICT_FALSE (flow_idx == ~0))
+	{
+	  cake_flow_evict (vm, tin, evict_slot);
+	  tin->flow_tags[evict_slot] = tag;
+	  flow_idx = evict_slot;
+	  vlib_node_increment_counter (vm, node->node_index,
+				       CAKE_ERROR_FLOW_EVICTED, 1);
+	}
+
       cake_flow_t *flow = &tin->flows[flow_idx];
 
       if (PREDICT_FALSE (cs->buffer_usage + pkt_len > cs->buffer_limit))
@@ -135,11 +228,35 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	      t->flow_idx = flow_idx;
 	      t->enqueued = 0;
 	      t->scheduled = 0;
+	      t->handoff = 0;
 	    }
 	  continue;
 	}
 
-      vec_add1 (flow->queue, bi0);
+      if (PREDICT_FALSE (flow->flow_state == CAKE_FLOW_NONE))
+	{
+	  cake_flow_ring_alloc (flow);
+	  flow->flow_state = CAKE_FLOW_SPARSE;
+	  flow->deficit = tin->quantum;
+	  flow->set_index = (u8) (set_base / CAKE_SET_WAYS);
+	  cake_flow_list_prepend (&tin->new_flow_head, &tin->new_flow_tail,
+				  tin->flows, flow_idx);
+	  tin->flow_count++;
+	  tin->sparse_flow_count++;
+	}
+
+      if (PREDICT_FALSE (cake_flow_queue_len (flow) >= CAKE_FLOW_RING_SIZE))
+	{
+	  vlib_buffer_free_one (vm, bi0);
+	  cs->dropped_pkts++;
+	  tin->drops++;
+	  n_dropped++;
+	  continue;
+	}
+
+      flow->ring[flow->tail & CAKE_FLOW_RING_MASK] = bi0;
+      flow->tail++;
+
       flow->backlog_bytes += pkt_len;
       cs->buffer_usage += pkt_len;
       cs->queued_buffers++;
@@ -149,18 +266,8 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
       tin->bytes += pkt_len;
       n_enqueued++;
 
-      if (flow->flow_state == CAKE_FLOW_NONE)
-	{
-	  flow->flow_state = CAKE_FLOW_SPARSE;
-	  flow->deficit = tin->quantum;
-	  flow->set_index = (u8) (set_base / CAKE_SET_WAYS);
-	  cake_flow_list_prepend (&tin->new_flow_head, &tin->new_flow_tail,
-				  tin->flows, flow_idx);
-	  tin->flow_count++;
-	  tin->sparse_flow_count++;
-	}
-      else if (flow->flow_state == CAKE_FLOW_SPARSE &&
-	       vec_len (flow->queue) - flow->head > 1)
+      if (flow->flow_state == CAKE_FLOW_SPARSE &&
+	  cake_flow_queue_len (flow) > 1)
 	{
 	  flow->flow_state = CAKE_FLOW_BULK;
 	  cake_flow_list_remove (&tin->new_flow_head, &tin->new_flow_tail,
@@ -181,12 +288,11 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  tin->bulk_flow_count++;
 	}
 
-      if (thread_index < vec_len (cm->per_thread))
+      if (!clib_bitmap_get (cm->per_thread[thread_index].active_bitmap,
+			    cs->sched_index))
 	{
-	  cake_per_thread_t *pt =
-	    vec_elt_at_index (cm->per_thread, thread_index);
-	  pt->active_bitmap =
-	    clib_bitmap_set (pt->active_bitmap, cs->sched_index, 1);
+	  cm->per_thread[thread_index].active_bitmap = clib_bitmap_set (
+	    cm->per_thread[thread_index].active_bitmap, cs->sched_index, 1);
 	}
 
       if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
@@ -197,11 +303,27 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  t->flow_idx = flow_idx;
 	  t->enqueued = 1;
 	  t->scheduled = 0;
+	  t->handoff = 0;
 	}
     }
 
   if (n_pass > 0)
     vlib_buffer_enqueue_to_next (vm, node, pass_bi, pass_nexts, n_pass);
+
+  if (n_handoff > 0)
+    {
+      u32 handoff_next = is_ip4
+	? vlib_node_add_next (vm, node->node_index,
+			      ip4_cake_handoff_node.index)
+	: vlib_node_add_next (vm, node->node_index,
+			      ip6_cake_handoff_node.index);
+
+      vlib_buffer_enqueue_to_single_next (vm, node, handoff_bi, handoff_next,
+					  n_handoff);
+
+      vlib_node_increment_counter (vm, node->node_index, CAKE_ERROR_HANDOFF,
+				   n_handoff);
+    }
 
   vlib_node_increment_counter (vm, node->node_index, CAKE_ERROR_ENQUEUED,
 			       n_enqueued);

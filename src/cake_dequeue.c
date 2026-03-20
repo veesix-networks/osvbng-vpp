@@ -5,9 +5,11 @@
  * osvbng QoS Scheduler Plugin - Dequeue node
  * VLIB_NODE_TYPE_INPUT polling node.
  *
- * Phase 2: DRR scheduling across per-flow queues.
- * Three lists: new (sparse), old (bulk), decaying.
- * Sparse flows get immediate service without deficit accounting.
+ * Phase 2: DRR scheduling, ring buffers, owner-thread-only execution.
+ *
+ * DISABLED on workers with no owned schedulers.
+ * POLLING on workers that own at least one scheduler.
+ * Only processes schedulers where owner_thread == vm->thread_index.
  *
  * MULTIARCH: compiled with SIMD variants (AVX2, AVX-512, NEON).
  */
@@ -43,28 +45,14 @@ format_cake_dequeue_trace (u8 *s, va_list *args)
   return s;
 }
 
-static_always_inline u32
-cake_flow_queue_len (cake_flow_t *f)
-{
-  if (!f->queue)
-    return 0;
-  u32 len = vec_len (f->queue);
-  return len > f->head ? len - f->head : 0;
-}
-
 static_always_inline void
-cake_flow_reclaim (cake_tin_t *tin, u32 flow_idx, u32 *list_head,
-		   u32 *list_tail)
+cake_flow_reclaim (vlib_main_t *vm, cake_tin_t *tin, u32 flow_idx,
+		   u32 *list_head, u32 *list_tail)
 {
   cake_flow_t *f = &tin->flows[flow_idx];
 
   cake_flow_list_remove (list_head, list_tail, tin->flows, flow_idx);
-
-  if (f->queue)
-    {
-      vec_free (f->queue);
-      f->queue = NULL;
-    }
+  cake_flow_ring_free (vm, f);
 
   if (f->flow_state == CAKE_FLOW_SPARSE)
     tin->sparse_flow_count--;
@@ -73,7 +61,6 @@ cake_flow_reclaim (cake_tin_t *tin, u32 flow_idx, u32 *list_head,
 
   tin->flow_tags[flow_idx] = 0;
   f->flow_state = CAKE_FLOW_NONE;
-  f->head = 0;
   f->backlog_bytes = 0;
   f->deficit = 0;
   f->next = ~0;
@@ -120,7 +107,7 @@ VLIB_NODE_FN (cake_dequeue_node)
   uword si;
   clib_bitmap_foreach (si, pt->active_bitmap)
     {
-      if (budget == 0)
+      if (budget == 0 || n_deactivate >= VLIB_FRAME_SIZE - 1)
 	break;
 
       if (PREDICT_FALSE (pool_is_free_index (cm->schedulers, si)))
@@ -130,6 +117,12 @@ VLIB_NODE_FN (cake_dequeue_node)
 	}
 
       cake_sched_t *cs = pool_elt_at_index (cm->schedulers, si);
+
+      if (PREDICT_FALSE (cs->owner_thread != thread_index))
+	{
+	  deactivate[n_deactivate++] = si;
+	  continue;
+	}
 
       if (now_ns < cs->global_shaper_time_ns)
 	continue;
@@ -143,7 +136,8 @@ VLIB_NODE_FN (cake_dequeue_node)
 	  u32 flow_idx = cake_select_flow (tin);
 	  if (flow_idx == ~0)
 	    {
-	      deactivate[n_deactivate++] = si;
+	      if (n_deactivate < VLIB_FRAME_SIZE)
+		deactivate[n_deactivate++] = si;
 	      break;
 	    }
 
@@ -154,12 +148,14 @@ VLIB_NODE_FN (cake_dequeue_node)
 	    {
 	      if (cake_flow_queue_len (flow) == 0)
 		{
-		  cake_flow_reclaim (tin, flow_idx, &tin->new_flow_head,
+		  cake_flow_reclaim (vm, tin, flow_idx, &tin->new_flow_head,
 				     &tin->new_flow_tail);
 		  continue;
 		}
 
-	      u32 bi = flow->queue[flow->head++];
+	      u32 bi =
+		flow->ring[flow->head & CAKE_FLOW_RING_MASK];
+	      flow->head++;
 	      vlib_buffer_t *b = vlib_get_buffer (vm, bi);
 	      u32 pkt_len = vlib_buffer_length_in_chain (vm, b);
 	      u32 adj_len = cake_overhead_adjust (cs, pkt_len);
@@ -178,7 +174,7 @@ VLIB_NODE_FN (cake_dequeue_node)
 	      sched_dequeued++;
 
 	      if (cake_flow_queue_len (flow) == 0)
-		cake_flow_reclaim (tin, flow_idx, &tin->new_flow_head,
+		cake_flow_reclaim (vm, tin, flow_idx, &tin->new_flow_head,
 				   &tin->new_flow_tail);
 
 	      b->flags |= CAKE_BUFFER_F_SCHEDULED;
@@ -208,8 +204,9 @@ VLIB_NODE_FN (cake_dequeue_node)
 	      continue;
 	    }
 
-	  /* Bulk / old / decaying flow: deficit-based dequeue */
-	  flow->deficit += tin->quantum;
+	  /* Bulk / old / decaying: deficit-based dequeue */
+	  if (flow->deficit <= 0)
+	    flow->deficit += tin->quantum;
 
 	  while (flow->deficit > 0 && budget > 0)
 	    {
@@ -228,14 +225,16 @@ VLIB_NODE_FN (cake_dequeue_node)
 		    }
 		  else if (flow->flow_state == CAKE_FLOW_DECAYING)
 		    {
-		      cake_flow_reclaim (tin, flow_idx,
+		      cake_flow_reclaim (vm, tin, flow_idx,
 					 &tin->decaying_flow_head,
 					 &tin->decaying_flow_tail);
 		    }
 		  break;
 		}
 
-	      u32 bi = flow->queue[flow->head++];
+	      u32 bi =
+		flow->ring[flow->head & CAKE_FLOW_RING_MASK];
+	      flow->head++;
 	      vlib_buffer_t *b = vlib_get_buffer (vm, bi);
 	      u32 pkt_len = vlib_buffer_length_in_chain (vm, b);
 	      u32 adj_len = cake_overhead_adjust (cs, pkt_len);
@@ -280,7 +279,6 @@ VLIB_NODE_FN (cake_dequeue_node)
 		goto shaper_exhausted;
 	    }
 
-	  /* Deficit exhausted or queue empty: rotate to next flow */
 	  if (flow->deficit <= 0 && flow->flow_state == CAKE_FLOW_BULK &&
 	      cake_flow_queue_len (flow) > 0)
 	    {
@@ -292,23 +290,9 @@ VLIB_NODE_FN (cake_dequeue_node)
 	      flow->deficit = 0;
 	    }
 
-	  /* Compact drained flow queue */
-	  if (flow->queue && flow->head > 0 &&
-	      cake_flow_queue_len (flow) == 0)
-	    {
-	      vec_reset_length (flow->queue);
-	      flow->head = 0;
-	    }
-
 	  continue;
 
 	shaper_exhausted:
-	  if (flow->queue && flow->head > 0 &&
-	      cake_flow_queue_len (flow) == 0)
-	    {
-	      vec_reset_length (flow->queue);
-	      flow->head = 0;
-	    }
 	  break;
 	}
 

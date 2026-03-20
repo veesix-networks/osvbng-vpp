@@ -5,7 +5,7 @@
  * osvbng QoS Scheduler Plugin - Core implementation
  * Plugin init, per-subscriber enable/disable, CLI commands.
  *
- * Phase 2: Per-flow queuing with set-associative hashing and DRR.
+ * Phase 2: Per-flow queuing, DRR, owner-thread handoff.
  *
  * Algorithms derived from the Linux CAKE qdisc (sch_cake.c).
  * Original authors: Dave Taht, Jonathan Morton, Toke Hoiland-Jorgensen,
@@ -28,17 +28,6 @@ char *cake_error_strings[] = {
 #include <osvbng_qos_sched/osvbng_qos_sched_error.def>
 #undef cake_error
 };
-
-static void
-cake_set_dequeue_node_state (vlib_node_state_t state)
-{
-  cake_main_t *cm = &cake_main;
-
-  foreach_vlib_main ()
-    {
-      vlib_node_set_state (this_vlib_main, cm->dequeue_node_index, state);
-    }
-}
 
 static void
 cake_tin_init (cake_tin_t *tin)
@@ -68,15 +57,22 @@ cake_tin_drain (vlib_main_t *vm, cake_tin_t *tin)
   for (u32 i = 0; i < CAKE_QUEUES; i++)
     {
       cake_flow_t *f = &tin->flows[i];
-      if (f->queue)
-	{
-	  u32 n = vec_len (f->queue) - f->head;
-	  if (n > 0)
-	    vlib_buffer_free (vm, f->queue + f->head, n);
-	  vec_free (f->queue);
-	}
+      cake_flow_ring_free (vm, f);
     }
   vec_free (tin->flows);
+}
+
+static u8
+cake_worker_has_other_schedulers (cake_main_t *cm, cake_sched_t *exclude,
+				  u32 owner_thread)
+{
+  cake_sched_t *cs;
+  pool_foreach (cs, cm->schedulers)
+    {
+      if (cs != exclude && cs->owner_thread == owner_thread)
+	return 1;
+    }
+  return 0;
 }
 
 int
@@ -111,6 +107,7 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       cs->atm_mode = atm_mode;
       cs->mpu = mpu;
       cs->global_shaper_time_ns = (u64) (vlib_time_now (vm) * 1e9);
+      cs->owner_thread = CAKE_OWNER_UNSET;
 
       if (buffer_limit == 0)
 	{
@@ -136,8 +133,6 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 				   sw_if_index, 1, 0, 0);
 
       cm->n_schedulers++;
-      if (cm->n_schedulers == 1)
-	cake_set_dequeue_node_state (VLIB_NODE_STATE_POLLING);
 
       u32 n_threads = vlib_get_n_threads ();
       vec_validate (cm->per_thread, n_threads - 1);
@@ -157,6 +152,7 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 	return VNET_API_ERROR_NO_SUCH_ENTRY;
 
       cake_sched_t *cs = pool_elt_at_index (cm->schedulers, pool_index);
+      u32 owner = cs->owner_thread;
 
       vnet_feature_enable_disable ("ip4-output", "ip4-cake-enqueue",
 				   sw_if_index, 0, 0, 0);
@@ -176,8 +172,14 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       pool_put (cm->schedulers, cs);
 
       cm->n_schedulers--;
-      if (cm->n_schedulers == 0)
-	cake_set_dequeue_node_state (VLIB_NODE_STATE_DISABLED);
+
+      if (owner != CAKE_OWNER_UNSET &&
+	  !cake_worker_has_other_schedulers (cm, NULL, owner))
+	{
+	  vlib_main_t *owner_vm = vlib_get_main_by_index (owner);
+	  vlib_node_set_state (owner_vm, cm->dequeue_node_index,
+			       VLIB_NODE_STATE_DISABLED);
+	}
 
       vlib_log_notice (cm->log_class,
 		       "scheduler disabled on sw_if_index %u", sw_if_index);
@@ -299,11 +301,11 @@ cake_sched_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
       vlib_cli_output (
 	vm,
 	"  %U: rate %llu B/s (%llu kbps), overhead %d, "
-	"queue %u pkts %u/%u bytes",
+	"queue %u pkts %u/%u bytes, owner thread %u",
 	format_vnet_sw_if_index_name, vnet_get_main (), cs->sw_if_index,
 	cs->rate_bytes_per_sec, cs->rate_bytes_per_sec * 8 / 1000,
 	(int) cs->overhead_bytes, queue_depth, cs->buffer_usage,
-	cs->buffer_limit);
+	cs->buffer_limit, cs->owner_thread);
 
       vlib_cli_output (vm,
 		       "    enqueued: %llu pkts %llu bytes, "
@@ -350,8 +352,13 @@ osvbng_qos_sched_init (vlib_main_t *vm)
   cm->ip4_output_arc_index = vnet_get_feature_arc_index ("ip4-output");
   cm->ip6_output_arc_index = vnet_get_feature_arc_index ("ip6-output");
 
+  cm->fq_ip4_index =
+    vlib_frame_queue_main_init (ip4_cake_enqueue_node.index, 0);
+  cm->fq_ip6_index =
+    vlib_frame_queue_main_init (ip6_cake_enqueue_node.index, 0);
+
   vlib_log_notice (cm->log_class,
-		   "initialized (Phase 2: per-flow queuing + DRR)");
+		   "initialized (Phase 2: FQ + DRR + owner-thread handoff)");
 
   return 0;
 }
@@ -359,7 +366,7 @@ osvbng_qos_sched_init (vlib_main_t *vm)
 VLIB_INIT_FUNCTION (osvbng_qos_sched_init);
 
 VLIB_PLUGIN_REGISTER () = {
-  .version = "2.0.0",
+  .version = "2.1.0",
   .description = "osvbng QoS Scheduler Plugin (CAKE)",
 };
 
