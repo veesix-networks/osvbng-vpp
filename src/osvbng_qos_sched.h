@@ -72,8 +72,11 @@ typedef struct
   u32 flow_count;
 
   u32 new_flow_head;
+  u32 new_flow_tail;
   u32 old_flow_head;
+  u32 old_flow_tail;
   u32 decaying_flow_head;
+  u32 decaying_flow_tail;
 
   u32 quantum;
 
@@ -211,7 +214,8 @@ cake_hash_flow (vlib_buffer_t *b, u8 is_ip4)
  * Lists are non-circular: head/prev/next use ~0 as nil.
  */
 static_always_inline void
-cake_flow_list_prepend (u32 *list_head, cake_flow_t *flows, u32 idx)
+cake_flow_list_prepend (u32 *list_head, u32 *list_tail, cake_flow_t *flows,
+			u32 idx)
 {
   cake_flow_t *f = &flows[idx];
   f->next = *list_head;
@@ -219,33 +223,31 @@ cake_flow_list_prepend (u32 *list_head, cake_flow_t *flows, u32 idx)
 
   if (*list_head != ~0)
     flows[*list_head].prev = idx;
+  else
+    *list_tail = idx;
 
   *list_head = idx;
 }
 
 static_always_inline void
-cake_flow_list_append_tail (u32 *list_head, cake_flow_t *flows, u32 idx)
+cake_flow_list_append_tail (u32 *list_head, u32 *list_tail,
+			    cake_flow_t *flows, u32 idx)
 {
   cake_flow_t *f = &flows[idx];
   f->next = ~0;
+  f->prev = *list_tail;
 
-  if (*list_head == ~0)
-    {
-      f->prev = ~0;
-      *list_head = idx;
-      return;
-    }
+  if (*list_tail != ~0)
+    flows[*list_tail].next = idx;
+  else
+    *list_head = idx;
 
-  u32 cur = *list_head;
-  while (flows[cur].next != ~0)
-    cur = flows[cur].next;
-
-  flows[cur].next = idx;
-  f->prev = cur;
+  *list_tail = idx;
 }
 
 static_always_inline void
-cake_flow_list_remove (u32 *list_head, cake_flow_t *flows, u32 idx)
+cake_flow_list_remove (u32 *list_head, u32 *list_tail, cake_flow_t *flows,
+		       u32 idx)
 {
   cake_flow_t *f = &flows[idx];
 
@@ -256,6 +258,8 @@ cake_flow_list_remove (u32 *list_head, cake_flow_t *flows, u32 idx)
 
   if (f->next != ~0)
     flows[f->next].prev = f->prev;
+  else
+    *list_tail = f->prev;
 
   f->next = ~0;
   f->prev = ~0;

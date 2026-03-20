@@ -54,8 +54,11 @@ cake_tin_init (cake_tin_t *tin)
 
   clib_memset (tin->flow_tags, 0, sizeof (tin->flow_tags));
   tin->new_flow_head = ~0;
+  tin->new_flow_tail = ~0;
   tin->old_flow_head = ~0;
+  tin->old_flow_tail = ~0;
   tin->decaying_flow_head = ~0;
+  tin->decaying_flow_tail = ~0;
   tin->quantum = CAKE_QUANTUM_DEFAULT;
 }
 

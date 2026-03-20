@@ -154,7 +154,8 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  flow->flow_state = CAKE_FLOW_SPARSE;
 	  flow->deficit = tin->quantum;
 	  flow->set_index = (u8) (set_base / CAKE_SET_WAYS);
-	  cake_flow_list_prepend (&tin->new_flow_head, tin->flows, flow_idx);
+	  cake_flow_list_prepend (&tin->new_flow_head, &tin->new_flow_tail,
+				  tin->flows, flow_idx);
 	  tin->flow_count++;
 	  tin->sparse_flow_count++;
 	}
@@ -162,17 +163,21 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	       vec_len (flow->queue) - flow->head > 1)
 	{
 	  flow->flow_state = CAKE_FLOW_BULK;
-	  cake_flow_list_remove (&tin->new_flow_head, tin->flows, flow_idx);
-	  cake_flow_list_prepend (&tin->old_flow_head, tin->flows, flow_idx);
+	  cake_flow_list_remove (&tin->new_flow_head, &tin->new_flow_tail,
+				 tin->flows, flow_idx);
+	  cake_flow_list_append_tail (&tin->old_flow_head, &tin->old_flow_tail,
+				      tin->flows, flow_idx);
 	  tin->sparse_flow_count--;
 	  tin->bulk_flow_count++;
 	}
       else if (flow->flow_state == CAKE_FLOW_DECAYING)
 	{
 	  flow->flow_state = CAKE_FLOW_BULK;
-	  cake_flow_list_remove (&tin->decaying_flow_head, tin->flows,
+	  cake_flow_list_remove (&tin->decaying_flow_head,
+				 &tin->decaying_flow_tail, tin->flows,
 				 flow_idx);
-	  cake_flow_list_prepend (&tin->old_flow_head, tin->flows, flow_idx);
+	  cake_flow_list_append_tail (&tin->old_flow_head, &tin->old_flow_tail,
+				      tin->flows, flow_idx);
 	  tin->bulk_flow_count++;
 	}
 

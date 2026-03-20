@@ -53,11 +53,12 @@ cake_flow_queue_len (cake_flow_t *f)
 }
 
 static_always_inline void
-cake_flow_reclaim (cake_tin_t *tin, u32 flow_idx, u32 *list_head)
+cake_flow_reclaim (cake_tin_t *tin, u32 flow_idx, u32 *list_head,
+		   u32 *list_tail)
 {
   cake_flow_t *f = &tin->flows[flow_idx];
 
-  cake_flow_list_remove (list_head, tin->flows, flow_idx);
+  cake_flow_list_remove (list_head, list_tail, tin->flows, flow_idx);
 
   if (f->queue)
     {
@@ -153,7 +154,8 @@ VLIB_NODE_FN (cake_dequeue_node)
 	    {
 	      if (cake_flow_queue_len (flow) == 0)
 		{
-		  cake_flow_reclaim (tin, flow_idx, &tin->new_flow_head);
+		  cake_flow_reclaim (tin, flow_idx, &tin->new_flow_head,
+				     &tin->new_flow_tail);
 		  continue;
 		}
 
@@ -176,7 +178,8 @@ VLIB_NODE_FN (cake_dequeue_node)
 	      sched_dequeued++;
 
 	      if (cake_flow_queue_len (flow) == 0)
-		cake_flow_reclaim (tin, flow_idx, &tin->new_flow_head);
+		cake_flow_reclaim (tin, flow_idx, &tin->new_flow_head,
+				   &tin->new_flow_tail);
 
 	      b->flags |= CAKE_BUFFER_F_SCHEDULED;
 	      u32 sw_if_index = vnet_buffer (b)->sw_if_index[VLIB_TX];
@@ -215,16 +218,19 @@ VLIB_NODE_FN (cake_dequeue_node)
 		  if (flow->flow_state == CAKE_FLOW_BULK)
 		    {
 		      flow->flow_state = CAKE_FLOW_DECAYING;
-		      cake_flow_list_remove (&tin->old_flow_head, tin->flows,
+		      cake_flow_list_remove (&tin->old_flow_head,
+					     &tin->old_flow_tail, tin->flows,
 					     flow_idx);
 		      cake_flow_list_append_tail (&tin->decaying_flow_head,
-						 tin->flows, flow_idx);
+						  &tin->decaying_flow_tail,
+						  tin->flows, flow_idx);
 		      tin->bulk_flow_count--;
 		    }
 		  else if (flow->flow_state == CAKE_FLOW_DECAYING)
 		    {
 		      cake_flow_reclaim (tin, flow_idx,
-					 &tin->decaying_flow_head);
+					 &tin->decaying_flow_head,
+					 &tin->decaying_flow_tail);
 		    }
 		  break;
 		}
@@ -278,10 +284,11 @@ VLIB_NODE_FN (cake_dequeue_node)
 	  if (flow->deficit <= 0 && flow->flow_state == CAKE_FLOW_BULK &&
 	      cake_flow_queue_len (flow) > 0)
 	    {
-	      cake_flow_list_remove (&tin->old_flow_head, tin->flows,
-				     flow_idx);
-	      cake_flow_list_append_tail (&tin->old_flow_head, tin->flows,
-					 flow_idx);
+	      cake_flow_list_remove (&tin->old_flow_head, &tin->old_flow_tail,
+				     tin->flows, flow_idx);
+	      cake_flow_list_append_tail (&tin->old_flow_head,
+					  &tin->old_flow_tail, tin->flows,
+					  flow_idx);
 	      flow->deficit = 0;
 	    }
 
