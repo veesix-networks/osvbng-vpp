@@ -858,6 +858,7 @@ Note: Tin shares describe guaranteed minimums. Unused capacity is redistributed 
 - **BQL (Byte Queue Limits)**: Linux BQL integration is not applicable — VPP manages its own TX queues. The CAKE scheduler itself provides the queuing discipline.
 - **Linux tc integration**: Not applicable — subscriber data plane traffic flows through VPP, not the Linux kernel.
 - **CoA-triggered rate changes**: The API supports rate changes, but RADIUS CoA is not yet in osvbng. When CoA lands, it calls `CakeSchedEnableDisable` with the new rate.
+- **Dedicated-core scheduling model**: The current design runs enqueue and dequeue on the same worker cores as DPDK RX polling (inline model). A dedicated-core model — where CAKE dequeue runs on separate cores like the old VPP HQoS — is a potential future optimization for very high throughput deployments. However, this requires careful investigation of NUMA topology (cross-socket buffer access latency, hugepage allocation per NUMA node), VPP's frame queue handoff performance across NUMA boundaries, and whether the cache penalty of cross-core buffer sharing outweighs the CPU headroom gained. This is explicitly deferred until real profiling data exists — we will not spec a cross-NUMA design without evidence that it's actually faster than the inline model.
 
 ## Acknowledgments
 
