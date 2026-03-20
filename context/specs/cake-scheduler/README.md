@@ -19,6 +19,8 @@
 - [DECISIONS.md](DECISIONS.md) — All review items triaged (18 findings: 7 Codex + 11 Gemini, all accepted, 0 rejected)
 - [spec-reviews/CODEX.md](spec-reviews/CODEX.md) — Phase 3 architectural critique
 - [spec-reviews/GEMINI.md](spec-reviews/GEMINI.md) — Phase 2 RFC compliance and algorithm review
+- [code-reviews/PHASE2_PERF_REVIEW_GEMINI.md](code-reviews/PHASE2_PERF_REVIEW_GEMINI.md) — Gemini-authored Phase 2 performance review brief
+- [code-reviews/PHASE2_PERF_REVIEW_CODEX.md](code-reviews/PHASE2_PERF_REVIEW_CODEX.md) — Codex implementation performance/correctness review
 - [../full-qos/IMPLEMENTATION_SPEC.md](../full-qos/IMPLEMENTATION_SPEC.md) — Parent QoS spec (this is Phase 5 of that spec)
 
 ## Codebase Entry Points

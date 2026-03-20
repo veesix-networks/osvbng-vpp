@@ -1,4 +1,7 @@
-# Phase 2 Performance Review Spec
+# Phase 2 Performance Review Brief (Gemini)
+
+**Author:** Gemini
+**Role:** Review brief / issue list for Phase 2 implementation review
 
 **Purpose:** Document performance concerns identified during Phase 2 implementation for review by Codex and Gemini before optimization work begins.
 
