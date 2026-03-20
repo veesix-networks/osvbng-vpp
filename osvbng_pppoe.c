@@ -411,6 +411,8 @@ int vnet_osvbng_pppoe_add_del_session
       si->flags &= ~VNET_SW_INTERFACE_FLAG_HIDDEN;
       vnet_sw_interface_set_flags (vnm, sw_if_index,
                                    VNET_SW_INTERFACE_FLAG_ADMIN_UP);
+      vnet_set_interface_l3_output_node (vnm->vlib_main, sw_if_index,
+                                         (u8 *) "tunnel-output");
 
       /* Bind interface to VRF table so ip4-input/ip6-input resolve correct FIB */
       if (a->decap_fib_index != 0)
@@ -438,6 +440,7 @@ int vnet_osvbng_pppoe_add_del_session
       t = pool_elt_at_index (pem->sessions, result.fields.session_index);
       sw_if_index = t->sw_if_index;
 
+      vnet_reset_interface_l3_output_node (vnm->vlib_main, sw_if_index);
       vnet_sw_interface_set_flags (vnm, t->sw_if_index, 0 /* down */ );
       vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, t->sw_if_index);
       si->flags |= VNET_SW_INTERFACE_FLAG_HIDDEN;
