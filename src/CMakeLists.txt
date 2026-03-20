@@ -17,6 +17,7 @@ add_vpp_plugin(osvbng_qos_sched
   MULTIARCH_SOURCES
   cake_enqueue.c
   cake_dequeue.c
+  cake_hash.c
 
   API_FILES
   osvbng_qos_sched.api

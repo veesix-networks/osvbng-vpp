@@ -5,7 +5,7 @@
  * osvbng QoS Scheduler Plugin - Core implementation
  * Plugin init, per-subscriber enable/disable, CLI commands.
  *
- * Phase 1: Single FIFO per subscriber, token-bucket shaping only.
+ * Phase 2: Per-flow queuing with set-associative hashing and DRR.
  *
  * Algorithms derived from the Linux CAKE qdisc (sch_cake.c).
  * Original authors: Dave Taht, Jonathan Morton, Toke Hoiland-Jorgensen,
@@ -38,6 +38,42 @@ cake_set_dequeue_node_state (vlib_node_state_t state)
     {
       vlib_node_set_state (this_vlib_main, cm->dequeue_node_index, state);
     }
+}
+
+static void
+cake_tin_init (cake_tin_t *tin)
+{
+  clib_memset (tin, 0, sizeof (*tin));
+  vec_validate_init_empty (tin->flows, CAKE_QUEUES - 1, ((cake_flow_t){ 0 }));
+
+  for (u32 i = 0; i < CAKE_QUEUES; i++)
+    {
+      tin->flows[i].next = ~0;
+      tin->flows[i].prev = ~0;
+    }
+
+  clib_memset (tin->flow_tags, 0, sizeof (tin->flow_tags));
+  tin->new_flow_head = ~0;
+  tin->old_flow_head = ~0;
+  tin->decaying_flow_head = ~0;
+  tin->quantum = CAKE_QUANTUM_DEFAULT;
+}
+
+static void
+cake_tin_drain (vlib_main_t *vm, cake_tin_t *tin)
+{
+  for (u32 i = 0; i < CAKE_QUEUES; i++)
+    {
+      cake_flow_t *f = &tin->flows[i];
+      if (f->queue)
+	{
+	  u32 n = vec_len (f->queue) - f->head;
+	  if (n > 0)
+	    vlib_buffer_free (vm, f->queue + f->head, n);
+	  vec_free (f->queue);
+	}
+    }
+  vec_free (tin->flows);
 }
 
 int
@@ -75,8 +111,7 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 
       if (buffer_limit == 0)
 	{
-	  u32 interval =
-	    interval_us > 0 ? interval_us : 100000;
+	  u32 interval = interval_us > 0 ? interval_us : 100000;
 	  cs->buffer_limit =
 	    (u32) ((rate_bytes_per_sec * interval * 3) / (1000000 * 2));
 	  if (cs->buffer_limit < 65536)
@@ -87,8 +122,8 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 
       cs->buffer_usage = 0;
       cs->queued_buffers = 0;
-      cs->queue = NULL;
-      cs->queue_head = 0;
+
+      cake_tin_init (&cs->tin);
 
       cm->sched_index_by_sw_if_index[sw_if_index] = pool_index;
 
@@ -125,18 +160,7 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       vnet_feature_enable_disable ("ip6-output", "ip6-cake-enqueue",
 				   sw_if_index, 0, 0, 0);
 
-      if (cs->queue)
-	{
-	  u32 n_queued = vec_len (cs->queue) - cs->queue_head;
-	  if (n_queued > 0)
-	    {
-	      vlib_buffer_free (vm, cs->queue + cs->queue_head, n_queued);
-	      vlib_log_notice (cm->log_class,
-			       "drained %u queued buffers on sw_if_index %u",
-			       n_queued, sw_if_index);
-	    }
-	  vec_free (cs->queue);
-	}
+      cake_tin_drain (vm, &cs->tin);
 
       for (u32 ti = 0; ti < vec_len (cm->per_thread); ti++)
 	{
@@ -178,6 +202,9 @@ cake_sched_reset_stats (u32 sw_if_index)
   cs->dequeued_pkts = 0;
   cs->dequeued_bytes = 0;
   cs->dropped_pkts = 0;
+  cs->tin.packets = 0;
+  cs->tin.bytes = 0;
+  cs->tin.drops = 0;
 }
 
 static clib_error_t *
@@ -223,10 +250,9 @@ cake_sched_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
 
   u64 rate_bytes = rate_kbps * 1000 / 8;
 
-  int rv = cake_sched_enable_disable (
-    vm, sw_if_index, !is_disable, rate_bytes,
-    0, overhead_bytes, atm_mode, mpu,
-    0, 0, 0, 0);
+  int rv = cake_sched_enable_disable (vm, sw_if_index, !is_disable,
+				      rate_bytes, 0, overhead_bytes, atm_mode,
+				      mpu, 0, 0, 0, 0);
 
   if (rv)
     return clib_error_return (0, "cake_sched_enable_disable returned %d", rv);
@@ -265,9 +291,7 @@ cake_sched_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
       if (sw_if_index != ~0 && cs->sw_if_index != sw_if_index)
 	continue;
 
-      u32 queue_depth = 0;
-      if (cs->queue)
-	queue_depth = vec_len (cs->queue) - cs->queue_head;
+      u32 queue_depth = cs->queued_buffers;
 
       vlib_cli_output (
 	vm,
@@ -285,6 +309,12 @@ cake_sched_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
 		       cs->enqueued_pkts, cs->enqueued_bytes,
 		       cs->dequeued_pkts, cs->dequeued_bytes,
 		       cs->dropped_pkts);
+
+      vlib_cli_output (vm,
+		       "    flows: %u active (%u sparse, %u bulk)",
+		       cs->tin.flow_count, cs->tin.sparse_flow_count,
+		       cs->tin.bulk_flow_count);
+
       found++;
     }
 
@@ -314,12 +344,11 @@ osvbng_qos_sched_init (vlib_main_t *vm)
   cm->ip6_enqueue_node_index = ip6_cake_enqueue_node.index;
   cm->dequeue_node_index = cake_dequeue_node.index;
 
-  cm->ip4_output_arc_index =
-    vnet_get_feature_arc_index ("ip4-output");
-  cm->ip6_output_arc_index =
-    vnet_get_feature_arc_index ("ip6-output");
+  cm->ip4_output_arc_index = vnet_get_feature_arc_index ("ip4-output");
+  cm->ip6_output_arc_index = vnet_get_feature_arc_index ("ip6-output");
 
-  vlib_log_notice (cm->log_class, "initialized (Phase 1: shaper only)");
+  vlib_log_notice (cm->log_class,
+		   "initialized (Phase 2: per-flow queuing + DRR)");
 
   return 0;
 }
@@ -327,7 +356,7 @@ osvbng_qos_sched_init (vlib_main_t *vm)
 VLIB_INIT_FUNCTION (osvbng_qos_sched_init);
 
 VLIB_PLUGIN_REGISTER () = {
-  .version = "1.0.0",
+  .version = "2.0.0",
   .description = "osvbng QoS Scheduler Plugin (CAKE)",
 };
 

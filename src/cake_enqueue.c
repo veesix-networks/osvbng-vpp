@@ -5,18 +5,9 @@
  * osvbng QoS Scheduler Plugin - Enqueue node
  * ip4-output / ip6-output feature arc nodes.
  *
- * Two roles:
- *   1. Fresh packets (no SCHEDULED flag): look up scheduler, store buffer
- *      in FIFO, consume (do NOT forward to any next node).
- *   2. Re-injected packets (SCHEDULED flag set by dequeue): clear flag,
- *      call vnet_feature_next() to continue through remaining output
- *      features (qos-mark, etc.) then ip4/ip6-rewrite.
- *
- * Buffer ownership invariant: enqueue CONSUMES the buffer. The scheduler
- * is the sole owner from that point. Buffers are freed in exactly one of:
- *   - dequeue transmit (re-injection)
- *   - buffer overflow drop (vlib_buffer_free_one here)
- *   - subscriber teardown (drain all queues in disable path)
+ * Phase 2: Per-flow queuing with set-associative hashing.
+ * Classifies packets by 5-tuple hash into per-flow queues.
+ * Manages DRR flow list insertion on arrival.
  *
  * MULTIARCH: compiled with SIMD variants (AVX2, AVX-512, NEON).
  */
@@ -29,6 +20,7 @@
 typedef struct
 {
   u32 sw_if_index;
+  u32 flow_idx;
   u8 enqueued;
   u8 scheduled;
 } cake_enqueue_trace_t;
@@ -40,7 +32,8 @@ format_cake_enqueue_trace (u8 *s, va_list *args)
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
   cake_enqueue_trace_t *t = va_arg (*args, cake_enqueue_trace_t *);
 
-  s = format (s, "CAKE-ENQUEUE: sw_if_index %u, %s", t->sw_if_index,
+  s = format (s, "CAKE-ENQUEUE: sw_if_index %u flow %u, %s",
+	      t->sw_if_index, t->flow_idx,
 	      t->scheduled ? "scheduled-passthrough" :
 	      t->enqueued  ? "enqueued" :
 			     "passthrough");
@@ -49,7 +42,7 @@ format_cake_enqueue_trace (u8 *s, va_list *args)
 
 static_always_inline uword
 cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
-		     vlib_frame_t *frame)
+		     vlib_frame_t *frame, u8 is_ip4)
 {
   cake_main_t *cm = &cake_main;
   u32 thread_index = vm->thread_index;
@@ -85,6 +78,7 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	      cake_enqueue_trace_t *t =
 		vlib_add_trace (vm, node, b0, sizeof (*t));
 	      t->sw_if_index = vnet_buffer (b0)->sw_if_index[VLIB_TX];
+	      t->flow_idx = ~0;
 	      t->enqueued = 0;
 	      t->scheduled = 1;
 	    }
@@ -110,6 +104,7 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	      cake_enqueue_trace_t *t =
 		vlib_add_trace (vm, node, b0, sizeof (*t));
 	      t->sw_if_index = sw_if_index0;
+	      t->flow_idx = ~0;
 	      t->enqueued = 0;
 	      t->scheduled = 0;
 	    }
@@ -117,12 +112,19 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	}
 
       cake_sched_t *cs = pool_elt_at_index (cm->schedulers, si);
+      cake_tin_t *tin = &cs->tin;
       u32 pkt_len = vlib_buffer_length_in_chain (vm, b0);
+
+      u32 tag = cake_hash_flow (b0, is_ip4);
+      u32 set_base = (tag % CAKE_SET_COUNT) * CAKE_SET_WAYS;
+      u32 flow_idx = cake_flow_lookup (tin, tag, set_base);
+      cake_flow_t *flow = &tin->flows[flow_idx];
 
       if (PREDICT_FALSE (cs->buffer_usage + pkt_len > cs->buffer_limit))
 	{
 	  vlib_buffer_free_one (vm, bi0);
 	  cs->dropped_pkts++;
+	  tin->drops++;
 	  n_dropped++;
 
 	  if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
@@ -130,18 +132,49 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	      cake_enqueue_trace_t *t =
 		vlib_add_trace (vm, node, b0, sizeof (*t));
 	      t->sw_if_index = sw_if_index0;
+	      t->flow_idx = flow_idx;
 	      t->enqueued = 0;
 	      t->scheduled = 0;
 	    }
 	  continue;
 	}
 
-      vec_add1 (cs->queue, bi0);
+      vec_add1 (flow->queue, bi0);
+      flow->backlog_bytes += pkt_len;
       cs->buffer_usage += pkt_len;
       cs->queued_buffers++;
       cs->enqueued_pkts++;
       cs->enqueued_bytes += pkt_len;
+      tin->packets++;
+      tin->bytes += pkt_len;
       n_enqueued++;
+
+      if (flow->flow_state == CAKE_FLOW_NONE)
+	{
+	  flow->flow_state = CAKE_FLOW_SPARSE;
+	  flow->deficit = tin->quantum;
+	  flow->set_index = (u8) (set_base / CAKE_SET_WAYS);
+	  cake_flow_list_append (&tin->new_flow_head, tin->flows, flow_idx);
+	  tin->flow_count++;
+	  tin->sparse_flow_count++;
+	}
+      else if (flow->flow_state == CAKE_FLOW_SPARSE &&
+	       vec_len (flow->queue) - flow->head > 1)
+	{
+	  flow->flow_state = CAKE_FLOW_BULK;
+	  cake_flow_list_remove (&tin->new_flow_head, tin->flows, flow_idx);
+	  cake_flow_list_append (&tin->old_flow_head, tin->flows, flow_idx);
+	  tin->sparse_flow_count--;
+	  tin->bulk_flow_count++;
+	}
+      else if (flow->flow_state == CAKE_FLOW_DECAYING)
+	{
+	  flow->flow_state = CAKE_FLOW_BULK;
+	  cake_flow_list_remove (&tin->decaying_flow_head, tin->flows,
+				 flow_idx);
+	  cake_flow_list_append (&tin->old_flow_head, tin->flows, flow_idx);
+	  tin->bulk_flow_count++;
+	}
 
       if (thread_index < vec_len (cm->per_thread))
 	{
@@ -156,6 +189,7 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  cake_enqueue_trace_t *t =
 	    vlib_add_trace (vm, node, b0, sizeof (*t));
 	  t->sw_if_index = sw_if_index0;
+	  t->flow_idx = flow_idx;
 	  t->enqueued = 1;
 	  t->scheduled = 0;
 	}
@@ -175,13 +209,13 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 VLIB_NODE_FN (ip4_cake_enqueue_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
-  return cake_enqueue_inline (vm, node, frame);
+  return cake_enqueue_inline (vm, node, frame, 1);
 }
 
 VLIB_NODE_FN (ip6_cake_enqueue_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
-  return cake_enqueue_inline (vm, node, frame);
+  return cake_enqueue_inline (vm, node, frame, 0);
 }
 
 VLIB_REGISTER_NODE (ip4_cake_enqueue_node) = {
