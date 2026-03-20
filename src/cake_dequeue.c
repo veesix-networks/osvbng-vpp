@@ -217,8 +217,8 @@ VLIB_NODE_FN (cake_dequeue_node)
 		      flow->flow_state = CAKE_FLOW_DECAYING;
 		      cake_flow_list_remove (&tin->old_flow_head, tin->flows,
 					     flow_idx);
-		      cake_flow_list_append (&tin->decaying_flow_head,
-					     tin->flows, flow_idx);
+		      cake_flow_list_append_tail (&tin->decaying_flow_head,
+						 tin->flows, flow_idx);
 		      tin->bulk_flow_count--;
 		    }
 		  else if (flow->flow_state == CAKE_FLOW_DECAYING)
@@ -280,8 +280,8 @@ VLIB_NODE_FN (cake_dequeue_node)
 	    {
 	      cake_flow_list_remove (&tin->old_flow_head, tin->flows,
 				     flow_idx);
-	      cake_flow_list_append (&tin->old_flow_head, tin->flows,
-				     flow_idx);
+	      cake_flow_list_append_tail (&tin->old_flow_head, tin->flows,
+					 flow_idx);
 	      flow->deficit = 0;
 	    }
 
