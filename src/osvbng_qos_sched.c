@@ -58,7 +58,7 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
   cake_main_t *cm = &cake_main;
 
   /* Validate interface exists */
-  if (!vnet_sw_if_index_is_api_valid (sw_if_index))
+  if (!vnet_sw_interface_is_api_valid (vnet_get_main (), sw_if_index))
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
   if (is_enable)

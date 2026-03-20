@@ -37,7 +37,7 @@ typedef struct
   u8 mpu;
 } cake_overhead_preset_t;
 
-static cake_overhead_preset_t cake_overhead_presets[] = {
+static cake_overhead_preset_t cake_overhead_presets[] __attribute__ ((unused)) = {
   { .name = "none", .overhead_bytes = 0, .atm_mode = 0, .mpu = 0 },
   { .name = "ethernet", .overhead_bytes = 14, .atm_mode = 0, .mpu = 64 },
   { .name = "docsis", .overhead_bytes = 18, .atm_mode = 0, .mpu = 64 },
