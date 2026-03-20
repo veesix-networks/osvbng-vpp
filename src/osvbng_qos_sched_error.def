@@ -1,0 +1,15 @@
+/* Copyright 2026 Veesix Networks Ltd
+ * Licensed under the GNU General Public License v3.0 or later.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+cake_error(NONE, "No error")
+cake_error(ENQUEUED, "Packets enqueued to scheduler")
+cake_error(DEQUEUED, "Packets dequeued from scheduler")
+cake_error(PASSTHROUGH, "Packets passed through (no scheduler)")
+cake_error(DROPPED_AQM, "Packets dropped by COBALT AQM")
+cake_error(DROPPED_OVERFLOW, "Packets dropped by buffer overflow")
+cake_error(ECN_MARKED, "Packets ECN CE marked")
+cake_error(NO_BUFFER, "No buffer space available")
+cake_error(FLOW_COLLISION, "Flow hash set-associative evictions")
+cake_error(DROP, "Packets dropped")
