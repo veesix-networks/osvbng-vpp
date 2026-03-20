@@ -3,14 +3,14 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * osvbng QoS Scheduler Plugin - Enqueue node
- * Interface-output feature arc node.
+ * ip4-output / ip6-output feature arc nodes.
  *
  * Two roles:
  *   1. Fresh packets (no SCHEDULED flag): look up scheduler, store buffer
  *      in FIFO, consume (do NOT forward to any next node).
  *   2. Re-injected packets (SCHEDULED flag set by dequeue): clear flag,
  *      call vnet_feature_next() to continue through remaining output
- *      features (span, ipsec, arc-end, TX).
+ *      features (qos-mark, etc.) then ip4/ip6-rewrite.
  *
  * Buffer ownership invariant: enqueue CONSUMES the buffer. The scheduler
  * is the sole owner from that point. Buffers are freed in exactly one of:
@@ -47,18 +47,15 @@ format_cake_enqueue_trace (u8 *s, va_list *args)
   return s;
 }
 
-VLIB_NODE_FN (cake_enqueue_node)
-(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+static_always_inline uword
+cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
+		     vlib_frame_t *frame)
 {
   cake_main_t *cm = &cake_main;
   u32 thread_index = vm->thread_index;
   u32 *from = vlib_frame_vector_args (frame);
   u32 n_left = frame->n_vectors;
 
-  /*
-   * Passthrough buffers: collected here, then bulk-enqueued to their
-   * feature-arc next nodes after the main loop.
-   */
   u32 pass_bi[VLIB_FRAME_SIZE];
   u16 pass_nexts[VLIB_FRAME_SIZE];
   u32 n_pass = 0;
@@ -74,11 +71,6 @@ VLIB_NODE_FN (cake_enqueue_node)
 
       vlib_buffer_t *b0 = vlib_get_buffer (vm, bi0);
 
-      /*
-       * Re-injected packet: dequeue node set CAKE_BUFFER_F_SCHEDULED
-       * and re-started the feature arc. Clear the flag and continue
-       * through remaining output features.
-       */
       if (PREDICT_FALSE (b0->flags & CAKE_BUFFER_F_SCHEDULED))
 	{
 	  b0->flags &= ~CAKE_BUFFER_F_SCHEDULED;
@@ -101,14 +93,12 @@ VLIB_NODE_FN (cake_enqueue_node)
 
       u32 sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_TX];
 
-      /* Look up scheduler for this interface */
       u32 si = ~0;
       if (sw_if_index0 < vec_len (cm->sched_index_by_sw_if_index))
 	si = cm->sched_index_by_sw_if_index[sw_if_index0];
 
       if (PREDICT_TRUE (si == ~0))
 	{
-	  /* No scheduler — passthrough via feature arc */
 	  u32 next0;
 	  vnet_feature_next (&next0, b0);
 	  pass_bi[n_pass] = bi0;
@@ -129,7 +119,6 @@ VLIB_NODE_FN (cake_enqueue_node)
       cake_sched_t *cs = pool_elt_at_index (cm->schedulers, si);
       u32 pkt_len = vlib_buffer_length_in_chain (vm, b0);
 
-      /* Admission control: tail drop if buffer limit exceeded */
       if (PREDICT_FALSE (cs->buffer_usage + pkt_len > cs->buffer_limit))
 	{
 	  vlib_buffer_free_one (vm, bi0);
@@ -147,11 +136,6 @@ VLIB_NODE_FN (cake_enqueue_node)
 	  continue;
 	}
 
-      /*
-       * Consume: store buffer index in the scheduler's FIFO.
-       * The buffer is NOT forwarded to any next node — the scheduler
-       * is now the sole owner.
-       */
       vec_add1 (cs->queue, bi0);
       cs->buffer_usage += pkt_len;
       cs->queued_buffers++;
@@ -159,7 +143,6 @@ VLIB_NODE_FN (cake_enqueue_node)
       cs->enqueued_bytes += pkt_len;
       n_enqueued++;
 
-      /* Mark scheduler as active on this thread */
       if (thread_index < vec_len (cm->per_thread))
 	{
 	  cake_per_thread_t *pt =
@@ -178,7 +161,6 @@ VLIB_NODE_FN (cake_enqueue_node)
 	}
     }
 
-  /* Bulk-forward all passthrough buffers to their feature-arc next nodes */
   if (n_pass > 0)
     vlib_buffer_enqueue_to_next (vm, node, pass_bi, pass_nexts, n_pass);
 
@@ -190,23 +172,46 @@ VLIB_NODE_FN (cake_enqueue_node)
   return frame->n_vectors;
 }
 
-VLIB_REGISTER_NODE (cake_enqueue_node) = {
-  .name = "cake-enqueue",
+VLIB_NODE_FN (ip4_cake_enqueue_node)
+(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+{
+  return cake_enqueue_inline (vm, node, frame);
+}
+
+VLIB_NODE_FN (ip6_cake_enqueue_node)
+(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+{
+  return cake_enqueue_inline (vm, node, frame);
+}
+
+VLIB_REGISTER_NODE (ip4_cake_enqueue_node) = {
+  .name = "ip4-cake-enqueue",
   .vector_size = sizeof (u32),
   .format_trace = format_cake_enqueue_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
   .n_errors = CAKE_N_ERROR,
   .error_strings = cake_error_strings,
   .n_next_nodes = 0,
-  /* No static next nodes — passthrough uses dynamically-added feature arc
-   * next nodes via vnet_feature_next(). Consumed buffers are not forwarded
-   * to any next node. */
 };
 
-VNET_FEATURE_INIT (cake_enqueue_feature, static) = {
-  .arc_name = "interface-output",
-  .node_name = "cake-enqueue",
-  .runs_before = VNET_FEATURES ("interface-output-arc-end"),
+VLIB_REGISTER_NODE (ip6_cake_enqueue_node) = {
+  .name = "ip6-cake-enqueue",
+  .vector_size = sizeof (u32),
+  .format_trace = format_cake_enqueue_trace,
+  .type = VLIB_NODE_TYPE_INTERNAL,
+  .n_errors = CAKE_N_ERROR,
+  .error_strings = cake_error_strings,
+  .n_next_nodes = 0,
+};
+
+VNET_FEATURE_INIT (ip4_cake_enqueue_feature, static) = {
+  .arc_name = "ip4-output",
+  .node_name = "ip4-cake-enqueue",
+};
+
+VNET_FEATURE_INIT (ip6_cake_enqueue_feature, static) = {
+  .arc_name = "ip6-output",
+  .node_name = "ip6-cake-enqueue",
 };
 
 /*

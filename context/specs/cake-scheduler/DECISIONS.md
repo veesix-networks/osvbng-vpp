@@ -1,5 +1,7 @@
 # Decisions: cake-scheduler
 
+> **UPDATE (2026-03-20):** Decision #1 (re-injection via feature arc) still applies but the feature arc changed from `interface-output` to `ip4-output`/`ip6-output`. Midchain interfaces (IPoE/PPPoE sessions) bypass `interface-output` via `tunnel-output`, so `ip4-output`/`ip6-output` arcs are used instead (same pattern as VPP's `qos-mark`).
+
 Phase 4 finalization incorporating findings from both Codex (Phase 3, 7 findings) and Gemini (Phase 2, 11 findings). Several findings overlap — deduplicated below. All accepted, none rejected.
 
 ## Accepted

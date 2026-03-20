@@ -26,7 +26,7 @@
 ### Plugin source (`src/`)
 
 - `src/osvbng_qos_sched.h` — Core data structures
-- `src/cake_enqueue.c` — Enqueue node (interface-output feature arc)
+- `src/cake_enqueue.c` — Enqueue nodes (ip4-output/ip6-output feature arcs)
 - `src/cake_dequeue.c` — Dequeue node (INPUT polling)
 - `src/cake_cobalt.c` — COBALT AQM (CoDel + BLUE)
 - `src/cake_hash.c` — Flow hashing (IPv4 + IPv6)

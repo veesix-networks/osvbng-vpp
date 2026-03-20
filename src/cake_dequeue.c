@@ -14,10 +14,9 @@
  *   2. Check global shaper time — skip if not ready.
  *   3. Dequeue from FIFO, charge shaper, collect buffer indices.
  *   4. Set CAKE_BUFFER_F_SCHEDULED flag on each buffer.
- *   5. Re-start the interface-output feature arc on each buffer via
- *      vnet_feature_arc_start() — this sets up current_config_index
- *      so cake-enqueue can call vnet_feature_next() on the second pass.
- *   6. Bulk-enqueue all collected buffers to cake-enqueue node.
+ *   5. Determine IP version from packet, re-start the correct
+ *      ip4-output or ip6-output feature arc via vnet_feature_arc_start().
+ *   6. Bulk-enqueue buffers to ip4/ip6-cake-enqueue nodes.
  *
  * MULTIARCH: compiled with SIMD variants (AVX2, AVX-512, NEON).
  */
@@ -29,7 +28,8 @@
 
 typedef enum
 {
-  CAKE_DEQUEUE_NEXT_REINJECT, /* → cake-enqueue (for re-injection) */
+  CAKE_DEQUEUE_NEXT_REINJECT_IP4,
+  CAKE_DEQUEUE_NEXT_REINJECT_IP6,
   CAKE_DEQUEUE_N_NEXT,
 } cake_dequeue_next_t;
 
@@ -68,15 +68,10 @@ VLIB_NODE_FN (cake_dequeue_node)
   u64 now_ns = (u64) (now * 1e9);
   u32 budget = VLIB_FRAME_SIZE;
 
-  /* Collect dequeued buffer indices for batched re-injection */
   u32 out_bi[VLIB_FRAME_SIZE];
+  u16 out_nexts[VLIB_FRAME_SIZE];
   u32 n_out = 0;
 
-  /* Interface-output feature arc index for re-injection */
-  vnet_interface_main_t *im = &vnet_get_main ()->interface_main;
-  u8 arc = im->output_feature_arc_index;
-
-  /* Schedulers to deactivate after iteration */
   u32 deactivate[VLIB_FRAME_SIZE];
   u32 n_deactivate = 0;
 
@@ -94,7 +89,6 @@ VLIB_NODE_FN (cake_dequeue_node)
 
       cake_sched_t *cs = pool_elt_at_index (cm->schedulers, si);
 
-      /* Global shaper check: skip if not ready to transmit */
       if (now_ns < cs->global_shaper_time_ns)
 	continue;
 
@@ -102,61 +96,58 @@ VLIB_NODE_FN (cake_dequeue_node)
 
       while (budget > 0)
 	{
-	  /* Check if FIFO has packets */
 	  if (cs->queue_head >= vec_len (cs->queue))
 	    {
-	      /* Queue drained — compact and deactivate */
 	      vec_reset_length (cs->queue);
 	      cs->queue_head = 0;
 	      deactivate[n_deactivate++] = si;
 	      break;
 	    }
 
-	  /* Dequeue one packet */
 	  u32 bi = cs->queue[cs->queue_head];
 	  cs->queue_head++;
 
 	  vlib_buffer_t *b = vlib_get_buffer (vm, bi);
 	  u32 pkt_len = vlib_buffer_length_in_chain (vm, b);
 
-	  /* Charge the shaper: overhead-adjusted cost in nanoseconds */
 	  u32 adj_len = cake_overhead_adjust (cs, pkt_len);
 	  cs->global_shaper_time_ns += (u64) adj_len * cs->rate_ns_per_byte;
 
-	  /* Failsafe: clamp shaper to prevent runaway drift.
-	   * Max 150ms into the future (1.5 × CoDel default interval). */
 	  u64 max_shaper = now_ns + (u64) 150000000;
 	  if (cs->global_shaper_time_ns > max_shaper)
 	    cs->global_shaper_time_ns = max_shaper;
 
-	  /* Update bookkeeping */
 	  cs->buffer_usage -= pkt_len;
 	  cs->queued_buffers--;
 	  cs->dequeued_pkts++;
 	  cs->dequeued_bytes += pkt_len;
 	  sched_dequeued++;
 
-	  /*
-	   * Re-injection setup:
-	   * 1. Set SCHEDULED flag so enqueue node knows to passthrough.
-	   * 2. Re-start the feature arc on this buffer. This sets
-	   *    feature_arc_index and current_config_index so that when
-	   *    cake-enqueue calls vnet_feature_next(), it advances to
-	   *    the next feature AFTER cake-enqueue (e.g., span-output,
-	   *    ipsec-if-output, interface-output-arc-end).
-	   *    The feature config is always live at transmission time,
-	   *    not stale from the original enqueue.
-	   */
 	  b->flags |= CAKE_BUFFER_F_SCHEDULED;
 
 	  u32 sw_if_index = vnet_buffer (b)->sw_if_index[VLIB_TX];
 	  u32 dummy_next;
-	  vnet_feature_arc_start (arc, sw_if_index, &dummy_next, b);
 
-	  out_bi[n_out++] = bi;
+	  u8 *ip_hdr = vlib_buffer_get_current (b);
+	  u8 is_ip4 = (ip_hdr[0] >> 4) == 4;
+
+	  if (is_ip4)
+	    {
+	      vnet_feature_arc_start (cm->ip4_output_arc_index, sw_if_index,
+				      &dummy_next, b);
+	      out_nexts[n_out] = CAKE_DEQUEUE_NEXT_REINJECT_IP4;
+	    }
+	  else
+	    {
+	      vnet_feature_arc_start (cm->ip6_output_arc_index, sw_if_index,
+				      &dummy_next, b);
+	      out_nexts[n_out] = CAKE_DEQUEUE_NEXT_REINJECT_IP6;
+	    }
+
+	  out_bi[n_out] = bi;
+	  n_out++;
 	  budget--;
 
-	  /* Shaper says stop after this packet */
 	  if (now_ns < cs->global_shaper_time_ns)
 	    break;
 	}
@@ -164,7 +155,6 @@ VLIB_NODE_FN (cake_dequeue_node)
       if (sched_dequeued > 0
 	  && PREDICT_FALSE (node->flags & VLIB_NODE_FLAG_TRACE))
 	{
-	  /* Add a single trace entry per scheduler per dispatch */
 	  vlib_buffer_t *b0 = vlib_get_buffer (vm, out_bi[n_out - 1]);
 	  cake_dequeue_trace_t *t =
 	    vlib_add_trace (vm, node, b0, sizeof (*t));
@@ -173,19 +163,12 @@ VLIB_NODE_FN (cake_dequeue_node)
 	}
     }
 
-  /* Deactivate drained or freed schedulers */
   for (u32 i = 0; i < n_deactivate; i++)
     pt->active_bitmap =
       clib_bitmap_set (pt->active_bitmap, deactivate[i], 0);
 
-  /*
-   * Batch re-inject: send all dequeued buffers to cake-enqueue node.
-   * This is a single vlib_get_next_frame / vlib_put_next_frame under
-   * the hood — per-packet frame acquisition is prohibited (Decision #8).
-   */
   if (n_out > 0)
-    vlib_buffer_enqueue_to_single_next (vm, node, out_bi,
-					CAKE_DEQUEUE_NEXT_REINJECT, n_out);
+    vlib_buffer_enqueue_to_next (vm, node, out_bi, out_nexts, n_out);
 
   vlib_node_increment_counter (vm, node->node_index, CAKE_ERROR_DEQUEUED,
 			       n_out);
@@ -203,7 +186,8 @@ VLIB_REGISTER_NODE (cake_dequeue_node) = {
   .error_strings = cake_error_strings,
   .n_next_nodes = CAKE_DEQUEUE_N_NEXT,
   .next_nodes = {
-    [CAKE_DEQUEUE_NEXT_REINJECT] = "cake-enqueue",
+    [CAKE_DEQUEUE_NEXT_REINJECT_IP4] = "ip4-cake-enqueue",
+    [CAKE_DEQUEUE_NEXT_REINJECT_IP6] = "ip6-cake-enqueue",
   },
 };
 

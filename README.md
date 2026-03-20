@@ -63,30 +63,30 @@ These metrics feed directly into the osvbng Go control plane for Prometheus expo
 ## Architecture
 
 ```
-  ip4/ip6-rewrite → interface-output feature arc
-                        │
-                ┌───────▼────────┐
-                │  cake-enqueue  │  interface-output feature node
-                │                │  classifies → tins → flows → queues
-                └───────┬────────┘
-                        │
-                ┌───────▼────────┐
-                │  cake-dequeue  │  INPUT polling node
-                │                │  shaper → DRR → COBALT → output
-                └───────┬────────┘
-                        │
-                ┌───────▼────────┐
-                │  interface-    │  resume normal output path
-                │  output-arc-   │
-                │  end           │
-                └───────┬────────┘
-                        │
-                     TX driver
+  ip4-lookup → ip4-output feature arc
+                    │
+            ┌───────▼──────────────┐
+            │  ip4-cake-enqueue    │  ip4-output / ip6-output feature node
+            │  (ip6-cake-enqueue)  │  classifies → tins → flows → queues
+            └───────┬──────────────┘
+                    │
+            ┌───────▼──────────────┐
+            │    cake-dequeue      │  INPUT polling node
+            │                      │  shaper → DRR → COBALT → output
+            └───────┬──────────────┘
+                    │
+            ┌───────▼──────────────┐
+            │  ip4/ip6-rewrite     │  resume normal output path
+            │  → tunnel-output     │  (midchain/tunnel interfaces)
+            │  → interface-output  │  (regular interfaces)
+            └───────┬──────────────┘
+                    │
+                 TX driver
 ```
 
-**cake-enqueue** hooks into VPP's `interface-output` feature arc. For each packet destined to a scheduler-enabled subscriber interface, it extracts the 5-tuple, hashes into a flow queue within the appropriate DiffServ tin, and timestamps the packet. Non-scheduled interfaces pass through untouched.
+**ip4/ip6-cake-enqueue** hooks into VPP's `ip4-output` and `ip6-output` feature arcs. These arcs run before `ip4-rewrite`/`ip4-midchain`, keyed on `tx_sw_if_index` — so they work on every interface type: physical interfaces, VLAN sub-interfaces, and midchain/tunnel interfaces (IPoE sessions, PPPoE sessions). Non-scheduled interfaces pass through untouched.
 
-**cake-dequeue** is a `VLIB_NODE_TYPE_INPUT` polling node that runs every main loop iteration. It checks active schedulers, drains queues at the shaped rate using deficit round robin, applies COBALT AQM decisions, and sends packets to `interface-output-arc-end` to resume the output path.
+**cake-dequeue** is a `VLIB_NODE_TYPE_INPUT` polling node that runs every main loop iteration. It checks active schedulers, drains queues at the shaped rate using deficit round robin, applies COBALT AQM decisions, and re-injects packets into the correct ip4/ip6-output feature arc to resume the normal output path.
 
 ## Building
 

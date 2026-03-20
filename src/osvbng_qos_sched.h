@@ -30,10 +30,10 @@
  * Buffer flag for re-injection.
  *
  * When the dequeue node transmits a packet, it sets this flag before
- * re-injecting the buffer into the interface-output feature arc.
+ * re-injecting the buffer into the ip4/ip6-output feature arc.
  * The enqueue node checks this flag first — if set, clears it and
  * calls vnet_feature_next() to continue through remaining output
- * features (span, ipsec, etc.). No output features are skipped.
+ * features. No output features are skipped.
  */
 #define CAKE_BUFFER_F_SCHEDULED VNET_BUFFER_F_AVAIL1
 
@@ -122,8 +122,13 @@ typedef struct
   u16 msg_id_base;
 
   /* Node indices */
-  u32 enqueue_node_index;
+  u32 ip4_enqueue_node_index;
+  u32 ip6_enqueue_node_index;
   u32 dequeue_node_index;
+
+  /* Feature arc indices for re-injection */
+  u8 ip4_output_arc_index;
+  u8 ip6_output_arc_index;
 
   /* Convenience */
   vlib_main_t *vlib_main;
@@ -153,8 +158,7 @@ cake_overhead_adjust (cake_sched_t *cs, u32 pkt_len)
   i32 adjusted = (i32) pkt_len + cs->overhead_bytes;
   if (adjusted < cs->mpu)
     adjusted = cs->mpu;
-  if (cs->atm_mode == 1) /* ATM: round up to 48-byte cells, add 5-byte header
-			     per cell */
+  if (cs->atm_mode == 1)
     adjusted = ((adjusted + 47) / 48) * 53;
   return (u32) adjusted;
 }
@@ -162,7 +166,8 @@ cake_overhead_adjust (cake_sched_t *cs, u32 pkt_len)
 /*
  * Node registrations
  */
-extern vlib_node_registration_t cake_enqueue_node;
+extern vlib_node_registration_t ip4_cake_enqueue_node;
+extern vlib_node_registration_t ip6_cake_enqueue_node;
 extern vlib_node_registration_t cake_dequeue_node;
 
 #endif /* __included_osvbng_qos_sched_h__ */

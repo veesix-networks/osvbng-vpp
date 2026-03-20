@@ -29,10 +29,6 @@ char *cake_error_strings[] = {
 #undef cake_error
 };
 
-/*
- * Set dequeue INPUT node state on all threads.
- * Must be called under barrier (API handlers run inside barrier).
- */
 static void
 cake_set_dequeue_node_state (vlib_node_state_t state)
 {
@@ -44,10 +40,6 @@ cake_set_dequeue_node_state (vlib_node_state_t state)
     }
 }
 
-/*
- * Enable or disable a per-subscriber scheduler instance.
- * Called from API handlers (inside barrier) or CLI (main thread).
- */
 int
 cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 			   u64 rate_bytes_per_sec, u8 tin_mode,
@@ -57,19 +49,16 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 {
   cake_main_t *cm = &cake_main;
 
-  /* Validate interface exists */
   if (!vnet_sw_interface_is_api_valid (vnet_get_main (), sw_if_index))
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
   if (is_enable)
     {
-      /* Check for existing scheduler on this interface */
       vec_validate_init_empty (cm->sched_index_by_sw_if_index, sw_if_index,
 			       ~0);
       if (cm->sched_index_by_sw_if_index[sw_if_index] != ~0)
 	return VNET_API_ERROR_ENTRY_ALREADY_EXISTS;
 
-      /* Allocate scheduler instance in global pool */
       cake_sched_t *cs;
       pool_get_zero (cm->schedulers, cs);
       u32 pool_index = cs - cm->schedulers;
@@ -84,15 +73,12 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       cs->mpu = mpu;
       cs->global_shaper_time_ns = 0;
 
-      /* Auto-calculate buffer limit: rate × 100ms × 1.5
-       * This gives ~150ms of buffering at the configured rate. */
       if (buffer_limit == 0)
 	{
 	  u32 interval =
-	    interval_us > 0 ? interval_us : 100000; /* default 100ms */
+	    interval_us > 0 ? interval_us : 100000;
 	  cs->buffer_limit =
 	    (u32) ((rate_bytes_per_sec * interval * 3) / (1000000 * 2));
-	  /* Minimum 64KB to avoid tiny queues at low rates */
 	  if (cs->buffer_limit < 65536)
 	    cs->buffer_limit = 65536;
 	}
@@ -104,19 +90,17 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       cs->queue = NULL;
       cs->queue_head = 0;
 
-      /* Store mapping */
       cm->sched_index_by_sw_if_index[sw_if_index] = pool_index;
 
-      /* Enable feature arc on this interface */
-      vnet_feature_enable_disable ("interface-output", "cake-enqueue",
+      vnet_feature_enable_disable ("ip4-output", "ip4-cake-enqueue",
+				   sw_if_index, 1, 0, 0);
+      vnet_feature_enable_disable ("ip6-output", "ip6-cake-enqueue",
 				   sw_if_index, 1, 0, 0);
 
-      /* If first scheduler, enable dequeue INPUT node on all threads */
       cm->n_schedulers++;
       if (cm->n_schedulers == 1)
 	cake_set_dequeue_node_state (VLIB_NODE_STATE_POLLING);
 
-      /* Ensure per-thread state is allocated for all threads */
       u32 n_threads = vlib_get_n_threads ();
       vec_validate (cm->per_thread, n_threads - 1);
 
@@ -128,7 +112,6 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
     }
   else
     {
-      /* Disable */
       vec_validate_init_empty (cm->sched_index_by_sw_if_index, sw_if_index,
 			       ~0);
       u32 pool_index = cm->sched_index_by_sw_if_index[sw_if_index];
@@ -137,15 +120,11 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 
       cake_sched_t *cs = pool_elt_at_index (cm->schedulers, pool_index);
 
-      /* Disable feature arc on this interface */
-      vnet_feature_enable_disable ("interface-output", "cake-enqueue",
+      vnet_feature_enable_disable ("ip4-output", "ip4-cake-enqueue",
+				   sw_if_index, 0, 0, 0);
+      vnet_feature_enable_disable ("ip6-output", "ip6-cake-enqueue",
 				   sw_if_index, 0, 0, 0);
 
-      /*
-       * Drain FIFO: free all queued buffers back to VPP.
-       * This is one of the five explicit buffer free paths
-       * (Decision #2: subscriber teardown).
-       */
       if (cs->queue)
 	{
 	  u32 n_queued = vec_len (cs->queue) - cs->queue_head;
@@ -159,7 +138,6 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 	  vec_free (cs->queue);
 	}
 
-      /* Clear per-thread active bitmaps for this scheduler */
       for (u32 ti = 0; ti < vec_len (cm->per_thread); ti++)
 	{
 	  cake_per_thread_t *pt = vec_elt_at_index (cm->per_thread, ti);
@@ -167,11 +145,9 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 	    clib_bitmap_set (pt->active_bitmap, pool_index, 0);
 	}
 
-      /* Clear mapping and release pool entry */
       cm->sched_index_by_sw_if_index[sw_if_index] = ~0;
       pool_put (cm->schedulers, cs);
 
-      /* If last scheduler, disable dequeue INPUT node on all threads */
       cm->n_schedulers--;
       if (cm->n_schedulers == 0)
 	cake_set_dequeue_node_state (VLIB_NODE_STATE_DISABLED);
@@ -183,9 +159,6 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
   return 0;
 }
 
-/*
- * Reset statistics for a scheduler instance.
- */
 void
 cake_sched_reset_stats (u32 sw_if_index)
 {
@@ -207,10 +180,6 @@ cake_sched_reset_stats (u32 sw_if_index)
   cs->dropped_pkts = 0;
 }
 
-/*
- * CLI: set cake scheduler <interface> rate <kbps> [overhead <bytes>]
- *      [atm|ptm|noatm] [mpu <bytes>] [disable]
- */
 static clib_error_t *
 cake_sched_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
 			   vlib_cli_command_t *cmd)
@@ -256,9 +225,8 @@ cake_sched_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
 
   int rv = cake_sched_enable_disable (
     vm, sw_if_index, !is_disable, rate_bytes,
-    0 /* tin_mode: besteffort */, overhead_bytes, atm_mode, mpu,
-    0 /* auto buffer_limit */, 0 /* default target */, 0 /* default interval */,
-    0 /* no flags */);
+    0, overhead_bytes, atm_mode, mpu,
+    0, 0, 0, 0);
 
   if (rv)
     return clib_error_return (0, "cake_sched_enable_disable returned %d", rv);
@@ -273,9 +241,6 @@ VLIB_CLI_COMMAND (cake_sched_set_command, static) = {
   .function = cake_sched_set_command_fn,
 };
 
-/*
- * CLI: show cake scheduler [<interface>]
- */
 static clib_error_t *
 cake_sched_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
 			    vlib_cli_command_t *cmd)
@@ -335,9 +300,6 @@ VLIB_CLI_COMMAND (cake_sched_show_command, static) = {
   .function = cake_sched_show_command_fn,
 };
 
-/*
- * Plugin initialization.
- */
 static clib_error_t *
 osvbng_qos_sched_init (vlib_main_t *vm)
 {
@@ -348,9 +310,14 @@ osvbng_qos_sched_init (vlib_main_t *vm)
   cm->log_class = vlib_log_register_class ("osvbng_qos_sched", 0);
   cm->n_schedulers = 0;
 
-  /* Store node indices for later reference */
-  cm->enqueue_node_index = cake_enqueue_node.index;
+  cm->ip4_enqueue_node_index = ip4_cake_enqueue_node.index;
+  cm->ip6_enqueue_node_index = ip6_cake_enqueue_node.index;
   cm->dequeue_node_index = cake_dequeue_node.index;
+
+  cm->ip4_output_arc_index =
+    vnet_get_feature_arc_index ("ip4-output");
+  cm->ip6_output_arc_index =
+    vnet_get_feature_arc_index ("ip6-output");
 
   vlib_log_notice (cm->log_class, "initialized (Phase 1: shaper only)");
 

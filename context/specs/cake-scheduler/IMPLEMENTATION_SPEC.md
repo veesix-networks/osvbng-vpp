@@ -1,5 +1,7 @@
 # Implementation Spec: CAKE-Equivalent Per-Subscriber Scheduler — VPP Plugin
 
+> **UPDATE (2026-03-20):** The feature arc changed from `interface-output` to `ip4-output` / `ip6-output` during Phase 1 testing. Midchain/tunnel interfaces (IPoE/PPPoE sessions) use `tunnel-output` which bypasses the `interface-output` feature arc entirely. VPP's own `qos-mark` uses `ip4-output`/`ip6-output` for the same reason. References to `interface-output` below reflect the original design — the implementation uses `ip4-output`/`ip6-output` arcs with separate `ip4-cake-enqueue` and `ip6-cake-enqueue` nodes.
+
 ## 1. Overview
 
 Custom VPP plugin (`osvbng-vpp-plugin-qos`) implementing per-subscriber egress traffic scheduling with CAKE-equivalent functionality: per-flow queuing with set-associative hashing, COBALT AQM (CoDel + BLUE), deficit round robin, DiffServ-aware traffic classification (tins), triple isolation (per-flow + per-host fairness), link-layer overhead compensation, and token-bucket shaping with nanosecond precision. Replaces egress policers for subscribers with scheduling enabled, eliminating bufferbloat while maintaining per-flow fairness within each subscriber's rate allocation.

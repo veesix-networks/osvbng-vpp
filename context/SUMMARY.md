@@ -56,7 +56,7 @@ Both specs are needed because:
 
 ### From cake-scheduler (Phase 4 finalization — Codex 7 findings + Gemini 11 findings, all accepted)
 
-- **Two-node design with re-injection:** Enqueue on `interface-output` feature arc, dequeue as `VLIB_NODE_TYPE_INPUT` polling node. Dequeued packets re-enter the arc with `CAKE_BUFFER_F_SCHEDULED` flag — enqueue sees the flag and passes through via `vnet_feature_next()`. This preserves all output features after CAKE (span, ipsec, etc.)
+- **Two-node design with re-injection:** Enqueue on `ip4-output` / `ip6-output` feature arcs (not `interface-output` — midchain/tunnel interfaces like IPoE/PPPoE sessions bypass `interface-output` via `tunnel-output`). Dequeue as `VLIB_NODE_TYPE_INPUT` polling node. Dequeued packets re-enter the arc with `CAKE_BUFFER_F_SCHEDULED` flag — enqueue sees the flag and passes through via `vnet_feature_next()`. Works on all interface types: physical, VLAN sub-interfaces, and midchain/tunnel session interfaces
 - **Buffer ownership invariant:** Enqueue consumes the buffer (does NOT forward to any next node). Five explicit free paths: dequeue transmit, AQM drop, overflow drop, subscriber teardown, handoff congestion
 - **No stale feature config:** Dequeue does NOT use a saved `current_config_index`. Re-injection through the enqueue node means `vnet_feature_next()` always uses the live config at transmission time
 - **Per-thread per-interface schedulers:** Each worker thread gets its own scheduler instance per interface, matching VPP's multi-TXQ model. Rate split across threads. Rebalance on TX queue placement changes
@@ -80,7 +80,7 @@ Both specs are needed because:
 | `src/osvbng_qos_sched.c` | Yes | Plugin init, DSCP tables, CoDel cache, enable/disable logic, CLI commands |
 | `src/osvbng_qos_sched_api.c` | Yes | API handlers for enable/disable, dump, reset stats |
 | `src/osvbng_qos_sched.api` | Yes | Binary API definitions (v1.0.0) |
-| `src/cake_enqueue.c` | Yes | Enqueue node on interface-output arc (scaffolded, scalar, TODOs for dual-loop) |
+| `src/cake_enqueue.c` | Yes | Enqueue nodes on ip4-output/ip6-output arcs |
 | `src/cake_dequeue.c` | Yes | Dequeue INPUT node (scaffolded, inline COBALT, TODOs for proper DRR) |
 | `src/cake_hash.c` | Yes | Stub for SIMD batch flow hashing |
 | `src/cake_cobalt.c` | Yes | COBALT AQM stub (Newton-Raphson, control law) |
