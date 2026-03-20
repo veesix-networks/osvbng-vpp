@@ -37,7 +37,7 @@ vl_api_osvbng_cake_sched_enable_disable_t_handler (
   u32 interval_us = ntohl (mp->interval_us);
   u32 flags = ntohl (mp->flags);
 
-  rv = cake_sched_enable_disable (sw_if_index, mp->is_enable,
+  rv = cake_sched_enable_disable (cm->vlib_main, sw_if_index, mp->is_enable,
 				  rate_bytes_per_sec, tin_mode,
 				  overhead_bytes, atm_mode, mpu, buffer_limit,
 				  target_us, interval_us, flags);
@@ -60,23 +60,15 @@ send_cake_sched_details (cake_sched_t *cs, vl_api_registration_t *reg,
   rmp->context = context;
   rmp->sw_if_index = ntohl (cs->sw_if_index);
   rmp->rate_bytes_per_sec = clib_host_to_net_u64 (cs->rate_bytes_per_sec);
-  rmp->tin_mode = (vl_api_osvbng_cake_tin_mode_t) cs->tin_mode;
-  rmp->tin_cnt = cs->tin_cnt;
+  rmp->tin_mode = 0; /* besteffort in Phase 1 */
+  rmp->tin_cnt = 1;
   rmp->buffer_usage = ntohl (cs->buffer_usage);
   rmp->buffer_limit = ntohl (cs->buffer_limit);
 
-  for (u8 t = 0; t < cs->tin_cnt && t < 8; t++)
-    {
-      cake_tin_t *tin = &cs->tins[t];
-      rmp->tin_packets[t] = clib_host_to_net_u64 (tin->packets);
-      rmp->tin_bytes[t] = clib_host_to_net_u64 (tin->bytes);
-      rmp->tin_drops[t] = clib_host_to_net_u64 (tin->drops);
-      rmp->tin_ecn_marks[t] = clib_host_to_net_u64 (tin->ecn_marks);
-      rmp->tin_peak_delay_us[t] = ntohl (tin->peak_queue_delay_us);
-      rmp->tin_avg_delay_us[t] = ntohl (tin->avg_queue_delay_us);
-      rmp->tin_sparse_flows[t] = ntohl (tin->sparse_flow_count);
-      rmp->tin_bulk_flows[t] = ntohl (tin->bulk_flow_count);
-    }
+  /* Phase 1: single tin, report aggregate stats */
+  rmp->tin_packets[0] = clib_host_to_net_u64 (cs->dequeued_pkts);
+  rmp->tin_bytes[0] = clib_host_to_net_u64 (cs->dequeued_bytes);
+  rmp->tin_drops[0] = clib_host_to_net_u64 (cs->dropped_pkts);
 
   vl_api_send_msg (reg, (u8 *) rmp);
 }
@@ -94,19 +86,11 @@ vl_api_osvbng_cake_sched_dump_t_handler (
 
   u32 filter_sw_if_index = ntohl (mp->sw_if_index);
 
-  for (u32 i = 0; i < vec_len (cm->sched_index_by_sw_if_index); i++)
+  cake_sched_t *cs;
+  pool_foreach (cs, cm->schedulers)
     {
-      u32 packed = cm->sched_index_by_sw_if_index[i];
-      if (packed == 0)
+      if (filter_sw_if_index != ~0 && cs->sw_if_index != filter_sw_if_index)
 	continue;
-      if (filter_sw_if_index != ~0 && i != filter_sw_if_index)
-	continue;
-
-      u32 owner_thread = packed >> 16;
-      u32 pool_index = packed & 0xffff;
-      cake_per_thread_t *pt = &cm->per_thread[owner_thread];
-      cake_sched_t *cs = pool_elt_at_index (pt->schedulers, pool_index);
-
       send_cake_sched_details (cs, reg, mp->context);
     }
 }
