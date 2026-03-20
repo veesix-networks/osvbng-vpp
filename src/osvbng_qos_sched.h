@@ -198,8 +198,8 @@ cake_hash_flow (vlib_buffer_t *b, u8 is_ip4)
 	}
 
       k0 = ip6->src_address.as_u64[0] ^ ip6->src_address.as_u64[1];
-      k1 = ip6->dst_address.as_u64[0] ^ ip6->dst_address.as_u64[1] ^
-	   ((u64) sport << 16) | dport | ((u64) flow_label << 32);
+      k1 = (ip6->dst_address.as_u64[0] ^ ip6->dst_address.as_u64[1]) ^
+	   (((u64) sport << 16) | dport | ((u64) flow_label << 32));
     }
 
   u32 hash = (u32) clib_xxhash (k0 ^ k1);
