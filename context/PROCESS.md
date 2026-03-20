@@ -4,6 +4,20 @@ This project uses a structured workflow for spec writing, design review, and cod
 
 **This is a lightweight, public workflow.** Anyone can contribute — human or AI — as long as work follows the process below.
 
+## First-Class Requirements
+
+These are non-negotiable constraints that apply to ALL work in this repo. Every spec, every implementation, every review must respect these. If any of these are violated, it is a bug.
+
+1. **IPv6 is a first-class citizen.** Every feature, every code path, every data structure MUST support IPv6 from day 1 — not as a follow-up, not as "future work". If you write IPv4 handling, you write IPv6 handling in the same commit. This includes: flow hashing (128-bit addresses + flow label + extension header walk), DSCP extraction (traffic class), ECN marking (no checksum for IPv6), WASH mode, and any packet header inspection. Do not write IPv4-only code and leave a TODO for IPv6.
+
+2. **CPU cycles matter.** This plugin runs inline on VPP worker threads alongside DPDK RX polling. Every per-packet operation competes with line-rate packet forwarding. Frame acquisition must be batched (never per-packet). Hot paths must use dual-loop or quad-loop patterns with prefetch. SIMD variants via `MULTIARCH_SOURCES` are required for classification and hashing. Avoid unnecessary branches, cache misses, and memory allocations in the data plane.
+
+3. **Operational visibility is day 1, not day N.** Every scheduler instance must expose per-tin metrics (packets, bytes, drops, ECN marks, peak/average queue delay, flow counts by state) via both VPP CLI and binary API from the first working implementation. Operators must be able to diagnose "why is subscriber X's latency high?" by querying stats — not by guessing. Metrics feed into Prometheus via the Go control plane.
+
+4. **Memory safety is explicit.** VPP buffer lifetime is manual. Every buffer must have a clear owner at all times. Document which code path frees each buffer. Test subscriber teardown with packets in-flight. Never send a buffer to `error-drop` while also holding its index in a queue.
+
+5. **Do not spec what you cannot verify.** Cross-NUMA designs, dedicated-core models, and hardware offload require real profiling data. Do not propose speculative architectures — note them as investigation items with specific questions to answer.
+
 ## Requirements
 
 All work starts from a **GitHub issue created by a human**. No spec, no branch, no PR happens without a tracked issue.

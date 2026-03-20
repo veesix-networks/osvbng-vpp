@@ -4,16 +4,18 @@ This file is the project-level state tracker. Every agent session should read th
 
 **Updated after every spec is finalized.**
 
+**IMPORTANT: Read the First-Class Requirements section in [PROCESS.md](PROCESS.md) before any work. IPv6, CPU efficiency, operational metrics, and memory safety are non-negotiable constraints — not optional enhancements.**
+
 ## Current State
 
-VPP plugin for per-subscriber QoS — covering the full pipeline from policing through DSCP marking to CAKE-equivalent scheduling. The plugin skeleton is bootstrapped with the core file structure, binary API, enqueue/dequeue nodes, and CLI commands. Two specs exist: the full-qos spec (covering the complete QoS overhaul including policer enhancements, dynamic rates, DSCP marking, and scheduling) and the cake-scheduler spec (deep dive into the CAKE algorithm adaptation for VPP). Both specs have completed Phase 1 (draft). Neither has been through Gemini/Codex review yet.
+VPP plugin for per-subscriber QoS — covering the full pipeline from policing through DSCP marking to CAKE-equivalent scheduling. The plugin skeleton is bootstrapped with the core file structure, binary API, enqueue/dequeue nodes, and CLI commands. Two specs exist: the full-qos spec (covering the complete QoS overhaul including policer enhancements, dynamic rates, DSCP marking, and scheduling) and the cake-scheduler spec (deep dive into the CAKE algorithm adaptation for VPP). The cake-scheduler spec has been through Codex (Phase 3) and Gemini (Phase 2) review — all findings accepted, spec finalized in Phase 4.
 
 ## Specs
 
 | Spec | Status | Summary |
 |------|--------|---------|
 | [full-qos](specs/full-qos/) | Phase 4 complete (in osvbng-context) | Full QoS overhaul: configurable policer algorithms, dynamic ad-hoc rates, DSCP marking pipeline, live policy updates, show/oper commands, Prometheus metrics, and CAKE scheduling (Phase 5 of this spec) |
-| [cake-scheduler](specs/cake-scheduler/) | Phase 4 complete (spec finalized) | CAKE-equivalent per-subscriber scheduler: per-flow queuing, COBALT AQM, DRR, DiffServ tins, triple isolation, overhead compensation, token-bucket shaping. Codex review accepted all 7 findings (3 CRITICAL, 2 HIGH, 2 MEDIUM). |
+| [cake-scheduler](specs/cake-scheduler/) | Phase 4 complete (spec finalized) | CAKE-equivalent per-subscriber scheduler: per-flow queuing, COBALT AQM, DRR, DiffServ tins, triple isolation, overhead compensation, token-bucket shaping. Codex (7 findings) + Gemini (11 findings) reviews — all accepted, 0 rejected. |
 
 ## Spec Dependencies
 
@@ -52,7 +54,7 @@ Both specs are needed because:
 - **RFC validation:** PIR >= CIR (RFC 2698), CBS/EBS > 0 (RFC 2697), burst >= MTU warnings enforced in conf handler
 - **Scheduler replaces egress policer:** When `scheduler.enabled=true` in a QoS policy, the Go component calls the CAKE plugin API instead of creating an egress VPP policer. Ingress direction is unaffected.
 
-### From cake-scheduler (Phase 4 finalization — all 7 Codex findings accepted)
+### From cake-scheduler (Phase 4 finalization — Codex 7 findings + Gemini 11 findings, all accepted)
 
 - **Two-node design with re-injection:** Enqueue on `interface-output` feature arc, dequeue as `VLIB_NODE_TYPE_INPUT` polling node. Dequeued packets re-enter the arc with `CAKE_BUFFER_F_SCHEDULED` flag — enqueue sees the flag and passes through via `vnet_feature_next()`. This preserves all output features after CAKE (span, ipsec, etc.)
 - **Buffer ownership invariant:** Enqueue consumes the buffer (does NOT forward to any next node). Five explicit free paths: dequeue transmit, AQM drop, overflow drop, subscriber teardown, handoff congestion
@@ -62,6 +64,11 @@ Both specs are needed because:
 - **Dual admission control:** Per-subscriber byte limit + global buffer-count watermark (25% of VPP buffer pool). Prevents buffer-pool exhaustion from small packets
 - **INPUT node disabled when idle:** `VLIB_NODE_STATE_DISABLED` by default, switched to `POLLING` on first scheduler enable. Zero overhead when unused
 - **IPv6 extension header walk:** `ip6_locate_header()` to find L4 ports past extension headers. Non-first fragments fall back to src/dst + fragment ID hash
+- **IPv6 flow label is MUST (not optional):** XORed into hash for all IPv6 packets. Critical for QUIC/WireGuard where L4 ports invisible
+- **Dequeue frame handling batched:** Single bulk `vlib_get_next_frame`/`vlib_put_next_frame` after per-scheduler loop. Per-packet frame acquisition is prohibited
+- **CoDel must use rec_inv_sqrt:** Scaffold's linear `interval/(count+1)` placeholder violates RFC 8289, must not ship
+- **BLUE uses proper PRNG:** `clib_random_u32()` per-thread, not `now_us ^ bi`
+- **ECN marking uses incremental checksum:** `ip4_header_checksum_update()` for IPv4 1-byte change. IPv6 has no checksum
 - **Egress-only:** BNG controls the download bottleneck; upload bufferbloat is the CPE's problem
 
 ## Codebase State

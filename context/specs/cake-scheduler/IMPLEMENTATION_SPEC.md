@@ -267,7 +267,7 @@ enum {
 Linux CAKE uses set-associative hashing with 8-way sets for collision-resistant flow mapping. In VPP, the enqueue node classifies packets:
 
 1. **Detect IP version** from the first nibble of the packet header (`ip_version_and_header_length >> 4` for IPv4, or check for 0x6).
-2. **Extract 5-tuple** from IPv4 or IPv6 + TCP/UDP headers (vectorized across batch). For IPv6, use `ip6_header_t.src_address` / `dst_address` (128-bit each). Optionally incorporate the IPv6 flow label (20 bits from `ip_version_traffic_class_and_flow_label`) as a hash input for flows that set it.
+2. **Extract 5-tuple** from IPv4 or IPv6 + TCP/UDP headers (vectorized across batch). For IPv6, use `ip6_header_t.src_address` / `dst_address` (128-bit each). The IPv6 flow label (20 bits from `ip_version_traffic_class_and_flow_label`) MUST be included in the hash input (RFC 8290 RECOMMENDS). This is critical for encrypted traffic (QUIC, WireGuard) where L4 ports may not be visible.
 3. **IPv6 extension header walk**: For IPv6, the L4 header may not immediately follow the fixed 40-byte header. Use VPP's `ip6_locate_header()` or equivalent to skip hop-by-hop, routing, destination option, and fragment extension headers to locate the actual L4 protocol and ports. For non-first fragments (where L4 ports are unavailable), fall back to hashing on src/dst address + fragment ID — this groups fragments of the same datagram into the same flow queue.
 4. **Compute hash**: `clib_xxhash()` on 5-tuple (VPP's standard fast hash). IPv6 hashes over more key material (32 bytes of addresses vs 8) but the xxhash output is the same 32-bit value.
 5. **Set index**: `hash % (CAKE_QUEUES / CAKE_SET_WAYS)` = set base.
@@ -331,7 +331,7 @@ COBALT combines CoDel (for responsive TCP flows) and BLUE (for unresponsive UDP 
 1. Track `drop_prob` (u16, 0-65535 maps to 0.0-1.0).
 2. On queue overflow or persistent delay: `drop_prob += BLUE_FREQ_INCREASE` (every `blue_timer` interval).
 3. On queue drain below target: `drop_prob -= BLUE_FREQ_DECREASE`.
-4. Per-dequeue: generate random u16, drop if `random < drop_prob`.
+4. Per-dequeue: generate random u16 via `clib_random_u32()` (proper PRNG, seeded per-thread — NOT `now_us ^ bi` which is predictable and causes synchronized drops), drop if `random < drop_prob`.
 5. BLUE catches unresponsive flows that don't react to CoDel signals.
 
 **Combined logic:**
@@ -348,7 +348,7 @@ if (should_drop):
 - `enqueue_timestamp` stored in `vnet_buffer2(b)->qos.bits` (repurposed, 32-bit, microsecond resolution sufficient for 5ms target).
 - `clib_cpu_time_now()` provides sub-nanosecond cycle counter; convert to microseconds via precomputed shift.
 - Newton-Raphson `rec_inv_sqrt` uses the same lookup table as Linux CAKE (first 16 values cached, compute beyond).
-- **IPv6 ECN**: The ECN bits are in the same position within the traffic class byte as IPv4's ToS byte (bits 1-0). For IPv4: `ip4->tos & 0x03`. For IPv6: `(ntohl(ip6->ip_version_traffic_class_and_flow_label) >> 20) & 0x03`. CE marking updates the same bits in the respective header and recomputes checksums (IPv4 only — IPv6 has no header checksum).
+- **ECN (dual-stack)**: The ECN bits occupy the same position within the traffic class / ToS byte for both IP versions (bits 1-0). For IPv4: `ip4->tos & 0x03`, CE marking via `ip4_header_checksum_update()` (incremental, not full recompute). For IPv6: `(ntohl(ip6->ip_version_traffic_class_and_flow_label) >> 20) & 0x03`, CE marking updates the traffic class field directly (no checksum — IPv6 has none). Both paths MUST be implemented from day 1 — IPv6 is a first-class requirement, not a follow-up.
 
 ### 4.9 Deficit Round Robin Scheduling
 
@@ -503,7 +503,10 @@ cake_dequeue_node(frame):
     sched.global_shaper_time_ns = min(sched.global_shaper_time_ns,
                                        now_ns + interval_ns * 3 / 2)
 
-  re-inject output vector to interface-output arc with CAKE_BUFFER_F_SCHEDULED flag
+  /* Batch output: collect all dequeued buffer indices into a local vector first,
+   * then do a single vlib_get_next_frame / vlib_put_next_frame outside the loop.
+   * Per-packet frame acquisition is prohibited — it defeats vector processing. */
+  bulk re-inject collected buffers to interface-output arc with CAKE_BUFFER_F_SCHEDULED flag
 ```
 
 **Output path**: Dequeued packets are re-injected into the `interface-output` feature arc with `CAKE_BUFFER_F_SCHEDULED` set in the buffer flags. When the enqueue node encounters a packet with this flag, it clears the flag and calls `vnet_feature_next()` to continue through remaining output features (span-output, ipsec-if-output, etc.). This ensures no output features are skipped and the feature config index used is always live at the time of actual transmission — not a stale one from when the packet was originally enqueued.

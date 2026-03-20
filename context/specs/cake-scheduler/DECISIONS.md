@@ -1,42 +1,61 @@
 # Decisions: cake-scheduler
 
+Phase 4 finalization incorporating findings from both Codex (Phase 3, 7 findings) and Gemini (Phase 2, 11 findings). Several findings overlap — deduplicated below. All accepted, none rejected.
+
 ## Accepted
 
-### Dequeue must resume via feature arc, not hard-jump to arc-end
-- **Source:** CODEX
-- **Severity:** CRITICAL
-- **Resolution:** Redesigned dequeue output path. The dequeue node re-injects packets into the `interface-output` feature arc using the saved `current_config_index` from the buffer, calling `vnet_feature_next()` to resume at the correct position. CAKE marks packets with a per-buffer flag (`CAKE_BUFFER_F_SCHEDULED`) so the enqueue node can distinguish already-scheduled packets from fresh ones and pass them through without re-queuing. This preserves span-output, ipsec-if-output, and any other features registered after CAKE on the interface-output arc. Spec §4.1, §4.13 updated.
+### 1. Dequeue must resume via feature arc re-injection, not hard-jump to arc-end
+- **Source:** CODEX (CRITICAL) + GEMINI (implicit in buffer ownership finding)
+- **Resolution:** The original design sent dequeued packets directly to `interface-output-arc-end`, skipping all remaining output features (span-output, ipsec-if-output, etc.). Redesigned: the dequeue node re-injects packets into the `interface-output` feature arc with a `CAKE_BUFFER_F_SCHEDULED` flag. The enqueue node checks this flag first — if set, clears it and calls `vnet_feature_next()` to continue through remaining features. No output features are skipped. The feature config index used is always live at transmission time, not stale from enqueue time — this also resolves the Codex finding about `current_config_index` invalidation during live feature reconfiguration.
 
-### Buffer ownership invariant required for queued packets
-- **Source:** CODEX
-- **Severity:** CRITICAL
-- **Resolution:** Added explicit buffer ownership invariant to spec §4.13. The enqueue node **consumes** the packet — it does not forward it to any next node. The buffer index is removed from the frame and stored in the flow queue. The scheduler is the sole owner from that point. Buffers are freed in exactly one of five paths: (1) dequeue transmit, (2) AQM drop, (3) buffer overflow drop, (4) subscriber teardown/interface delete, (5) handoff congestion drop. The scaffold's error-drop path is removed — enqueue returns `frame->n_vectors` but enqueues zero buffers to next nodes for scheduled packets.
+### 2. Buffer ownership invariant — enqueue consumes, five explicit free paths
+- **Source:** CODEX (CRITICAL) + GEMINI (CRITICAL)
+- **Resolution:** Both reviews independently identified the use-after-free: the scaffold sent queued buffers to `error-drop` which frees them, then dequeue tried to access the freed index. Fixed: enqueue **consumes** the buffer — removes it from the frame, does NOT forward to any next node. The scheduler is the sole owner. Buffers are freed in exactly one of five paths: (1) dequeue transmit, (2) COBALT AQM drop, (3) buffer overflow drop, (4) subscriber teardown / interface delete (drains all queues), (5) handoff congestion drop.
 
-### Feature config heap stale reference on reconfiguration
-- **Source:** CODEX
-- **Severity:** CRITICAL
-- **Resolution:** The dequeue path does NOT use `current_config_index` to resume. Instead, it re-injects via a `CAKE_BUFFER_F_SCHEDULED` flag check in the enqueue node itself. When dequeue is ready to transmit, it enqueues the buffer back to the `interface-output` feature arc entry point for that interface. The enqueue node sees the flag, clears it, and calls `vnet_feature_next()` with the buffer's live (current) config index — not a stale one. This means the config index used is always fresh at the time of actual transmission, not from when the packet was originally enqueued. Spec §4.1, §4.13 updated.
+### 3. Per-thread per-interface scheduler model (matches VPP TX queue reality)
+- **Source:** CODEX (HIGH)
+- **Resolution:** The original single-owner-thread model doesn't match VPP's multi-TXQ placement. Changed: scheduler state is keyed by `(sw_if_index, thread_index)`. Each worker thread gets its own instance with independent flow tables, shapers, and queues. Rate is split across threads (`total_rate / n_threads`). On TX queue placement changes, instances are drained and recreated.
 
-### Per-thread scheduler model does not match VPP TX queue model
-- **Source:** CODEX
-- **Severity:** HIGH
-- **Resolution:** Changed the scheduler ownership model. Scheduler state is keyed by `(sw_if_index, thread_index)` — each worker thread that can send to an interface gets its own scheduler instance with its own flow tables, shapers, and queues. This matches VPP's reality where multiple threads can transmit to the same interface via different TX queues. The rate for each per-thread instance is `total_rate / n_threads_for_interface`. On TX queue placement changes, existing per-thread schedulers are drained and recreated. Spec §4.14 updated.
+### 4. Lazy tin/flow allocation + global buffer-count admission control
+- **Source:** CODEX (HIGH) + GEMINI (MEDIUM)
+- **Resolution:** Both reviews flagged the memory footprint (~320-640 KiB static per subscriber). Fixed: tins allocated lazily on first packet to each DSCP class. Flows use pool allocator (only active flows consume memory). Default flow limit reduced to 256 (configurable to 1024). Added dual admission control: per-subscriber byte limit + global `max_queued_buffers` watermark (default 25% of VPP buffer pool) to prevent buffer-pool exhaustion from small packets.
 
-### Memory model too large for thousands of subscribers
-- **Source:** CODEX
-- **Severity:** HIGH
-- **Resolution:** Adopted lazy allocation for tins and flows. Tins are allocated on first packet to that DSCP class, not at scheduler creation. Flows within a tin use a pool allocator instead of a fixed 1024-element array — only active flows consume memory. Default flow table size reduced to 256 for besteffort/diffserv3 modes (1024 remains available as a config option for high-fan-out subscribers). Added a global buffer-count admission control: the scheduler tracks total queued buffer objects (not just bytes) and refuses new enqueues when a configurable `max_queued_buffers` watermark is reached (default: 25% of VPP buffer pool). Spec §4.3, §4.4, §4.5 updated.
+### 5. INPUT node disabled when idle
+- **Source:** CODEX (MEDIUM) + GEMINI (implicit)
+- **Resolution:** Dequeue node starts `VLIB_NODE_STATE_DISABLED`. Switched to `POLLING` on first scheduler enable, back to `DISABLED` when last scheduler removed. Zero dispatch overhead when unused.
 
-### INPUT node should be disabled when no schedulers are active
-- **Source:** CODEX
-- **Severity:** MEDIUM
-- **Resolution:** The dequeue node starts in `VLIB_NODE_STATE_DISABLED`. When the first scheduler is enabled on any thread, the enable path calls `vlib_node_set_state(VLIB_NODE_STATE_POLLING)`. When the last scheduler is disabled, it sets the node back to `VLIB_NODE_STATE_DISABLED`. Per-thread: the node only iterates schedulers owned by the current thread's active bitmap, so threads with no schedulers return immediately. Spec §4.2 updated.
+### 6. IPv6 extension header walk for correct flow hashing
+- **Source:** CODEX (MEDIUM) + GEMINI (HIGH)
+- **Resolution:** Both reviews identified that assuming L4 ports follow the fixed 40-byte IPv6 header breaks on extension headers. Fixed: use `ip6_locate_header()` or equivalent to walk hop-by-hop, routing, destination option, and fragment headers. Non-first fragments (no L4 ports) fall back to src/dst address + fragment ID hash.
 
-### IPv6 extension header walk required for correct flow hashing
-- **Source:** CODEX
-- **Severity:** MEDIUM
-- **Resolution:** Added IPv6 extension header walk to the flow hashing spec. The hash function uses VPP's `ip6_locate_header()` or equivalent to skip hop-by-hop, routing, and destination option headers to find the L4 protocol header. For fragment headers where L4 ports are not available (non-first fragments), the flow hash falls back to src/dst address + fragment ID, which groups fragments of the same datagram into the same flow queue. Spec §4.6 updated.
+### 7. IPv6 flow label MUST be included in hash
+- **Source:** GEMINI (MEDIUM)
+- **Resolution:** RFC 8290 RECOMMENDS including the flow label. Changed from optional to MUST — the 20-bit flow label is XORed into the hash for all IPv6 packets. Critical for encrypted traffic (QUIC, WireGuard) where L4 ports may not be visible.
+
+### 8. Dequeue frame handling must be batched
+- **Source:** GEMINI (CRITICAL)
+- **Resolution:** The scaffold called `vlib_get_next_frame` / `vlib_put_next_frame` inside the per-packet loop — this defeats vector processing and causes massive CPU overhead. Fixed: dequeue collects buffer indices into a local vector first, then does a single bulk frame enqueue after the per-scheduler loop.
+
+### 9. CoDel control law must use rec_inv_sqrt, not linear divisor
+- **Source:** GEMINI (HIGH)
+- **Resolution:** The scaffold used `interval / (count + 1)` as a placeholder — this violates RFC 8289 and causes exponentially faster drop rates than intended. The spec already specifies Newton-Raphson `rec_inv_sqrt` (§4.8). The scaffold placeholder is explicitly wrong and must not ship. Implementation must use `cake_codel_control_law()` with the precomputed cache.
+
+### 10. BLUE randomness must use proper PRNG
+- **Source:** GEMINI (MEDIUM)
+- **Resolution:** The scaffold used `now_us ^ bi` which is predictable and causes synchronized drops. Fixed: implementation must use `clib_random_u32()` or equivalent PRNG seeded per-thread.
+
+### 11. ECN marking must use incremental checksum (IPv4)
+- **Source:** GEMINI (LOW, recommendation)
+- **Resolution:** Accepted. IPv4 CE marking uses `ip4_header_checksum_update()` for the 1-byte ECN change instead of full checksum recompute. IPv6 has no header checksum.
+
+### 12. Triple isolation is Phase 6 (not missing)
+- **Source:** GEMINI (HIGH)
+- **Resolution:** Gemini flagged host tracking as unimplemented. This is by design — the implementation spec has 8 phases, and triple isolation is Phase 6. The host table structures and quantum adjustment are explicitly planned, not missing. No spec change needed.
+
+### 13. DRR list rotations and scalar processing are scaffold TODOs
+- **Source:** GEMINI (LOW + LOW)
+- **Resolution:** Acknowledged. The scaffold demonstrates the pipeline structure, not the complete algorithm. DRR rotations are Phase 2, dual-loop vectorization is ongoing throughout. `MULTIARCH_SOURCES` in CMakeLists.txt already enables SIMD variant generation. No spec change needed.
 
 ## Rejected
 
-(none)
+(none — all findings accepted)

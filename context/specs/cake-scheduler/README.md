@@ -7,7 +7,7 @@
 | Phase | Description | Status |
 |-------|-------------|--------|
 | Phase 1 | Spec Draft | **Complete** |
-| Phase 2 | Spec Refinement (Gemini) | Skipped |
+| Phase 2 | Spec Refinement (Gemini) | **Complete** |
 | Phase 3 | Spec Critique (Codex) | **Complete** |
 | Phase 4 | Spec Finalization | **Complete** |
 | Phase 5 | Implementation | Not started |
@@ -16,8 +16,9 @@
 ## Key Context Files
 
 - [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md) — Final technical specification
-- [DECISIONS.md](DECISIONS.md) — All Codex critique items triaged (7 accepted, 0 rejected)
+- [DECISIONS.md](DECISIONS.md) — All review items triaged (18 findings: 7 Codex + 11 Gemini, all accepted, 0 rejected)
 - [spec-reviews/CODEX.md](spec-reviews/CODEX.md) — Phase 3 architectural critique
+- [spec-reviews/GEMINI.md](spec-reviews/GEMINI.md) — Phase 2 RFC compliance and algorithm review
 - [../full-qos/IMPLEMENTATION_SPEC.md](../full-qos/IMPLEMENTATION_SPEC.md) — Parent QoS spec (this is Phase 5 of that spec)
 
 ## Codebase Entry Points
