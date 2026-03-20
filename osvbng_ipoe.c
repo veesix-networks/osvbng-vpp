@@ -226,8 +226,6 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
       /* Delete session */
       *sw_if_indexp = s->sw_if_index;
 
-      vnet_reset_interface_l3_output_node (vnm->vlib_main, s->sw_if_index);
-
       /* Remove any FIB entries */
       if (s->ipv4_bound)
         vnet_ipoe_set_session_ipv4 (s->sw_if_index, &s->client_ipv4, 0);
@@ -318,8 +316,6 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
                                VNET_HW_INTERFACE_FLAG_LINK_UP);
   vnet_sw_interface_set_flags (vnm, sw_if_index,
                                VNET_SW_INTERFACE_FLAG_ADMIN_UP);
-  vnet_set_interface_l3_output_node (vnm->vlib_main, sw_if_index,
-                                     (u8 *) "tunnel-output");
 
   /* Setup reverse lookup */
   vec_validate_init_empty (im->session_index_by_sw_if_index, sw_if_index, ~0);
