@@ -89,9 +89,22 @@ pipx run --spec ttp python3 tests/benchmark.py \
 | Vectors/call | Packets processed per node invocation (batching) | Higher is better (>4) |
 | Dropped | Tail-drop from buffer overflow | Should stabilise after initial burst |
 
+### Phase-over-Phase Summary
+
+The key regression metric is `ip4-cake-enqueue` c/v — this is the per-packet CPU overhead added to the forwarding path. Baseline forwarding (no scheduler) costs ~271 c/v (`ip4-lookup` 113 + `ip4-midchain` 96 + `tunnel-output` 62).
+
+| Phase | enqueue c/v | Delta vs Phase 1 | Description |
+|-------|------------|-------------------|-------------|
+| 1 | **282** | — | FIFO + token-bucket shaper |
+| 2 | | | Per-flow queuing + DRR |
+| 3 | | | COBALT AQM (CoDel + BLUE) |
+| 4 | | | DiffServ tins |
+| 5 | | | Overhead compensation (ATM/PTM/GPON) |
+| 6 | | | Triple isolation (per-host fairness) |
+
 ### Phase History
 
-Record results here after each phase benchmark.
+Record full results here after each phase benchmark.
 
 #### Phase 1: FIFO + Token-Bucket Shaper (2026-03-20)
 
