@@ -71,7 +71,7 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       cs->overhead_bytes = overhead_bytes;
       cs->atm_mode = atm_mode;
       cs->mpu = mpu;
-      cs->global_shaper_time_ns = 0;
+      cs->global_shaper_time_ns = (u64) (vlib_time_now (vm) * 1e9);
 
       if (buffer_limit == 0)
 	{
