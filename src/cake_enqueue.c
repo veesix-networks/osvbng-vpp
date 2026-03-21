@@ -68,6 +68,9 @@ cake_flow_evict (vlib_main_t *vm, cake_tin_t *tin, u32 slot)
       cake_flow_list_remove (&tin->old_flow_head, &tin->old_flow_tail,
 			     tin->flows, slot);
       tin->bulk_flow_count--;
+      if (ef->dst_host_idx < CAKE_HOSTS &&
+	  tin->hosts[ef->dst_host_idx].bulk_flow_count > 0)
+	tin->hosts[ef->dst_host_idx].bulk_flow_count--;
     }
   else if (ef->flow_state == CAKE_FLOW_DECAYING)
     {

@@ -242,7 +242,8 @@ VLIB_NODE_FN (cake_dequeue_node)
 	    {
 	      cake_tin_t *candidate = &cs->tins[t];
 	      if (candidate->sparse_flow_count + candidate->bulk_flow_count >
-		  0)
+		      0 ||
+		  candidate->decaying_flow_head != ~0)
 		{
 		  tin = candidate;
 		  break;
@@ -308,6 +309,10 @@ VLIB_NODE_FN (cake_dequeue_node)
 		{
 		  if (flow->flow_state == CAKE_FLOW_BULK)
 		    {
+		      if (flow->dst_host_idx < CAKE_HOSTS &&
+			  tin->hosts[flow->dst_host_idx].bulk_flow_count > 0)
+			tin->hosts[flow->dst_host_idx].bulk_flow_count--;
+
 		      flow->flow_state = CAKE_FLOW_DECAYING;
 		      cake_flow_list_remove (&tin->old_flow_head,
 					     &tin->old_flow_tail, tin->flows,

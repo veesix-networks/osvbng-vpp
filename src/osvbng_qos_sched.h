@@ -297,10 +297,13 @@ cake_quantum_for_flow (cake_tin_t *tin, cake_flow_t *f)
   if (f->dst_host_idx < CAKE_HOSTS)
     {
       u16 hl = tin->hosts[f->dst_host_idx].bulk_flow_count;
+      if (hl > CAKE_QUEUES)
+	hl = CAKE_QUEUES;
       if (hl > host_load)
 	host_load = hl;
     }
-  return (tin->quantum * cake_quantum_div[host_load]) >> 16;
+  u32 quantum = (tin->quantum * cake_quantum_div[host_load]) >> 16;
+  return quantum ? quantum : 1;
 }
 
 static_always_inline void
