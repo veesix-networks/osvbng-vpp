@@ -362,6 +362,33 @@ cake_sched_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
 	tin_mode = CAKE_TIN_MODE_DIFFSERV4;
       else if (unformat (input, "diffserv8"))
 	tin_mode = CAKE_TIN_MODE_DIFFSERV8;
+      else if (unformat (input, "dsl-pppoe-atm"))
+	{
+	  overhead_bytes = 32;
+	  atm_mode = 1;
+	  mpu = 64;
+	}
+      else if (unformat (input, "dsl-pppoe-ptm"))
+	{
+	  overhead_bytes = 27;
+	  atm_mode = 2;
+	  mpu = 64;
+	}
+      else if (unformat (input, "docsis"))
+	{
+	  overhead_bytes = 18;
+	  mpu = 64;
+	}
+      else if (unformat (input, "gpon"))
+	{
+	  overhead_bytes = 4;
+	  mpu = 64;
+	}
+      else if (unformat (input, "ethernet"))
+	{
+	  overhead_bytes = 14;
+	  mpu = 64;
+	}
       else if (unformat (input, "disable"))
 	is_disable = 1;
       else
@@ -391,7 +418,8 @@ VLIB_CLI_COMMAND (cake_sched_set_command, static) = {
   .path = "set cake scheduler",
   .short_help = "set cake scheduler <interface> rate <kbps> "
 		"[besteffort|diffserv3|diffserv4|diffserv8] "
-		"[overhead <bytes>] [atm|ptm|noatm] [mpu <bytes>] [disable]",
+		"[overhead <bytes>|ethernet|docsis|dsl-pppoe-atm|dsl-pppoe-ptm|gpon] "
+		"[atm|ptm|noatm] [mpu <bytes>] [disable]",
   .function = cake_sched_set_command_fn,
 };
 
