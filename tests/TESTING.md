@@ -95,8 +95,8 @@ The key regression metric is `ip4-cake-enqueue` c/v — this is the per-packet C
 
 | Phase | enqueue c/v | Delta vs Phase 1 | Description |
 |-------|------------|-------------------|-------------|
-| 1 | **282** | — | FIFO + token-bucket shaper |
-| 2 | | | Per-flow queuing + DRR |
+| 1 | **282** | — | FIFO + token-bucket shaper (vec_add1) |
+| 2 | **172** | -110 (-39%) | FQ + DRR + ring buffer + owner-thread handoff |
 | 3 | | | COBALT AQM (CoDel + BLUE) |
 | 4 | | | DiffServ tins |
 | 5 | | | Overhead compensation (ATM/PTM/GPON) |
