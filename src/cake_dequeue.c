@@ -258,7 +258,11 @@ VLIB_NODE_FN (cake_dequeue_node)
 
 	  u32 flow_idx = cake_select_flow (tin);
 	  if (flow_idx == ~0)
-	    continue;
+	    {
+	      if (n_deactivate < VLIB_FRAME_SIZE)
+		deactivate[n_deactivate++] = si;
+	      break;
+	    }
 
 	  cake_flow_t *flow = &tin->flows[flow_idx];
 	  last_flow_idx = flow_idx;
