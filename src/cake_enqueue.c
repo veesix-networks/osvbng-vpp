@@ -215,6 +215,8 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
       if (PREDICT_FALSE (cs->buffer_usage + pkt_len > cs->buffer_limit))
 	{
+	  cobalt_queue_full (flow, cs->target_us, cs->p_inc,
+			     (u32) (vlib_time_now (vm) * 1e6));
 	  vlib_buffer_free_one (vm, bi0);
 	  cs->dropped_pkts++;
 	  tin->drops++;
@@ -247,6 +249,8 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
       if (PREDICT_FALSE (cake_flow_queue_len (flow) >= CAKE_FLOW_RING_SIZE))
 	{
+	  cobalt_queue_full (flow, cs->target_us, cs->p_inc,
+			     (u32) (vlib_time_now (vm) * 1e6));
 	  vlib_buffer_free_one (vm, bi0);
 	  cs->dropped_pkts++;
 	  tin->drops++;
@@ -254,6 +258,7 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  continue;
 	}
 
+      cake_buffer_enqueue_time (b0) = (u32) (vlib_time_now (vm) * 1e6);
       flow->ring[flow->tail & CAKE_FLOW_RING_MASK] = bi0;
       flow->tail++;
 

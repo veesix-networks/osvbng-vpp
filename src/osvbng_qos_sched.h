@@ -9,7 +9,7 @@
  * Original authors: Dave Taht, Jonathan Morton, Toke Hoiland-Jorgensen,
  * Sebastian Moeller, Kevin Darbyshire-Bryant, Ryan Mounce.
  *
- * Phase 2: Per-flow queuing, DRR, owner-thread handoff, ring buffers.
+ * Phase 3: COBALT AQM (CoDel + BLUE).
  */
 
 #ifndef __included_osvbng_qos_sched_h__
@@ -22,6 +22,7 @@
 #include <vppinfra/vec.h>
 #include <vppinfra/xxhash.h>
 #include <vppinfra/atomics.h>
+#include <vppinfra/random.h>
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
 #include <vnet/buffer.h>
@@ -44,6 +45,12 @@
 
 #define CAKE_OWNER_UNSET ((u32) ~0)
 
+#define CAKE_TARGET_US_DEFAULT	  5000
+#define CAKE_INTERVAL_US_DEFAULT  100000
+#define CAKE_REC_INV_SQRT_CACHE	  16
+
+#define cake_buffer_enqueue_time(b) (vnet_buffer2 (b)->unused[0])
+
 typedef enum
 {
 #define cake_error(n, s) CAKE_ERROR_##n,
@@ -53,6 +60,7 @@ typedef enum
 } cake_error_t;
 
 extern char *cake_error_strings[];
+extern u32 cobalt_rec_inv_sqrt_cache[CAKE_REC_INV_SQRT_CACHE];
 
 typedef struct
 {
@@ -67,6 +75,15 @@ typedef struct
   u32 backlog_bytes;
   u8 flow_state;
   u8 set_index;
+  u8 dropping;
+  u8 _pad;
+
+  u32 codel_count;
+  u32 rec_inv_sqrt;
+  u32 drop_next_us;
+
+  u32 p_drop;
+  u32 blue_timer_us;
 } cake_flow_t;
 
 typedef struct
@@ -92,6 +109,7 @@ typedef struct
   u64 packets;
   u64 bytes;
   u64 drops;
+  u64 ecn_marks;
   u32 sparse_flow_count;
   u32 bulk_flow_count;
 } cake_tin_t;
@@ -116,6 +134,12 @@ typedef struct
   u32 buffer_usage;
   u32 queued_buffers;
 
+  u32 target_us;
+  u32 interval_us;
+  u32 mtu_time_us;
+  u32 p_inc;
+  u32 p_dec;
+
   cake_tin_t tin;
 
   u64 enqueued_pkts;
@@ -128,6 +152,7 @@ typedef struct
 typedef struct
 {
   uword *active_bitmap;
+  u32 random_seed;
 } cake_per_thread_t;
 
 typedef struct
@@ -163,6 +188,7 @@ int cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 			       u32 interval_us, u32 flags);
 
 void cake_sched_reset_stats (u32 sw_if_index);
+void cake_cobalt_cache_init (void);
 
 static_always_inline u32
 cake_overhead_adjust (cake_sched_t *cs, u32 pkt_len)
@@ -179,6 +205,149 @@ static_always_inline u32
 cake_flow_queue_len (cake_flow_t *f)
 {
   return f->tail - f->head;
+}
+
+static_always_inline void
+cobalt_newton_step (cake_flow_t *f)
+{
+  u32 invsqrt = f->rec_inv_sqrt;
+  u32 invsqrt2 = ((u64) invsqrt * invsqrt) >> 32;
+  u64 val = (3LL << 32) - ((u64) f->codel_count * invsqrt2);
+  val >>= 2;
+  val = (val * invsqrt) >> (32 - 2 + 1);
+  f->rec_inv_sqrt = (u32) val;
+}
+
+static_always_inline void
+cobalt_invsqrt (cake_flow_t *f)
+{
+  if (f->codel_count < CAKE_REC_INV_SQRT_CACHE)
+    f->rec_inv_sqrt = cobalt_rec_inv_sqrt_cache[f->codel_count];
+  else
+    cobalt_newton_step (f);
+}
+
+static_always_inline u32
+cobalt_control (u32 t_us, u32 interval_us, u32 rec_inv_sqrt)
+{
+  return t_us + (u32) (((u64) interval_us * rec_inv_sqrt) >> 32);
+}
+
+static_always_inline void
+cobalt_queue_full (cake_flow_t *f, u32 target_us, u32 p_inc, u32 now_us)
+{
+  if ((i32) (now_us - f->blue_timer_us) > (i32) target_us)
+    {
+      f->p_drop += p_inc;
+      if (f->p_drop < p_inc)
+	f->p_drop = ~0U;
+      f->blue_timer_us = now_us;
+    }
+  f->dropping = 1;
+  f->drop_next_us = now_us;
+  if (!f->codel_count)
+    f->codel_count = 1;
+}
+
+static_always_inline void
+cobalt_queue_empty (cake_flow_t *f, u32 target_us, u32 p_dec,
+		    u32 interval_us, u32 now_us)
+{
+  if (f->p_drop && (i32) (now_us - f->blue_timer_us) > (i32) target_us)
+    {
+      if (f->p_drop < p_dec)
+	f->p_drop = 0;
+      else
+	f->p_drop -= p_dec;
+      f->blue_timer_us = now_us;
+    }
+  f->dropping = 0;
+
+  if (f->codel_count && (i32) (now_us - f->drop_next_us) >= 0)
+    {
+      f->codel_count--;
+      cobalt_invsqrt (f);
+      f->drop_next_us =
+	cobalt_control (f->drop_next_us, interval_us, f->rec_inv_sqrt);
+    }
+}
+
+/*
+ * COBALT drop/mark decision. Returns 1 if packet should be dropped.
+ * Sets *ecn_marked = 1 if CE mark was applied instead of drop (CoDel only).
+ * BLUE drops are always hard drops — no ECN conversion.
+ */
+static_always_inline u8
+cobalt_should_drop (cake_flow_t *f, cake_sched_t *cs, u32 sojourn_us,
+		    u32 now_us, u32 bulk_flows, u8 ecn_capable,
+		    u8 *ecn_marked, u32 *random_seed)
+{
+  u8 drop = 0;
+  u8 over_target;
+  u8 next_due;
+  i32 schedule;
+
+  *ecn_marked = 0;
+
+  over_target = sojourn_us > cs->target_us &&
+		sojourn_us > cs->mtu_time_us * bulk_flows * 2 &&
+		sojourn_us > cs->mtu_time_us * 4;
+
+  schedule = (i32) (now_us - f->drop_next_us);
+  next_due = f->codel_count && schedule >= 0;
+
+  if (over_target)
+    {
+      if (!f->dropping)
+	{
+	  f->dropping = 1;
+	  f->drop_next_us =
+	    cobalt_control (now_us, cs->interval_us, f->rec_inv_sqrt);
+	}
+      if (!f->codel_count)
+	f->codel_count = 1;
+    }
+  else if (f->dropping)
+    f->dropping = 0;
+
+  if (next_due && f->dropping)
+    {
+      drop = 1;
+      if (ecn_capable)
+	{
+	  *ecn_marked = 1;
+	  drop = 0;
+	}
+
+      f->codel_count++;
+      if (!f->codel_count)
+	f->codel_count--;
+      cobalt_invsqrt (f);
+      f->drop_next_us =
+	cobalt_control (f->drop_next_us, cs->interval_us, f->rec_inv_sqrt);
+    }
+  else
+    {
+      while (next_due)
+	{
+	  f->codel_count--;
+	  cobalt_invsqrt (f);
+	  f->drop_next_us = cobalt_control (f->drop_next_us, cs->interval_us,
+					    f->rec_inv_sqrt);
+	  schedule = (i32) (now_us - f->drop_next_us);
+	  next_due = f->codel_count && schedule >= 0;
+	}
+    }
+
+  if (f->p_drop)
+    drop |= (random_u32 (random_seed) < f->p_drop);
+
+  if (!f->codel_count)
+    f->drop_next_us = now_us + cs->interval_us;
+  else if (schedule > 0 && !drop)
+    f->drop_next_us = now_us;
+
+  return drop;
 }
 
 static_always_inline u32
@@ -306,10 +475,6 @@ cake_flow_ring_free (vlib_main_t *vm, cake_flow_t *f)
   f->tail = 0;
 }
 
-/*
- * Set-associative flow lookup.
- * Returns flow index, or ~0 with *evict_slot set if eviction is needed.
- */
 static_always_inline u32
 cake_flow_lookup (cake_tin_t *tin, u32 tag, u32 set_base, u32 *evict_slot)
 {
@@ -347,6 +512,35 @@ cake_flow_lookup (cake_tin_t *tin, u32 tag, u32 set_base, u32 *evict_slot)
     }
 
   return ~0;
+}
+
+static_always_inline u8
+cake_ecn_mark (vlib_buffer_t *b)
+{
+  u8 *ip_hdr = vlib_buffer_get_current (b);
+
+  if ((ip_hdr[0] >> 4) == 4)
+    {
+      ip4_header_t *ip4 = (ip4_header_t *) ip_hdr;
+      if ((ip4->tos & IP_PACKET_TC_FIELD_ECN_MASK) == IP_ECN_NON_ECN)
+	return 0;
+      ip4_header_set_ecn_w_chksum (ip4, IP_ECN_CE);
+      return 1;
+    }
+  else
+    {
+      ip6_header_t *ip6 = (ip6_header_t *) ip_hdr;
+      u32 vtcfl =
+	clib_net_to_host_u32 (ip6->ip_version_traffic_class_and_flow_label);
+      u8 tc = (vtcfl >> 20) & 0xff;
+      if ((tc & 0x03) == 0)
+	return 0;
+      tc = (tc & ~0x03) | 0x03;
+      vtcfl = (vtcfl & ~(0xffU << 20)) | ((u32) tc << 20);
+      ip6->ip_version_traffic_class_and_flow_label =
+	clib_host_to_net_u32 (vtcfl);
+      return 1;
+    }
 }
 
 extern vlib_node_registration_t ip4_cake_enqueue_node;

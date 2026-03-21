@@ -5,11 +5,7 @@
  * osvbng QoS Scheduler Plugin - Dequeue node
  * VLIB_NODE_TYPE_INPUT polling node.
  *
- * Phase 2: DRR scheduling, ring buffers, owner-thread-only execution.
- *
- * DISABLED on workers with no owned schedulers.
- * POLLING on workers that own at least one scheduler.
- * Only processes schedulers where owner_thread == vm->thread_index.
+ * Phase 3: DRR scheduling + COBALT AQM (CoDel + BLUE).
  *
  * MULTIARCH: compiled with SIMD variants (AVX2, AVX-512, NEON).
  */
@@ -46,10 +42,12 @@ format_cake_dequeue_trace (u8 *s, va_list *args)
 }
 
 static_always_inline void
-cake_flow_reclaim (vlib_main_t *vm, cake_tin_t *tin, u32 flow_idx,
-		   u32 *list_head, u32 *list_tail)
+cake_flow_reclaim (vlib_main_t *vm, cake_tin_t *tin, cake_sched_t *cs,
+		   u32 flow_idx, u32 *list_head, u32 *list_tail, u32 now_us)
 {
   cake_flow_t *f = &tin->flows[flow_idx];
+
+  cobalt_queue_empty (f, cs->target_us, cs->p_dec, cs->interval_us, now_us);
 
   cake_flow_list_remove (list_head, list_tail, tin->flows, flow_idx);
   cake_flow_ring_free (vm, f);
@@ -60,9 +58,7 @@ cake_flow_reclaim (vlib_main_t *vm, cake_tin_t *tin, u32 flow_idx,
     tin->bulk_flow_count--;
 
   tin->flow_tags[flow_idx] = 0;
-  f->flow_state = CAKE_FLOW_NONE;
-  f->backlog_bytes = 0;
-  f->deficit = 0;
+  clib_memset (f, 0, sizeof (*f));
   f->next = ~0;
   f->prev = ~0;
   tin->flow_count--;
@@ -80,6 +76,104 @@ cake_select_flow (cake_tin_t *tin)
   return ~0;
 }
 
+/*
+ * Dequeue one packet from a flow, apply COBALT AQM, and either
+ * re-inject or drop. Returns 1 if a packet was re-injected, 0 if
+ * dropped or queue empty.
+ */
+static_always_inline u8
+cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
+		  cake_main_t *cm, cake_sched_t *cs, cake_tin_t *tin,
+		  cake_flow_t *flow, u32 now_us, u64 now_ns,
+		  u32 *out_bi, u16 *out_next, u32 *n_aqm_drops,
+		  u32 *n_ecn_marks, u32 *random_seed)
+{
+  if (cake_flow_queue_len (flow) == 0)
+    return 0;
+
+  u32 bi = flow->ring[flow->head & CAKE_FLOW_RING_MASK];
+  flow->head++;
+
+  vlib_buffer_t *b = vlib_get_buffer (vm, bi);
+  u32 pkt_len = vlib_buffer_length_in_chain (vm, b);
+
+  u32 enqueue_us = cake_buffer_enqueue_time (b);
+  u32 sojourn_us = now_us - enqueue_us;
+
+  u8 ecn_capable = 0;
+  u8 *ip_hdr = vlib_buffer_get_current (b);
+  u8 is_v4 = (ip_hdr[0] >> 4) == 4;
+
+  if (is_v4)
+    ecn_capable =
+      (((ip4_header_t *) ip_hdr)->tos & IP_PACKET_TC_FIELD_ECN_MASK) !=
+      IP_ECN_NON_ECN;
+  else
+    {
+      u32 vtcfl = clib_net_to_host_u32 (
+	((ip6_header_t *) ip_hdr)->ip_version_traffic_class_and_flow_label);
+      ecn_capable = ((vtcfl >> 20) & 0x03) != 0;
+    }
+
+  u8 ecn_marked = 0;
+  u8 should_drop = cobalt_should_drop (
+    flow, cs, sojourn_us, now_us,
+    tin->bulk_flow_count > 0 ? tin->bulk_flow_count : 1, ecn_capable,
+    &ecn_marked, random_seed);
+
+  if (PREDICT_FALSE (should_drop))
+    {
+      flow->backlog_bytes -= pkt_len;
+      cs->buffer_usage -= pkt_len;
+      cs->queued_buffers--;
+      cs->dropped_pkts++;
+      tin->drops++;
+      (*n_aqm_drops)++;
+      vlib_buffer_free_one (vm, bi);
+      return 0;
+    }
+
+  if (PREDICT_FALSE (ecn_marked))
+    {
+      cake_ecn_mark (b);
+      tin->ecn_marks++;
+      (*n_ecn_marks)++;
+    }
+
+  u32 adj_len = cake_overhead_adjust (cs, pkt_len);
+  cs->global_shaper_time_ns += (u64) adj_len * cs->rate_ns_per_byte;
+  u64 max_shaper = now_ns + (u64) 150000000;
+  if (cs->global_shaper_time_ns > max_shaper)
+    cs->global_shaper_time_ns = max_shaper;
+
+  flow->backlog_bytes -= pkt_len;
+  flow->deficit -= (i32) adj_len;
+  cs->buffer_usage -= pkt_len;
+  cs->queued_buffers--;
+  cs->dequeued_pkts++;
+  cs->dequeued_bytes += pkt_len;
+
+  b->flags |= CAKE_BUFFER_F_SCHEDULED;
+  u32 sw_if_index = vnet_buffer (b)->sw_if_index[VLIB_TX];
+  u32 dummy;
+
+  if (is_v4)
+    {
+      vnet_feature_arc_start (cm->ip4_output_arc_index, sw_if_index, &dummy,
+			      b);
+      *out_next = CAKE_DEQUEUE_NEXT_REINJECT_IP4;
+    }
+  else
+    {
+      vnet_feature_arc_start (cm->ip6_output_arc_index, sw_if_index, &dummy,
+			      b);
+      *out_next = CAKE_DEQUEUE_NEXT_REINJECT_IP6;
+    }
+
+  *out_bi = bi;
+  return 1;
+}
+
 VLIB_NODE_FN (cake_dequeue_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
@@ -95,6 +189,7 @@ VLIB_NODE_FN (cake_dequeue_node)
 
   f64 now = vlib_time_now (vm);
   u64 now_ns = (u64) (now * 1e9);
+  u32 now_us = (u32) (now * 1e6);
   u32 budget = VLIB_FRAME_SIZE;
 
   u32 out_bi[VLIB_FRAME_SIZE];
@@ -103,6 +198,9 @@ VLIB_NODE_FN (cake_dequeue_node)
 
   u32 deactivate[VLIB_FRAME_SIZE];
   u32 n_deactivate = 0;
+
+  u32 n_aqm_drops = 0;
+  u32 n_ecn_marks = 0;
 
   uword si;
   clib_bitmap_foreach (si, pt->active_bitmap)
@@ -148,63 +246,34 @@ VLIB_NODE_FN (cake_dequeue_node)
 	    {
 	      if (cake_flow_queue_len (flow) == 0)
 		{
-		  cake_flow_reclaim (vm, tin, flow_idx, &tin->new_flow_head,
-				     &tin->new_flow_tail);
+		  cake_flow_reclaim (vm, tin, cs, flow_idx,
+				     &tin->new_flow_head,
+				     &tin->new_flow_tail, now_us);
 		  continue;
 		}
 
-	      u32 bi =
-		flow->ring[flow->head & CAKE_FLOW_RING_MASK];
-	      flow->head++;
-	      vlib_buffer_t *b = vlib_get_buffer (vm, bi);
-	      u32 pkt_len = vlib_buffer_length_in_chain (vm, b);
-	      u32 adj_len = cake_overhead_adjust (cs, pkt_len);
+	      u8 sent = cake_dequeue_one (
+		vm, node, cm, cs, tin, flow, now_us, now_ns,
+		&out_bi[n_out], &out_nexts[n_out], &n_aqm_drops,
+		&n_ecn_marks, &pt->random_seed);
 
-	      cs->global_shaper_time_ns +=
-		(u64) adj_len * cs->rate_ns_per_byte;
-	      u64 max_shaper = now_ns + (u64) 150000000;
-	      if (cs->global_shaper_time_ns > max_shaper)
-		cs->global_shaper_time_ns = max_shaper;
-
-	      flow->backlog_bytes -= pkt_len;
-	      cs->buffer_usage -= pkt_len;
-	      cs->queued_buffers--;
-	      cs->dequeued_pkts++;
-	      cs->dequeued_bytes += pkt_len;
-	      sched_dequeued++;
+	      if (sent)
+		{
+		  n_out++;
+		  budget--;
+		  sched_dequeued++;
+		}
 
 	      if (cake_flow_queue_len (flow) == 0)
-		cake_flow_reclaim (vm, tin, flow_idx, &tin->new_flow_head,
-				   &tin->new_flow_tail);
-
-	      b->flags |= CAKE_BUFFER_F_SCHEDULED;
-	      u32 sw_if_index = vnet_buffer (b)->sw_if_index[VLIB_TX];
-	      u32 dummy;
-	      u8 *ip_hdr = vlib_buffer_get_current (b);
-	      u8 is_v4 = (ip_hdr[0] >> 4) == 4;
-
-	      if (is_v4)
-		{
-		  vnet_feature_arc_start (cm->ip4_output_arc_index,
-					  sw_if_index, &dummy, b);
-		  out_nexts[n_out] = CAKE_DEQUEUE_NEXT_REINJECT_IP4;
-		}
-	      else
-		{
-		  vnet_feature_arc_start (cm->ip6_output_arc_index,
-					  sw_if_index, &dummy, b);
-		  out_nexts[n_out] = CAKE_DEQUEUE_NEXT_REINJECT_IP6;
-		}
-
-	      out_bi[n_out++] = bi;
-	      budget--;
+		cake_flow_reclaim (vm, tin, cs, flow_idx,
+				   &tin->new_flow_head,
+				   &tin->new_flow_tail, now_us);
 
 	      if (now_ns < cs->global_shaper_time_ns)
 		break;
 	      continue;
 	    }
 
-	  /* Bulk / old / decaying: deficit-based dequeue */
 	  if (flow->deficit <= 0)
 	    flow->deficit += tin->quantum;
 
@@ -225,55 +294,24 @@ VLIB_NODE_FN (cake_dequeue_node)
 		    }
 		  else if (flow->flow_state == CAKE_FLOW_DECAYING)
 		    {
-		      cake_flow_reclaim (vm, tin, flow_idx,
+		      cake_flow_reclaim (vm, tin, cs, flow_idx,
 					 &tin->decaying_flow_head,
-					 &tin->decaying_flow_tail);
+					 &tin->decaying_flow_tail, now_us);
 		    }
 		  break;
 		}
 
-	      u32 bi =
-		flow->ring[flow->head & CAKE_FLOW_RING_MASK];
-	      flow->head++;
-	      vlib_buffer_t *b = vlib_get_buffer (vm, bi);
-	      u32 pkt_len = vlib_buffer_length_in_chain (vm, b);
-	      u32 adj_len = cake_overhead_adjust (cs, pkt_len);
+	      u8 sent = cake_dequeue_one (
+		vm, node, cm, cs, tin, flow, now_us, now_ns,
+		&out_bi[n_out], &out_nexts[n_out], &n_aqm_drops,
+		&n_ecn_marks, &pt->random_seed);
 
-	      cs->global_shaper_time_ns +=
-		(u64) adj_len * cs->rate_ns_per_byte;
-	      u64 max_shaper = now_ns + (u64) 150000000;
-	      if (cs->global_shaper_time_ns > max_shaper)
-		cs->global_shaper_time_ns = max_shaper;
-
-	      flow->deficit -= (i32) adj_len;
-	      flow->backlog_bytes -= pkt_len;
-	      cs->buffer_usage -= pkt_len;
-	      cs->queued_buffers--;
-	      cs->dequeued_pkts++;
-	      cs->dequeued_bytes += pkt_len;
-	      sched_dequeued++;
-
-	      b->flags |= CAKE_BUFFER_F_SCHEDULED;
-	      u32 sw_if_index = vnet_buffer (b)->sw_if_index[VLIB_TX];
-	      u32 dummy;
-	      u8 *ip_hdr = vlib_buffer_get_current (b);
-	      u8 is_v4 = (ip_hdr[0] >> 4) == 4;
-
-	      if (is_v4)
+	      if (sent)
 		{
-		  vnet_feature_arc_start (cm->ip4_output_arc_index,
-					  sw_if_index, &dummy, b);
-		  out_nexts[n_out] = CAKE_DEQUEUE_NEXT_REINJECT_IP4;
+		  n_out++;
+		  budget--;
+		  sched_dequeued++;
 		}
-	      else
-		{
-		  vnet_feature_arc_start (cm->ip6_output_arc_index,
-					  sw_if_index, &dummy, b);
-		  out_nexts[n_out] = CAKE_DEQUEUE_NEXT_REINJECT_IP6;
-		}
-
-	      out_bi[n_out++] = bi;
-	      budget--;
 
 	      if (now_ns < cs->global_shaper_time_ns)
 		goto shaper_exhausted;
@@ -317,6 +355,13 @@ VLIB_NODE_FN (cake_dequeue_node)
 
   vlib_node_increment_counter (vm, node->node_index, CAKE_ERROR_DEQUEUED,
 			       n_out);
+
+  if (n_aqm_drops)
+    vlib_node_increment_counter (vm, node->node_index, CAKE_ERROR_DROPPED_AQM,
+				 n_aqm_drops);
+  if (n_ecn_marks)
+    vlib_node_increment_counter (vm, node->node_index, CAKE_ERROR_ECN_MARKED,
+				 n_ecn_marks);
 
   return n_out;
 }

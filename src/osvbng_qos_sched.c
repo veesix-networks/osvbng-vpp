@@ -123,6 +123,31 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       cs->buffer_usage = 0;
       cs->queued_buffers = 0;
 
+      cs->target_us =
+	target_us > 0 ? target_us : CAKE_TARGET_US_DEFAULT;
+      cs->interval_us =
+	interval_us > 0 ? interval_us : CAKE_INTERVAL_US_DEFAULT;
+
+      {
+	u32 mtu = 1514;
+	vnet_sw_interface_t *swif =
+	  vnet_get_sw_interface (vnet_get_main (), sw_if_index);
+	if (swif)
+	  {
+	    u32 iface_mtu = swif->mtu[VNET_MTU_IP4];
+	    if (iface_mtu > 0)
+	      mtu = iface_mtu + 14;
+	  }
+	u32 wire_mtu = cake_overhead_adjust (cs, mtu);
+	cs->mtu_time_us =
+	  rate_bytes_per_sec > 0
+	    ? (u32) ((u64) wire_mtu * 1000000ULL / rate_bytes_per_sec)
+	    : 0;
+      }
+
+      cs->p_inc = ~0U / 256;
+      cs->p_dec = ~0U / 4096;
+
       cake_tin_init (&cs->tin);
 
       cm->sched_index_by_sw_if_index[sw_if_index] = pool_index;
@@ -136,6 +161,12 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 
       u32 n_threads = vlib_get_n_threads ();
       vec_validate (cm->per_thread, n_threads - 1);
+
+      for (u32 ti = 0; ti < n_threads; ti++)
+	{
+	  if (!cm->per_thread[ti].random_seed)
+	    cm->per_thread[ti].random_seed = 0xdeadbeef ^ (ti + 1);
+	}
 
       vlib_log_notice (cm->log_class,
 		       "scheduler enabled on sw_if_index %u "
@@ -210,6 +241,7 @@ cake_sched_reset_stats (u32 sw_if_index)
   cs->tin.packets = 0;
   cs->tin.bytes = 0;
   cs->tin.drops = 0;
+  cs->tin.ecn_marks = 0;
 }
 
 static clib_error_t *
@@ -316,9 +348,10 @@ cake_sched_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
 		       cs->dropped_pkts);
 
       vlib_cli_output (vm,
-		       "    flows: %u active (%u sparse, %u bulk)",
+		       "    flows: %u active (%u sparse, %u bulk), "
+		       "ecn marks: %llu",
 		       cs->tin.flow_count, cs->tin.sparse_flow_count,
-		       cs->tin.bulk_flow_count);
+		       cs->tin.bulk_flow_count, cs->tin.ecn_marks);
 
       found++;
     }
@@ -357,8 +390,10 @@ osvbng_qos_sched_init (vlib_main_t *vm)
   cm->fq_ip6_index =
     vlib_frame_queue_main_init (ip6_cake_enqueue_node.index, 0);
 
+  cake_cobalt_cache_init ();
+
   vlib_log_notice (cm->log_class,
-		   "initialized (Phase 2: FQ + DRR + owner-thread handoff)");
+		   "initialized (Phase 3: FQ + DRR + COBALT AQM)");
 
   return 0;
 }
@@ -366,7 +401,7 @@ osvbng_qos_sched_init (vlib_main_t *vm)
 VLIB_INIT_FUNCTION (osvbng_qos_sched_init);
 
 VLIB_PLUGIN_REGISTER () = {
-  .version = "2.1.0",
+  .version = "3.0.0",
   .description = "osvbng QoS Scheduler Plugin (CAKE)",
 };
 
