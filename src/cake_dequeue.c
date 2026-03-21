@@ -108,7 +108,7 @@ cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
   u32 sojourn_us = now_us - enqueue_us;
 
   u8 ecn_capable = 0;
-  u8 *ip_hdr = vlib_buffer_get_current (b);
+  u8 *ip_hdr = cake_l3_header (b);
   u8 is_v4 = (ip_hdr[0] >> 4) == 4;
 
   if (is_v4)

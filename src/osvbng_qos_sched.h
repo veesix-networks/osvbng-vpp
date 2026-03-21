@@ -236,17 +236,26 @@ cake_flow_queue_len (cake_flow_t *f)
   return f->tail - f->head;
 }
 
+static_always_inline void *
+cake_l3_header (vlib_buffer_t *b)
+{
+  if (b->flags & VNET_BUFFER_F_L3_HDR_OFFSET_VALID)
+    return b->data + vnet_buffer (b)->l3_hdr_offset;
+  return (u8 *) vlib_buffer_get_current (b) +
+	 vnet_buffer (b)->ip.save_rewrite_length;
+}
+
 static_always_inline u8
 cake_dscp_from_buffer (vlib_buffer_t *b, u8 is_ip4)
 {
   if (is_ip4)
     {
-      ip4_header_t *ip4 = vlib_buffer_get_current (b);
-      return ip4->tos >> 2;
+      ip4_header_t *ip4 = cake_l3_header (b);
+      return (ip4->tos >> 2) & 0x3f;
     }
   else
     {
-      ip6_header_t *ip6 = vlib_buffer_get_current (b);
+      ip6_header_t *ip6 = cake_l3_header (b);
       u32 vtcfl = clib_net_to_host_u32 (
 	ip6->ip_version_traffic_class_and_flow_label);
       return (vtcfl >> 22) & 0x3f;
@@ -258,12 +267,12 @@ cake_dst_host_hash (vlib_buffer_t *b, u8 is_ip4)
 {
   if (is_ip4)
     {
-      ip4_header_t *ip4 = vlib_buffer_get_current (b);
+      ip4_header_t *ip4 = cake_l3_header (b);
       return ip4->dst_address.as_u32;
     }
   else
     {
-      ip6_header_t *ip6 = vlib_buffer_get_current (b);
+      ip6_header_t *ip6 = cake_l3_header (b);
       return ip6->dst_address.as_u32[0] ^ ip6->dst_address.as_u32[3];
     }
 }
@@ -451,7 +460,7 @@ cake_hash_flow (vlib_buffer_t *b, u8 is_ip4)
 
   if (is_ip4)
     {
-      ip4_header_t *ip4 = vlib_buffer_get_current (b);
+      ip4_header_t *ip4 = cake_l3_header (b);
       u16 sport = 0, dport = 0;
 
       if (PREDICT_TRUE (ip4->protocol == IP_PROTOCOL_TCP ||
@@ -467,7 +476,7 @@ cake_hash_flow (vlib_buffer_t *b, u8 is_ip4)
     }
   else
     {
-      ip6_header_t *ip6 = vlib_buffer_get_current (b);
+      ip6_header_t *ip6 = cake_l3_header (b);
       u16 sport = 0, dport = 0;
       u32 flow_label = ip6_flow_label_network_order (ip6);
 
@@ -611,7 +620,7 @@ cake_flow_lookup (cake_tin_t *tin, u32 tag, u32 set_base, u32 *evict_slot)
 static_always_inline u8
 cake_ecn_mark (vlib_buffer_t *b)
 {
-  u8 *ip_hdr = vlib_buffer_get_current (b);
+  u8 *ip_hdr = cake_l3_header (b);
 
   if ((ip_hdr[0] >> 4) == 4)
     {
