@@ -169,7 +169,7 @@ typedef struct
 
   const u8 *dscp_to_tin;
 
-  cake_tin_t tins[CAKE_MAX_TINS];
+  cake_tin_t *tins;
 
   u64 enqueued_pkts;
   u64 enqueued_bytes;

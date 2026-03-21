@@ -225,6 +225,9 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       cs->p_inc = ~0U / 256;
       cs->p_dec = ~0U / 4096;
 
+      cs->tins =
+	clib_mem_alloc_aligned (cs->n_tins * sizeof (cake_tin_t),
+				CLIB_CACHE_LINE_BYTES);
       for (u8 t = 0; t < cs->n_tins; t++)
 	{
 	  cake_tin_init (&cs->tins[t], CAKE_QUANTUM_DEFAULT);
@@ -273,6 +276,8 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 
       for (u8 t = 0; t < cs->n_tins; t++)
 	cake_tin_drain (vm, &cs->tins[t]);
+      clib_mem_free (cs->tins);
+      cs->tins = NULL;
 
       for (u32 ti = 0; ti < vec_len (cm->per_thread); ti++)
 	{
