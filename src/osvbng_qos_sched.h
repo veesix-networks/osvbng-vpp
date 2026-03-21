@@ -9,7 +9,7 @@
  * Original authors: Dave Taht, Jonathan Morton, Toke Hoiland-Jorgensen,
  * Sebastian Moeller, Kevin Darbyshire-Bryant, Ryan Mounce.
  *
- * Phase 3: COBALT AQM (CoDel + BLUE).
+ * Phase 4: DiffServ tins.
  */
 
 #ifndef __included_osvbng_qos_sched_h__
@@ -33,6 +33,7 @@
 #define CAKE_QUEUES	  1024
 #define CAKE_SET_WAYS	  8
 #define CAKE_SET_COUNT	  (CAKE_QUEUES / CAKE_SET_WAYS)
+#define CAKE_MAX_TINS	  8
 
 #define CAKE_FLOW_NONE	   0
 #define CAKE_FLOW_SPARSE   1
@@ -49,6 +50,11 @@
 #define CAKE_INTERVAL_US_DEFAULT  100000
 #define CAKE_REC_INV_SQRT_CACHE	  16
 
+#define CAKE_TIN_MODE_BESTEFFORT 0
+#define CAKE_TIN_MODE_DIFFSERV3	 1
+#define CAKE_TIN_MODE_DIFFSERV4	 2
+#define CAKE_TIN_MODE_DIFFSERV8	 3
+
 #define cake_buffer_enqueue_time(b) (vnet_buffer2 (b)->unused[0])
 
 typedef enum
@@ -61,6 +67,10 @@ typedef enum
 
 extern char *cake_error_strings[];
 extern u32 cobalt_rec_inv_sqrt_cache[CAKE_REC_INV_SQRT_CACHE];
+extern const u8 cake_dscp_besteffort[64];
+extern const u8 cake_dscp_diffserv3[64];
+extern const u8 cake_dscp_diffserv4[64];
+extern const u8 cake_dscp_diffserv8[64];
 
 typedef struct
 {
@@ -91,10 +101,7 @@ typedef struct
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
 
   cake_flow_t *flows;
-
-  CLIB_CACHE_LINE_ALIGN_MARK (cacheline_tags);
-  u32 flow_tags[CAKE_QUEUES];
-
+  u32 *flow_tags;
   u32 flow_count;
 
   u32 new_flow_head;
@@ -105,6 +112,8 @@ typedef struct
   u32 decaying_flow_tail;
 
   u32 quantum;
+  i32 tin_deficit;
+  u32 tin_quantum;
 
   u64 packets;
   u64 bytes;
@@ -129,6 +138,8 @@ typedef struct
   i16 overhead_bytes;
   u8 atm_mode;
   u8 mpu;
+  u8 n_tins;
+  u8 tin_mode;
 
   u32 buffer_limit;
   u32 buffer_usage;
@@ -140,7 +151,9 @@ typedef struct
   u32 p_inc;
   u32 p_dec;
 
-  cake_tin_t tin;
+  const u8 *dscp_to_tin;
+
+  cake_tin_t tins[CAKE_MAX_TINS];
 
   u64 enqueued_pkts;
   u64 enqueued_bytes;
@@ -205,6 +218,23 @@ static_always_inline u32
 cake_flow_queue_len (cake_flow_t *f)
 {
   return f->tail - f->head;
+}
+
+static_always_inline u8
+cake_dscp_from_buffer (vlib_buffer_t *b, u8 is_ip4)
+{
+  if (is_ip4)
+    {
+      ip4_header_t *ip4 = vlib_buffer_get_current (b);
+      return ip4->tos >> 2;
+    }
+  else
+    {
+      ip6_header_t *ip6 = vlib_buffer_get_current (b);
+      u32 vtcfl = clib_net_to_host_u32 (
+	ip6->ip_version_traffic_class_and_flow_label);
+      return (vtcfl >> 22) & 0x3f;
+    }
 }
 
 static_always_inline void
@@ -272,11 +302,6 @@ cobalt_queue_empty (cake_flow_t *f, u32 target_us, u32 p_dec,
     }
 }
 
-/*
- * COBALT drop/mark decision. Returns 1 if packet should be dropped.
- * Sets *ecn_marked = 1 if CE mark was applied instead of drop (CoDel only).
- * BLUE drops are always hard drops — no ECN conversion.
- */
 static_always_inline u8
 cobalt_should_drop (cake_flow_t *f, cake_sched_t *cs, u32 sojourn_us,
 		    u32 now_us, u32 bulk_flows, u8 ecn_capable,

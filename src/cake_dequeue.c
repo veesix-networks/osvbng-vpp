@@ -225,19 +225,33 @@ VLIB_NODE_FN (cake_dequeue_node)
       if (now_ns < cs->global_shaper_time_ns)
 	continue;
 
-      cake_tin_t *tin = &cs->tin;
       u32 sched_dequeued = 0;
       u32 last_flow_idx = ~0;
 
       while (budget > 0)
 	{
-	  u32 flow_idx = cake_select_flow (tin);
-	  if (flow_idx == ~0)
+	  cake_tin_t *tin = NULL;
+	  for (i32 t = cs->n_tins - 1; t >= 0; t--)
+	    {
+	      cake_tin_t *candidate = &cs->tins[t];
+	      if (candidate->sparse_flow_count + candidate->bulk_flow_count >
+		  0)
+		{
+		  tin = candidate;
+		  break;
+		}
+	    }
+
+	  if (!tin)
 	    {
 	      if (n_deactivate < VLIB_FRAME_SIZE)
 		deactivate[n_deactivate++] = si;
 	      break;
 	    }
+
+	  u32 flow_idx = cake_select_flow (tin);
+	  if (flow_idx == ~0)
+	    continue;
 
 	  cake_flow_t *flow = &tin->flows[flow_idx];
 	  last_flow_idx = flow_idx;

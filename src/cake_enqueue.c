@@ -194,7 +194,11 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
       continue;
 
     enqueue_local:;
-      cake_tin_t *tin = &cs->tin;
+      u8 dscp = cake_dscp_from_buffer (b0, is_ip4);
+      u8 tin_idx = cs->dscp_to_tin[dscp];
+      if (PREDICT_FALSE (tin_idx >= cs->n_tins))
+	tin_idx = 0;
+      cake_tin_t *tin = &cs->tins[tin_idx];
       u32 pkt_len = vlib_buffer_length_in_chain (vm, b0);
 
       u32 tag = cake_hash_flow (b0, is_ip4);

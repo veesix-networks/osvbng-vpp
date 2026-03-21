@@ -5,7 +5,7 @@
  * osvbng QoS Scheduler Plugin - Core implementation
  * Plugin init, per-subscriber enable/disable, CLI commands.
  *
- * Phase 2: Per-flow queuing, DRR, owner-thread handoff.
+ * Phase 4: DiffServ tins.
  *
  * Algorithms derived from the Linux CAKE qdisc (sch_cake.c).
  * Original authors: Dave Taht, Jonathan Morton, Toke Hoiland-Jorgensen,
@@ -29,11 +29,64 @@ char *cake_error_strings[] = {
 #undef cake_error
 };
 
+const u8 cake_dscp_besteffort[64] = { [0 ... 63] = 0 };
+
+const u8 cake_dscp_diffserv3[64] = {
+  [0 ... 63] = 1,
+  [8] = 0,
+  [4] = 2, [44] = 2, [46] = 2,
+  [48] = 2, [56] = 2,
+};
+
+const u8 cake_dscp_diffserv4[64] = {
+  [0 ... 63] = 1,
+  [8] = 0,
+  [16] = 2, [18] = 2, [20] = 2, [22] = 2,
+  [24] = 2, [26] = 2, [28] = 2, [30] = 2,
+  [32] = 3, [34] = 3, [36] = 3, [38] = 3,
+  [40] = 3, [44] = 3, [46] = 3,
+  [48] = 3, [56] = 3,
+};
+
+const u8 cake_dscp_diffserv8[64] = {
+  [0 ... 63] = 2,
+  [8] = 0,
+  [2] = 1, [10] = 1, [12] = 1, [14] = 1,
+  [24] = 3, [26] = 3, [28] = 3, [30] = 3,
+  [4] = 4, [18] = 4, [20] = 4, [22] = 4,
+  [1] = 5, [16] = 5,
+  [32] = 6, [40] = 6, [44] = 6, [46] = 6,
+  [48] = 7, [56] = 7,
+};
+
+static const u8 *cake_dscp_tables[] = {
+  [CAKE_TIN_MODE_BESTEFFORT] = cake_dscp_besteffort,
+  [CAKE_TIN_MODE_DIFFSERV3] = cake_dscp_diffserv3,
+  [CAKE_TIN_MODE_DIFFSERV4] = cake_dscp_diffserv4,
+  [CAKE_TIN_MODE_DIFFSERV8] = cake_dscp_diffserv8,
+};
+
+static const u8 cake_tin_counts[] = {
+  [CAKE_TIN_MODE_BESTEFFORT] = 1,
+  [CAKE_TIN_MODE_DIFFSERV3] = 3,
+  [CAKE_TIN_MODE_DIFFSERV4] = 4,
+  [CAKE_TIN_MODE_DIFFSERV8] = 8,
+};
+
 static void
-cake_tin_init (cake_tin_t *tin)
+cake_tin_init (cake_tin_t *tin, u32 quantum)
 {
   clib_memset (tin, 0, sizeof (*tin));
-  vec_validate_init_empty (tin->flows, CAKE_QUEUES - 1, ((cake_flow_t){ 0 }));
+
+  tin->flows =
+    clib_mem_alloc_aligned (CAKE_QUEUES * sizeof (cake_flow_t),
+			    CLIB_CACHE_LINE_BYTES);
+  clib_memset (tin->flows, 0, CAKE_QUEUES * sizeof (cake_flow_t));
+
+  tin->flow_tags =
+    clib_mem_alloc_aligned (CAKE_QUEUES * sizeof (u32),
+			    CLIB_CACHE_LINE_BYTES);
+  clib_memset (tin->flow_tags, 0, CAKE_QUEUES * sizeof (u32));
 
   for (u32 i = 0; i < CAKE_QUEUES; i++)
     {
@@ -41,25 +94,32 @@ cake_tin_init (cake_tin_t *tin)
       tin->flows[i].prev = ~0;
     }
 
-  clib_memset (tin->flow_tags, 0, sizeof (tin->flow_tags));
   tin->new_flow_head = ~0;
   tin->new_flow_tail = ~0;
   tin->old_flow_head = ~0;
   tin->old_flow_tail = ~0;
   tin->decaying_flow_head = ~0;
   tin->decaying_flow_tail = ~0;
-  tin->quantum = CAKE_QUANTUM_DEFAULT;
+  tin->quantum = quantum;
+  tin->tin_deficit = 0;
+  tin->tin_quantum = 0;
 }
 
 static void
 cake_tin_drain (vlib_main_t *vm, cake_tin_t *tin)
 {
-  for (u32 i = 0; i < CAKE_QUEUES; i++)
+  if (tin->flows)
     {
-      cake_flow_t *f = &tin->flows[i];
-      cake_flow_ring_free (vm, f);
+      for (u32 i = 0; i < CAKE_QUEUES; i++)
+	cake_flow_ring_free (vm, &tin->flows[i]);
+      clib_mem_free (tin->flows);
+      tin->flows = NULL;
     }
-  vec_free (tin->flows);
+  if (tin->flow_tags)
+    {
+      clib_mem_free (tin->flow_tags);
+      tin->flow_tags = NULL;
+    }
 }
 
 static u8
@@ -94,6 +154,9 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       if (cm->sched_index_by_sw_if_index[sw_if_index] != ~0)
 	return VNET_API_ERROR_ENTRY_ALREADY_EXISTS;
 
+      if (tin_mode > CAKE_TIN_MODE_DIFFSERV8)
+	tin_mode = CAKE_TIN_MODE_BESTEFFORT;
+
       cake_sched_t *cs;
       pool_get_zero (cm->schedulers, cs);
       u32 pool_index = cs - cm->schedulers;
@@ -108,6 +171,9 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       cs->mpu = mpu;
       cs->global_shaper_time_ns = (u64) (vlib_time_now (vm) * 1e9);
       cs->owner_thread = CAKE_OWNER_UNSET;
+      cs->tin_mode = tin_mode;
+      cs->n_tins = cake_tin_counts[tin_mode];
+      cs->dscp_to_tin = cake_dscp_tables[tin_mode];
 
       if (buffer_limit == 0)
 	{
@@ -123,8 +189,7 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       cs->buffer_usage = 0;
       cs->queued_buffers = 0;
 
-      cs->target_us =
-	target_us > 0 ? target_us : CAKE_TARGET_US_DEFAULT;
+      cs->target_us = target_us > 0 ? target_us : CAKE_TARGET_US_DEFAULT;
       cs->interval_us =
 	interval_us > 0 ? interval_us : CAKE_INTERVAL_US_DEFAULT;
 
@@ -148,7 +213,11 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       cs->p_inc = ~0U / 256;
       cs->p_dec = ~0U / 4096;
 
-      cake_tin_init (&cs->tin);
+      for (u8 t = 0; t < cs->n_tins; t++)
+	{
+	  cake_tin_init (&cs->tins[t], CAKE_QUANTUM_DEFAULT);
+	  cs->tins[t].tin_quantum = 65535 / cs->n_tins;
+	}
 
       cm->sched_index_by_sw_if_index[sw_if_index] = pool_index;
 
@@ -170,9 +239,9 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 
       vlib_log_notice (cm->log_class,
 		       "scheduler enabled on sw_if_index %u "
-		       "(rate %llu B/s, overhead %d, buffer_limit %u)",
+		       "(rate %llu B/s, overhead %d, tins %u, mode %u)",
 		       sw_if_index, rate_bytes_per_sec, (int) overhead_bytes,
-		       cs->buffer_limit);
+		       cs->n_tins, tin_mode);
     }
   else
     {
@@ -190,7 +259,8 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       vnet_feature_enable_disable ("ip6-output", "ip6-cake-enqueue",
 				   sw_if_index, 0, 0, 0);
 
-      cake_tin_drain (vm, &cs->tin);
+      for (u8 t = 0; t < cs->n_tins; t++)
+	cake_tin_drain (vm, &cs->tins[t]);
 
       for (u32 ti = 0; ti < vec_len (cm->per_thread); ti++)
 	{
@@ -238,11 +308,22 @@ cake_sched_reset_stats (u32 sw_if_index)
   cs->dequeued_pkts = 0;
   cs->dequeued_bytes = 0;
   cs->dropped_pkts = 0;
-  cs->tin.packets = 0;
-  cs->tin.bytes = 0;
-  cs->tin.drops = 0;
-  cs->tin.ecn_marks = 0;
+
+  for (u8 t = 0; t < cs->n_tins; t++)
+    {
+      cs->tins[t].packets = 0;
+      cs->tins[t].bytes = 0;
+      cs->tins[t].drops = 0;
+      cs->tins[t].ecn_marks = 0;
+    }
 }
+
+static const char *cake_tin_mode_names[] = {
+  [CAKE_TIN_MODE_BESTEFFORT] = "besteffort",
+  [CAKE_TIN_MODE_DIFFSERV3] = "diffserv3",
+  [CAKE_TIN_MODE_DIFFSERV4] = "diffserv4",
+  [CAKE_TIN_MODE_DIFFSERV8] = "diffserv8",
+};
 
 static clib_error_t *
 cake_sched_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
@@ -254,6 +335,7 @@ cake_sched_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
   u8 atm_mode = 0;
   u8 mpu = 64;
   u8 is_disable = 0;
+  u8 tin_mode = CAKE_TIN_MODE_BESTEFFORT;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
@@ -272,6 +354,14 @@ cake_sched_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
 	atm_mode = 0;
       else if (unformat (input, "mpu %d", &mpu))
 	;
+      else if (unformat (input, "besteffort"))
+	tin_mode = CAKE_TIN_MODE_BESTEFFORT;
+      else if (unformat (input, "diffserv3"))
+	tin_mode = CAKE_TIN_MODE_DIFFSERV3;
+      else if (unformat (input, "diffserv4"))
+	tin_mode = CAKE_TIN_MODE_DIFFSERV4;
+      else if (unformat (input, "diffserv8"))
+	tin_mode = CAKE_TIN_MODE_DIFFSERV8;
       else if (unformat (input, "disable"))
 	is_disable = 1;
       else
@@ -288,8 +378,8 @@ cake_sched_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
   u64 rate_bytes = rate_kbps * 1000 / 8;
 
   int rv = cake_sched_enable_disable (vm, sw_if_index, !is_disable,
-				      rate_bytes, 0, overhead_bytes, atm_mode,
-				      mpu, 0, 0, 0, 0);
+				      rate_bytes, tin_mode, overhead_bytes,
+				      atm_mode, mpu, 0, 0, 0, 0);
 
   if (rv)
     return clib_error_return (0, "cake_sched_enable_disable returned %d", rv);
@@ -300,6 +390,7 @@ cake_sched_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
 VLIB_CLI_COMMAND (cake_sched_set_command, static) = {
   .path = "set cake scheduler",
   .short_help = "set cake scheduler <interface> rate <kbps> "
+		"[besteffort|diffserv3|diffserv4|diffserv8] "
 		"[overhead <bytes>] [atm|ptm|noatm] [mpu <bytes>] [disable]",
   .function = cake_sched_set_command_fn,
 };
@@ -328,16 +419,18 @@ cake_sched_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
       if (sw_if_index != ~0 && cs->sw_if_index != sw_if_index)
 	continue;
 
-      u32 queue_depth = cs->queued_buffers;
-
       vlib_cli_output (
 	vm,
 	"  %U: rate %llu B/s (%llu kbps), overhead %d, "
-	"queue %u pkts %u/%u bytes, owner thread %u",
+	"mode %s, tins %u, owner thread %u",
 	format_vnet_sw_if_index_name, vnet_get_main (), cs->sw_if_index,
 	cs->rate_bytes_per_sec, cs->rate_bytes_per_sec * 8 / 1000,
-	(int) cs->overhead_bytes, queue_depth, cs->buffer_usage,
-	cs->buffer_limit, cs->owner_thread);
+	(int) cs->overhead_bytes, cake_tin_mode_names[cs->tin_mode],
+	cs->n_tins, cs->owner_thread);
+
+      vlib_cli_output (vm,
+		       "    queue %u pkts %u/%u bytes",
+		       cs->queued_buffers, cs->buffer_usage, cs->buffer_limit);
 
       vlib_cli_output (vm,
 		       "    enqueued: %llu pkts %llu bytes, "
@@ -347,11 +440,16 @@ cake_sched_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
 		       cs->dequeued_pkts, cs->dequeued_bytes,
 		       cs->dropped_pkts);
 
-      vlib_cli_output (vm,
-		       "    flows: %u active (%u sparse, %u bulk), "
-		       "ecn marks: %llu",
-		       cs->tin.flow_count, cs->tin.sparse_flow_count,
-		       cs->tin.bulk_flow_count, cs->tin.ecn_marks);
+      for (u8 t = 0; t < cs->n_tins; t++)
+	{
+	  cake_tin_t *tin = &cs->tins[t];
+	  vlib_cli_output (vm,
+			   "    tin %u: flows %u (%u sparse, %u bulk), "
+			   "pkts %llu, drops %llu, ecn %llu",
+			   t, tin->flow_count, tin->sparse_flow_count,
+			   tin->bulk_flow_count, tin->packets, tin->drops,
+			   tin->ecn_marks);
+	}
 
       found++;
     }
@@ -393,7 +491,7 @@ osvbng_qos_sched_init (vlib_main_t *vm)
   cake_cobalt_cache_init ();
 
   vlib_log_notice (cm->log_class,
-		   "initialized (Phase 3: FQ + DRR + COBALT AQM)");
+		   "initialized (Phase 4: FQ + DRR + COBALT + DiffServ tins)");
 
   return 0;
 }
@@ -401,7 +499,7 @@ osvbng_qos_sched_init (vlib_main_t *vm)
 VLIB_INIT_FUNCTION (osvbng_qos_sched_init);
 
 VLIB_PLUGIN_REGISTER () = {
-  .version = "3.0.0",
+  .version = "4.0.0",
   .description = "osvbng QoS Scheduler Plugin (CAKE)",
 };
 
