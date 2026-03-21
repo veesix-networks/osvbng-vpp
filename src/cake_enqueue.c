@@ -243,8 +243,12 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	{
 	  cake_flow_ring_alloc (flow);
 	  flow->flow_state = CAKE_FLOW_SPARSE;
-	  flow->deficit = tin->quantum;
 	  flow->set_index = (u8) (set_base / CAKE_SET_WAYS);
+
+	  u32 dst_hash = cake_dst_host_hash (b0, is_ip4);
+	  flow->dst_host_idx = cake_host_lookup (tin, dst_hash);
+
+	  flow->deficit = cake_quantum_for_flow (tin, flow);
 	  cake_flow_list_prepend (&tin->new_flow_head, &tin->new_flow_tail,
 				  tin->flows, flow_idx);
 	  tin->flow_count++;
@@ -285,6 +289,8 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 				      tin->flows, flow_idx);
 	  tin->sparse_flow_count--;
 	  tin->bulk_flow_count++;
+	  if (flow->dst_host_idx < CAKE_HOSTS)
+	    tin->hosts[flow->dst_host_idx].bulk_flow_count++;
 	}
       else if (flow->flow_state == CAKE_FLOW_DECAYING)
 	{
@@ -295,6 +301,8 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  cake_flow_list_append_tail (&tin->old_flow_head, &tin->old_flow_tail,
 				      tin->flows, flow_idx);
 	  tin->bulk_flow_count++;
+	  if (flow->dst_host_idx < CAKE_HOSTS)
+	    tin->hosts[flow->dst_host_idx].bulk_flow_count++;
 	}
 
       if (!clib_bitmap_get (cm->per_thread[thread_index].active_bitmap,

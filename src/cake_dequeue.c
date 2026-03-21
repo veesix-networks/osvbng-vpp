@@ -55,7 +55,14 @@ cake_flow_reclaim (vlib_main_t *vm, cake_tin_t *tin, cake_sched_t *cs,
   if (f->flow_state == CAKE_FLOW_SPARSE)
     tin->sparse_flow_count--;
   else if (f->flow_state == CAKE_FLOW_BULK)
-    tin->bulk_flow_count--;
+    {
+      tin->bulk_flow_count--;
+      if (f->dst_host_idx < CAKE_HOSTS)
+	{
+	  if (tin->hosts[f->dst_host_idx].bulk_flow_count > 0)
+	    tin->hosts[f->dst_host_idx].bulk_flow_count--;
+	}
+    }
 
   tin->flow_tags[flow_idx] = 0;
   clib_memset (f, 0, sizeof (*f));
@@ -289,7 +296,7 @@ VLIB_NODE_FN (cake_dequeue_node)
 	    }
 
 	  if (flow->deficit <= 0)
-	    flow->deficit += tin->quantum;
+	    flow->deficit += cake_quantum_for_flow (tin, flow);
 
 	  while (flow->deficit > 0 && budget > 0)
 	    {

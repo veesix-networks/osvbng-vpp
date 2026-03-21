@@ -22,6 +22,7 @@
 #include <vlibmemory/api.h>
 
 cake_main_t cake_main;
+u16 cake_quantum_div[CAKE_QUEUES + 1] = { 0 };
 
 char *cake_error_strings[] = {
 #define cake_error(n, s) s,
@@ -518,8 +519,13 @@ osvbng_qos_sched_init (vlib_main_t *vm)
 
   cake_cobalt_cache_init ();
 
-  vlib_log_notice (cm->log_class,
-		   "initialized (Phase 4: FQ + DRR + COBALT + DiffServ tins)");
+  cake_quantum_div[0] = ~0;
+  for (u32 i = 1; i <= CAKE_QUEUES; i++)
+    cake_quantum_div[i] = 65535 / i;
+
+  vlib_log_notice (
+    cm->log_class,
+    "initialized (Phase 6: FQ + DRR + COBALT + DiffServ + Triple Isolation)");
 
   return 0;
 }
@@ -527,7 +533,7 @@ osvbng_qos_sched_init (vlib_main_t *vm)
 VLIB_INIT_FUNCTION (osvbng_qos_sched_init);
 
 VLIB_PLUGIN_REGISTER () = {
-  .version = "4.0.0",
+  .version = "6.0.0",
   .description = "osvbng QoS Scheduler Plugin (CAKE)",
 };
 

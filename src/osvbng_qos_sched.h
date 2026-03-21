@@ -50,6 +50,9 @@
 #define CAKE_INTERVAL_US_DEFAULT  100000
 #define CAKE_REC_INV_SQRT_CACHE	  16
 
+#define CAKE_HOSTS	  256
+#define CAKE_HOSTS_MASK	  (CAKE_HOSTS - 1)
+
 #define CAKE_TIN_MODE_BESTEFFORT 0
 #define CAKE_TIN_MODE_DIFFSERV3	 1
 #define CAKE_TIN_MODE_DIFFSERV4	 2
@@ -67,6 +70,8 @@ typedef enum
 
 extern char *cake_error_strings[];
 extern u32 cobalt_rec_inv_sqrt_cache[CAKE_REC_INV_SQRT_CACHE];
+extern u16 cake_quantum_div[CAKE_QUEUES + 1];
+
 extern const u8 cake_dscp_besteffort[64];
 extern const u8 cake_dscp_diffserv3[64];
 extern const u8 cake_dscp_diffserv4[64];
@@ -94,7 +99,16 @@ typedef struct
 
   u32 p_drop;
   u32 blue_timer_us;
+
+  u16 dst_host_idx;
+  u16 _pad2;
 } cake_flow_t;
+
+typedef struct
+{
+  u32 ip_hash;
+  u16 bulk_flow_count;
+} cake_host_t;
 
 typedef struct
 {
@@ -121,6 +135,8 @@ typedef struct
   u64 ecn_marks;
   u32 sparse_flow_count;
   u32 bulk_flow_count;
+
+  cake_host_t hosts[CAKE_HOSTS];
 } cake_tin_t;
 
 typedef struct
@@ -235,6 +251,56 @@ cake_dscp_from_buffer (vlib_buffer_t *b, u8 is_ip4)
 	ip6->ip_version_traffic_class_and_flow_label);
       return (vtcfl >> 22) & 0x3f;
     }
+}
+
+static_always_inline u32
+cake_dst_host_hash (vlib_buffer_t *b, u8 is_ip4)
+{
+  if (is_ip4)
+    {
+      ip4_header_t *ip4 = vlib_buffer_get_current (b);
+      return ip4->dst_address.as_u32;
+    }
+  else
+    {
+      ip6_header_t *ip6 = vlib_buffer_get_current (b);
+      return ip6->dst_address.as_u32[0] ^ ip6->dst_address.as_u32[3];
+    }
+}
+
+static_always_inline u16
+cake_host_lookup (cake_tin_t *tin, u32 ip_hash)
+{
+  u16 idx = ip_hash & CAKE_HOSTS_MASK;
+
+  for (u16 i = 0; i < 4; i++)
+    {
+      u16 slot = (idx + i) & CAKE_HOSTS_MASK;
+      if (tin->hosts[slot].ip_hash == ip_hash)
+	return slot;
+      if (tin->hosts[slot].ip_hash == 0)
+	{
+	  tin->hosts[slot].ip_hash = ip_hash;
+	  return slot;
+	}
+    }
+
+  tin->hosts[idx].ip_hash = ip_hash;
+  tin->hosts[idx].bulk_flow_count = 0;
+  return idx;
+}
+
+static_always_inline u32
+cake_quantum_for_flow (cake_tin_t *tin, cake_flow_t *f)
+{
+  u16 host_load = 1;
+  if (f->dst_host_idx < CAKE_HOSTS)
+    {
+      u16 hl = tin->hosts[f->dst_host_idx].bulk_flow_count;
+      if (hl > host_load)
+	host_load = hl;
+    }
+  return (tin->quantum * cake_quantum_div[host_load]) >> 16;
 }
 
 static_always_inline void
