@@ -10,10 +10,31 @@ Phase benchmarks use containerlab test 18 (`ipoe-linux-client`) with af-packet i
 - **No CPU pinning**: VPP workers share cores with OS, containerlab, iperf3
 - **veth pairs**: containerlab links are veth, not PCIe/DPDK
 - **No hugepages isolation**: shared with host
+- **No real bottleneck link**: veth pairs have effectively unlimited bandwidth. The scheduler is the only bottleneck — there is no DSLAM/OLT/CPE buffer downstream to fill. This means latency-under-load tests (COBALT AQM validation) cannot show the full bufferbloat → latency reduction effect in this environment.
 
-Results are useful for: phase-over-phase clocks/vector comparison, functional validation, pipeline correctness.
+Results are useful for: phase-over-phase clocks/vector comparison, functional validation, pipeline correctness, verifying AQM counters (drops, ECN marks), confirming shaper rate accuracy.
 
-Results are NOT useful for: absolute PPS numbers, production capacity planning, tail latency benchmarks.
+Results are NOT useful for: absolute PPS numbers, production capacity planning, tail latency benchmarks, COBALT latency-under-load validation (no downstream buffer to create bufferbloat).
+
+### COBALT AQM Testing (Requires Real or Emulated Bottleneck)
+
+The containerlab setup cannot fully validate COBALT's latency reduction because there is no constrained access link downstream of the scheduler. In a real BNG deployment, the access link (DSL, GPON, DOCSIS) has finite bandwidth and buffers that fill up — COBALT prevents this by signalling congestion before those buffers overflow.
+
+**What we CAN validate in containerlab:**
+- AQM drop and ECN mark counters are incrementing (`show cake scheduler`, `show errors`)
+- Scheduler queue depth stays bounded (not growing unbounded)
+- COBALT state transitions are correct (dropping state, count, rec_inv_sqrt)
+- The shaping rate is maintained with COBALT enabled
+
+**What requires a proper test environment:**
+- Latency under load (RRUL test): iperf3 bulk + concurrent ping → RTT near 5ms target
+- ECN-capable flow verification: CE marks in received packets, zero drops
+- BLUE vs unresponsive UDP: probabilistic drop rate under sustained UDP flood
+
+**Proper COBALT validation options (TODO):**
+- **TRex + dual-subscriber**: TRex generates bulk downstream traffic to subscriber A on S-VLAN/C-VLAN 100/10, while subscriber B on S-VLAN/C-VLAN 100/20 runs ping to measure latency. Both go through the same BNG with CAKE scheduling. TRex can also measure per-flow latency with hardware timestamping.
+- **Bare metal + DPDK**: Real NICs with rate-limited ports or `tc netem` on the access side to simulate constrained links.
+- **`flent` RRUL test**: Purpose-built for bufferbloat measurement. Requires netserver on both ends.
 
 ### Production Benchmark Environment (TODO)
 
@@ -23,6 +44,7 @@ Results are NOT useful for: absolute PPS numbers, production capacity planning, 
 - CPU pinning: VPP main + workers on dedicated cores, traffic gen on separate NUMA node
 - Hugepages: 1G pages, pre-allocated at boot
 - Repeat with multiple subscriber counts (1, 10, 100, 1000) to measure scaling
+- Multi-subscriber latency-under-load with TRex for COBALT validation
 
 ## Running Benchmarks
 
@@ -97,7 +119,7 @@ The key regression metric is `ip4-cake-enqueue` c/v — this is the per-packet C
 |-------|------------|-------------------|-------------|
 | 1 | **282** | — | FIFO + token-bucket shaper (vec_add1) |
 | 2 | **172** | -110 (-39%) | FQ + DRR + ring buffer + owner-thread handoff |
-| 3 | | | COBALT AQM (CoDel + BLUE) |
+| 3 | **205** | -77 (-27%) | COBALT AQM (CoDel + BLUE) |
 | 4 | | | DiffServ tins |
 | 5 | | | Overhead compensation (ATM/PTM/GPON) |
 | 6 | | | Triple isolation (per-host fairness) |
