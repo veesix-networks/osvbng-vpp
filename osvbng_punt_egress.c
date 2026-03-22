@@ -34,6 +34,15 @@
 
 /* Maximum packets to process per interrupt */
 #define OSVBNG_EGRESS_MAX_BATCH VLIB_FRAME_SIZE
+#define OSVBNG_EGRESS_MAX_IFS 8
+
+typedef struct
+{
+  u32 output_node_index;
+  vlib_frame_t *f;
+  u32 *to_next;
+  u32 n_vectors;
+} osvbng_egress_pending_t;
 
 typedef struct
 {
@@ -68,6 +77,8 @@ VLIB_NODE_FN (osvbng_egress_node)
   uint64_t head, tail;
   uint64_t mask;
   u32 n_tx = 0;
+  osvbng_egress_pending_t pending[OSVBNG_EGRESS_MAX_IFS];
+  u32 n_pending = 0;
 
   if (PREDICT_FALSE (!pm->shm_initialized))
     return 0;
@@ -75,7 +86,6 @@ VLIB_NODE_FN (osvbng_egress_node)
   ring = pm->egress_ring;
   mask = pm->egress_ring_size - 1;
 
-  /* Read head (what osvbng has written) */
   head = atomic_load_explicit (&ring->head, memory_order_acquire);
   tail = pm->egress_tail;
 
@@ -87,7 +97,6 @@ VLIB_NODE_FN (osvbng_egress_node)
       u32 bi;
       u8 *data_ptr;
 
-      /* Validate sw_if_index */
       if (PREDICT_FALSE (
 	    pool_is_free_index (vnm->interface_main.sw_interfaces,
 				desc->sw_if_index)))
@@ -99,7 +108,6 @@ VLIB_NODE_FN (osvbng_egress_node)
 	  continue;
 	}
 
-      /* Get hardware interface for this sw_if_index */
       hw = vnet_get_sup_hw_interface (vnm, desc->sw_if_index);
       if (PREDICT_FALSE (!hw))
 	{
@@ -110,16 +118,14 @@ VLIB_NODE_FN (osvbng_egress_node)
 	  continue;
 	}
 
-      /* Allocate VPP buffer */
       if (PREDICT_FALSE (vlib_buffer_alloc (vm, &bi, 1) != 1))
 	{
 	  pm->egress_alloc_fail++;
-	  break; /* Can't continue without buffers */
+	  break;
 	}
 
       b = vlib_get_buffer (vm, bi);
 
-      /* Copy frame from shared memory */
       data_ptr = (u8 *) pm->shm + desc->data_offset;
       u32 max_len = vlib_buffer_get_default_data_size (vm);
       if (PREDICT_FALSE (desc->data_length > max_len))
@@ -136,11 +142,9 @@ VLIB_NODE_FN (osvbng_egress_node)
 	  b->current_length = desc->data_length;
 	}
 
-      /* Set TX interface */
       vnet_buffer (b)->sw_if_index[VLIB_TX] = desc->sw_if_index;
       vnet_buffer (b)->sw_if_index[VLIB_RX] = ~0;
 
-      /* Trace if enabled */
       if (PREDICT_FALSE (node->flags & VLIB_NODE_FLAG_TRACE))
 	{
 	  osvbng_egress_trace_t *t =
@@ -149,26 +153,55 @@ VLIB_NODE_FN (osvbng_egress_node)
 	  t->data_length = desc->data_length;
 	}
 
-      /*
-       * Send directly to interface output node (LLDP pattern)
-       *
-       * This bypasses the normal packet processing path and sends
-       * the frame directly to the hardware output node with full
-       * L2 headers already constructed by osvbng.
-       */
-      {
-	vlib_frame_t *f;
-	u32 *to_next;
+      u32 out_node = hw->output_node_index;
+      osvbng_egress_pending_t *p = NULL;
+      for (u32 i = 0; i < n_pending; i++)
+	{
+	  if (pending[i].output_node_index == out_node)
+	    {
+	      p = &pending[i];
+	      break;
+	    }
+	}
 
-	f = vlib_get_frame_to_node (vm, hw->output_node_index);
-	to_next = vlib_frame_vector_args (f);
-	to_next[0] = bi;
-	f->n_vectors = 1;
-	vlib_put_frame_to_node (vm, hw->output_node_index, f);
-      }
+      if (!p)
+	{
+	  if (PREDICT_FALSE (n_pending >= OSVBNG_EGRESS_MAX_IFS))
+	    {
+	      vlib_frame_t *f = vlib_get_frame_to_node (vm, out_node);
+	      u32 *to_next = vlib_frame_vector_args (f);
+	      to_next[0] = bi;
+	      f->n_vectors = 1;
+	      vlib_put_frame_to_node (vm, out_node, f);
+	      tail++;
+	      n_tx++;
+	      continue;
+	    }
+	  p = &pending[n_pending++];
+	  p->output_node_index = out_node;
+	  p->f = vlib_get_frame_to_node (vm, out_node);
+	  p->to_next = vlib_frame_vector_args (p->f);
+	  p->n_vectors = 0;
+	}
+
+      p->to_next[p->n_vectors++] = bi;
+
+      if (PREDICT_FALSE (p->n_vectors >= VLIB_FRAME_SIZE))
+	{
+	  p->f->n_vectors = p->n_vectors;
+	  vlib_put_frame_to_node (vm, p->output_node_index, p->f);
+	  *p = pending[--n_pending];
+	}
 
       tail++;
       n_tx++;
+    }
+
+  for (u32 i = 0; i < n_pending; i++)
+    {
+      pending[i].f->n_vectors = pending[i].n_vectors;
+      vlib_put_frame_to_node (vm, pending[i].output_node_index,
+			      pending[i].f);
     }
 
   /* Update our local tail and publish it */
