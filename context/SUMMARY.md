@@ -16,7 +16,7 @@ VPP plugin for per-subscriber QoS — covering the full pipeline from policing t
 |------|--------|---------|
 | [full-qos](specs/full-qos/) | Phase 4 complete (in osvbng-context) | Full QoS overhaul: configurable policer algorithms, dynamic ad-hoc rates, DSCP marking pipeline, live policy updates, show/oper commands, Prometheus metrics, and CAKE scheduling (Phase 5 of this spec) |
 | [cake-scheduler](specs/cake-scheduler/) | Phase 4 complete (spec finalized) | CAKE-equivalent per-subscriber scheduler: per-flow queuing, COBALT AQM, DRR, DiffServ tins, triple isolation, overhead compensation, token-bucket shaping. Codex (7 findings) + Gemini (11 findings) reviews — all accepted, 0 rejected. |
-| [hqos-qinq](specs/hqos-qinq/) | Phase 1 complete (draft) | Two-level HQoS: per-S-VLAN aggregate shaper + DRR across child CAKE schedulers. Prevents QinQ subscribers from collectively exceeding S-VLAN capacity. Issue [#1](https://github.com/veesix-networks/osvbng-vpp-plugin-qos/issues/1). |
+| [hqos-qinq](specs/hqos-qinq/) | Phase 4 complete (spec finalized) | Two-level HQoS: per-S-VLAN aggregate shaper + DRR across child CAKE schedulers. Prevents QinQ subscribers from collectively exceeding S-VLAN capacity. Codex (4 findings) + Gemini (7 findings) reviews -- 7 accepted, 4 rejected. Issue [#1](https://github.com/veesix-networks/osvbng-vpp-plugin-qos/issues/1). |
 
 ## Spec Dependencies
 
@@ -31,10 +31,10 @@ graph TD
 
     style FQ fill:#2da44e,color:#fff
     style CS fill:#2da44e,color:#fff
-    style HQ fill:#0969da,color:#fff
+    style HQ fill:#2da44e,color:#fff
 ```
 
-Legend: green = spec finalized, blue = spec in draft/review
+Legend: green = spec finalized
 
 ## Relationship Between Specs
 
@@ -93,9 +93,9 @@ Both specs are needed because:
 
 ## What's Next
 
-The cake-scheduler spec is finalized (Phase 4 complete). All Codex findings accepted and incorporated. The hqos-qinq spec draft is complete (Phase 1), pending optional review by Gemini/Codex. Next steps:
+The cake-scheduler spec is finalized (Phase 4 complete). All Codex findings accepted and incorporated. The hqos-qinq spec is finalized (Phase 4 complete) with all 4 Codex findings accepted. Next steps:
 
 1. **cake-scheduler Phase 5: Implementation** — Update the scaffold code in `src/` to match the finalized spec (re-injection design, buffer ownership, lazy allocation, INPUT node state management, IPv6 extension header walk)
 2. **cake-scheduler Phase 6: Code review** — Post-implementation review by Codex and/or Gemini
-3. **hqos-qinq Phase 2/3: Spec review** — Optional Gemini (DRR correctness, token bucket interaction) and/or Codex (thread pinning, dequeue loop, buffer accounting) review
-4. **hqos-qinq Phase 4: Spec finalization** — Incorporate review findings
+3. **hqos-qinq Phase 5: Implementation** — Aggregate lifecycle (under worker barrier), unified interleaved dequeue loop, draining state, explicit thread placement API
+4. **hqos-qinq Phase 6: Code review** — Post-implementation review
