@@ -10,7 +10,7 @@
 |-------|-------------|--------|
 | Phase 1 | Spec Draft | **Complete** |
 | Phase 2 | Spec Refinement (Gemini) | Not started |
-| Phase 3 | Spec Critique (Codex) | Not started |
+| Phase 3 | Spec Critique (Codex) | **Complete** |
 | Phase 4 | Spec Finalization | Not started |
 | Phase 5 | Implementation | Not started |
 | Phase 6 | Code Review | Not started |
@@ -18,6 +18,7 @@
 ## Key Context Files
 
 - [IMPLEMENTATION_SPEC.md](IMPLEMENTATION_SPEC.md) -- Technical specification
+- [spec-reviews/CODEX.md](spec-reviews/CODEX.md) -- Phase 3 architectural critique
 - [../cake-scheduler/IMPLEMENTATION_SPEC.md](../cake-scheduler/IMPLEMENTATION_SPEC.md) -- Parent CAKE scheduler spec (leaf level)
 - [../full-qos/IMPLEMENTATION_SPEC.md](../full-qos/IMPLEMENTATION_SPEC.md) -- Full QoS pipeline spec
 
@@ -70,4 +71,4 @@
 
 ## Prompt to Resume
 
-> Read `context/SUMMARY.md` for project state, then `context/specs/hqos-qinq/README.md` for current status. Phase 1 (spec draft) is complete. Next: optionally send to Gemini (Phase 2) and/or Codex (Phase 3) for review, then finalize the spec in Phase 4.
+> Read `context/SUMMARY.md` for project state, then `context/specs/hqos-qinq/README.md` for current status. Phases 1 and 3 are complete. Next: optionally send to Gemini (Phase 2), then finalize the spec in Phase 4 using `spec-reviews/CODEX.md` and any Gemini review artifact.
