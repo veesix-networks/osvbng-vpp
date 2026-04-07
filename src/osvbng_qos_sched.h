@@ -46,6 +46,9 @@
 
 #define CAKE_OWNER_UNSET ((u32) ~0)
 
+#define CAKE_AGG_OWNER_UNSET  ((u32) ~0)
+#define CAKE_AGG_QUANTUM_DEFAULT 65535
+
 #define CAKE_TARGET_US_DEFAULT	  5000
 #define CAKE_INTERVAL_US_DEFAULT  100000
 #define CAKE_REC_INV_SQRT_CACHE	  16
@@ -148,6 +151,36 @@ typedef struct
   u64 global_shaper_time_ns;
 
   u32 sw_if_index;
+  u32 agg_index;
+  u32 owner_thread;
+
+  u32 child_head;
+  u32 child_tail;
+  u32 n_children;
+  u32 quantum;
+
+  u32 drr_cursor;
+  u32 active_child_head;
+  u32 active_child_tail;
+  u32 n_active_children;
+
+  u32 buffer_limit;
+  u32 buffer_usage;
+
+  u64 shaped_pkts;
+  u64 shaped_bytes;
+  u64 backpressure_events;
+} cake_aggregate_t;
+
+typedef struct
+{
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+
+  u64 rate_bytes_per_sec;
+  u64 rate_ns_per_byte;
+  u64 global_shaper_time_ns;
+
+  u32 sw_if_index;
   u32 sched_index;
   u32 owner_thread;
 
@@ -176,12 +209,22 @@ typedef struct
   u64 dequeued_pkts;
   u64 dequeued_bytes;
   u64 dropped_pkts;
+
+  u32 aggregate_index;
+  i32 agg_deficit;
+  u32 agg_next;
+  u32 agg_prev;
+  u8 agg_draining;
+  u8 agg_active;
 } cake_sched_t;
 
 typedef struct
 {
   uword *active_bitmap;
+  uword *active_agg_bitmap;
   u32 random_seed;
+  u32 standalone_cursor;
+  u32 agg_cursor;
 } cake_per_thread_t;
 
 typedef struct
@@ -190,6 +233,9 @@ typedef struct
   cake_per_thread_t *per_thread;
   u32 *sched_index_by_sw_if_index;
   u32 n_schedulers;
+
+  cake_aggregate_t *aggregates;
+  u32 *agg_index_by_sw_if_index;
 
   u16 msg_id_base;
 
@@ -644,6 +690,64 @@ cake_ecn_mark (vlib_buffer_t *b)
 	clib_host_to_net_u32 (vtcfl);
       return 1;
     }
+}
+
+int cake_aggregate_create (vlib_main_t *vm, u32 sw_if_index,
+			    u64 rate_bytes_per_sec, u32 buffer_limit,
+			    u32 quantum, u32 owner_thread);
+int cake_aggregate_delete (vlib_main_t *vm, u32 sw_if_index);
+int cake_aggregate_attach (vlib_main_t *vm, u32 child_sw_if_index,
+			    u32 agg_sw_if_index);
+int cake_aggregate_detach (vlib_main_t *vm, u32 child_sw_if_index);
+
+static_always_inline void
+cake_agg_discharge (cake_main_t *cm, cake_sched_t *cs, u32 pkt_len)
+{
+  if (cs->aggregate_index != ~0)
+    {
+      cake_aggregate_t *agg =
+	pool_elt_at_index (cm->aggregates, cs->aggregate_index);
+      if (agg->buffer_usage >= pkt_len)
+	agg->buffer_usage -= pkt_len;
+      else
+	agg->buffer_usage = 0;
+    }
+}
+
+static_always_inline void
+cake_agg_child_list_append (cake_aggregate_t *agg, cake_sched_t *schedulers,
+			     u32 *head, u32 *tail, u32 idx)
+{
+  cake_sched_t *cs = &schedulers[idx];
+  cs->agg_next = ~0;
+  cs->agg_prev = *tail;
+
+  if (*tail != ~0)
+    schedulers[*tail].agg_next = idx;
+  else
+    *head = idx;
+
+  *tail = idx;
+}
+
+static_always_inline void
+cake_agg_child_list_remove (cake_sched_t *schedulers, u32 *head, u32 *tail,
+			     u32 idx)
+{
+  cake_sched_t *cs = &schedulers[idx];
+
+  if (cs->agg_prev != ~0)
+    schedulers[cs->agg_prev].agg_next = cs->agg_next;
+  else
+    *head = cs->agg_next;
+
+  if (cs->agg_next != ~0)
+    schedulers[cs->agg_next].agg_prev = cs->agg_prev;
+  else
+    *tail = cs->agg_prev;
+
+  cs->agg_next = ~0;
+  cs->agg_prev = ~0;
 }
 
 extern vlib_node_registration_t ip4_cake_enqueue_node;

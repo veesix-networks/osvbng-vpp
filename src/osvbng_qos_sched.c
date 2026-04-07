@@ -234,6 +234,13 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 	  cs->tins[t].tin_quantum = 65535 / cs->n_tins;
 	}
 
+      cs->aggregate_index = ~0;
+      cs->agg_deficit = 0;
+      cs->agg_next = ~0;
+      cs->agg_prev = ~0;
+      cs->agg_draining = 0;
+      cs->agg_active = 0;
+
       cm->sched_index_by_sw_if_index[sw_if_index] = pool_index;
 
       vnet_feature_enable_disable ("ip4-output", "ip4-cake-enqueue",
@@ -334,6 +341,386 @@ cake_sched_reset_stats (u32 sw_if_index)
       cs->tins[t].ecn_marks = 0;
     }
 }
+
+int
+cake_aggregate_create (vlib_main_t *vm, u32 sw_if_index,
+		        u64 rate_bytes_per_sec, u32 buffer_limit,
+		        u32 quantum, u32 owner_thread)
+{
+  cake_main_t *cm = &cake_main;
+
+  if (!vnet_sw_interface_is_api_valid (vnet_get_main (), sw_if_index))
+    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
+
+  vlib_worker_thread_barrier_sync (vm);
+
+  vec_validate_init_empty (cm->agg_index_by_sw_if_index, sw_if_index, ~0);
+  if (cm->agg_index_by_sw_if_index[sw_if_index] != ~0)
+    {
+      vlib_worker_thread_barrier_release (vm);
+      return VNET_API_ERROR_ENTRY_ALREADY_EXISTS;
+    }
+
+  cake_aggregate_t *agg;
+  pool_get_zero (cm->aggregates, agg);
+  u32 agg_idx = agg - cm->aggregates;
+
+  agg->sw_if_index = sw_if_index;
+  agg->agg_index = agg_idx;
+  agg->rate_bytes_per_sec = rate_bytes_per_sec;
+  agg->rate_ns_per_byte =
+    rate_bytes_per_sec > 0 ? (u64) 1e9 / rate_bytes_per_sec : 0;
+  agg->global_shaper_time_ns = (u64) (vlib_time_now (vm) * 1e9);
+  agg->owner_thread =
+    owner_thread != ~0 ? owner_thread : CAKE_AGG_OWNER_UNSET;
+  agg->quantum = quantum > 0 ? quantum : CAKE_AGG_QUANTUM_DEFAULT;
+  agg->child_head = ~0;
+  agg->child_tail = ~0;
+  agg->n_children = 0;
+  agg->drr_cursor = ~0;
+  agg->active_child_head = ~0;
+  agg->active_child_tail = ~0;
+  agg->n_active_children = 0;
+
+  if (buffer_limit == 0)
+    {
+      agg->buffer_limit =
+	(u32) ((rate_bytes_per_sec * 100000 * 3) / (1000000 * 2));
+      if (agg->buffer_limit < 1048576)
+	agg->buffer_limit = 1048576;
+    }
+  else
+    agg->buffer_limit = buffer_limit;
+
+  agg->buffer_usage = 0;
+
+  cm->agg_index_by_sw_if_index[sw_if_index] = agg_idx;
+
+  vlib_worker_thread_barrier_release (vm);
+
+  vlib_log_notice (cm->log_class,
+		   "aggregate created on sw_if_index %u "
+		   "(rate %llu B/s, quantum %u, owner %u)",
+		   sw_if_index, rate_bytes_per_sec, agg->quantum,
+		   agg->owner_thread);
+
+  return 0;
+}
+
+int
+cake_aggregate_delete (vlib_main_t *vm, u32 sw_if_index)
+{
+  cake_main_t *cm = &cake_main;
+
+  vlib_worker_thread_barrier_sync (vm);
+
+  vec_validate_init_empty (cm->agg_index_by_sw_if_index, sw_if_index, ~0);
+  u32 agg_idx = cm->agg_index_by_sw_if_index[sw_if_index];
+  if (agg_idx == ~0)
+    {
+      vlib_worker_thread_barrier_release (vm);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
+
+  cake_aggregate_t *agg = pool_elt_at_index (cm->aggregates, agg_idx);
+
+  if (agg->n_children > 0)
+    {
+      vlib_worker_thread_barrier_release (vm);
+      return VNET_API_ERROR_RSRC_IN_USE;
+    }
+
+  u32 owner = agg->owner_thread;
+
+  if (owner != CAKE_AGG_OWNER_UNSET)
+    {
+      for (u32 ti = 0; ti < vec_len (cm->per_thread); ti++)
+	{
+	  cake_per_thread_t *pt = vec_elt_at_index (cm->per_thread, ti);
+	  pt->active_agg_bitmap =
+	    clib_bitmap_set (pt->active_agg_bitmap, agg_idx, 0);
+	}
+    }
+
+  cm->agg_index_by_sw_if_index[sw_if_index] = ~0;
+  pool_put (cm->aggregates, agg);
+
+  vlib_worker_thread_barrier_release (vm);
+
+  vlib_log_notice (cm->log_class, "aggregate deleted on sw_if_index %u",
+		   sw_if_index);
+
+  return 0;
+}
+
+int
+cake_aggregate_attach (vlib_main_t *vm, u32 child_sw_if_index,
+		        u32 agg_sw_if_index)
+{
+  cake_main_t *cm = &cake_main;
+
+  vlib_worker_thread_barrier_sync (vm);
+
+  vec_validate_init_empty (cm->sched_index_by_sw_if_index, child_sw_if_index,
+			   ~0);
+  u32 sched_idx = cm->sched_index_by_sw_if_index[child_sw_if_index];
+  if (sched_idx == ~0)
+    {
+      vlib_worker_thread_barrier_release (vm);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
+
+  vec_validate_init_empty (cm->agg_index_by_sw_if_index, agg_sw_if_index,
+			   ~0);
+  u32 agg_idx = cm->agg_index_by_sw_if_index[agg_sw_if_index];
+  if (agg_idx == ~0)
+    {
+      vlib_worker_thread_barrier_release (vm);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
+
+  cake_sched_t *cs = pool_elt_at_index (cm->schedulers, sched_idx);
+
+  if (cs->aggregate_index != ~0)
+    {
+      vlib_worker_thread_barrier_release (vm);
+      return VNET_API_ERROR_ENTRY_ALREADY_EXISTS;
+    }
+
+  cake_aggregate_t *agg = pool_elt_at_index (cm->aggregates, agg_idx);
+
+  cs->aggregate_index = agg_idx;
+  cs->agg_deficit = agg->quantum;
+  cs->agg_draining = 0;
+  cs->agg_active = 0;
+
+  cake_agg_child_list_append (agg, cm->schedulers, &agg->child_head,
+			       &agg->child_tail, sched_idx);
+  agg->n_children++;
+
+  if (agg->owner_thread != CAKE_AGG_OWNER_UNSET)
+    cs->owner_thread = agg->owner_thread;
+  else if (cs->owner_thread != CAKE_OWNER_UNSET)
+    {
+      agg->owner_thread = cs->owner_thread;
+      vlib_node_set_state (
+	vlib_get_main_by_index (agg->owner_thread),
+	cm->dequeue_node_index, VLIB_NODE_STATE_POLLING);
+    }
+
+  vlib_worker_thread_barrier_release (vm);
+
+  vlib_log_notice (cm->log_class,
+		   "scheduler sw_if_index %u attached to aggregate "
+		   "sw_if_index %u",
+		   child_sw_if_index, agg_sw_if_index);
+
+  return 0;
+}
+
+int
+cake_aggregate_detach (vlib_main_t *vm, u32 child_sw_if_index)
+{
+  cake_main_t *cm = &cake_main;
+
+  vlib_worker_thread_barrier_sync (vm);
+
+  vec_validate_init_empty (cm->sched_index_by_sw_if_index, child_sw_if_index,
+			   ~0);
+  u32 sched_idx = cm->sched_index_by_sw_if_index[child_sw_if_index];
+  if (sched_idx == ~0)
+    {
+      vlib_worker_thread_barrier_release (vm);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
+
+  cake_sched_t *cs = pool_elt_at_index (cm->schedulers, sched_idx);
+
+  if (cs->aggregate_index == ~0)
+    {
+      vlib_worker_thread_barrier_release (vm);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
+
+  u8 has_backlog = 0;
+  for (u8 t = 0; t < cs->n_tins; t++)
+    {
+      if (cs->tins[t].flow_count > 0)
+	{
+	  has_backlog = 1;
+	  break;
+	}
+    }
+
+  if (has_backlog)
+    {
+      cs->agg_draining = 1;
+      vlib_worker_thread_barrier_release (vm);
+      vlib_log_notice (cm->log_class,
+		       "scheduler sw_if_index %u entering draining state",
+		       child_sw_if_index);
+      return 0;
+    }
+
+  cake_aggregate_t *agg =
+    pool_elt_at_index (cm->aggregates, cs->aggregate_index);
+
+  if (cs->agg_active)
+    {
+      cake_agg_child_list_remove (cm->schedulers, &agg->active_child_head,
+				   &agg->active_child_tail, sched_idx);
+      agg->n_active_children--;
+      cs->agg_active = 0;
+    }
+
+  if (agg->drr_cursor == sched_idx)
+    agg->drr_cursor = cs->agg_next != ~0 ? cs->agg_next : agg->child_head;
+
+  cake_agg_child_list_remove (cm->schedulers, &agg->child_head,
+			       &agg->child_tail, sched_idx);
+  agg->n_children--;
+
+  cake_agg_discharge (cm, cs, cs->buffer_usage);
+
+  cs->aggregate_index = ~0;
+  cs->agg_deficit = 0;
+  cs->agg_draining = 0;
+
+  if (agg->n_children == 0)
+    {
+      for (u32 ti = 0; ti < vec_len (cm->per_thread); ti++)
+	{
+	  cake_per_thread_t *pt = vec_elt_at_index (cm->per_thread, ti);
+	  pt->active_agg_bitmap =
+	    clib_bitmap_set (pt->active_agg_bitmap, agg->agg_index, 0);
+	}
+    }
+
+  vlib_worker_thread_barrier_release (vm);
+
+  vlib_log_notice (cm->log_class,
+		   "scheduler sw_if_index %u detached from aggregate",
+		   child_sw_if_index);
+
+  return 0;
+}
+
+static clib_error_t *
+cake_aggregate_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
+				vlib_cli_command_t *cmd)
+{
+  u32 sw_if_index = ~0;
+  u64 rate_kbps = 0;
+  u8 is_disable = 0;
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "%U", unformat_vnet_sw_interface,
+		    vnet_get_main (), &sw_if_index))
+	;
+      else if (unformat (input, "rate %llu", &rate_kbps))
+	;
+      else if (unformat (input, "disable"))
+	is_disable = 1;
+      else
+	return clib_error_return (0, "unknown input `%U'",
+				  format_unformat_error, input);
+    }
+
+  if (sw_if_index == ~0)
+    return clib_error_return (0, "interface required");
+
+  int rv;
+  if (is_disable)
+    rv = cake_aggregate_delete (vm, sw_if_index);
+  else
+    {
+      if (rate_kbps == 0)
+	return clib_error_return (0, "rate required (kbps)");
+      rv = cake_aggregate_create (vm, sw_if_index, rate_kbps * 1000 / 8, 0,
+				  0, ~0);
+    }
+
+  if (rv)
+    return clib_error_return (0, "cake_aggregate returned %d", rv);
+
+  return 0;
+}
+
+VLIB_CLI_COMMAND (cake_aggregate_set_command, static) = {
+  .path = "set cake aggregate",
+  .short_help = "set cake aggregate <interface> rate <kbps> [disable]",
+  .function = cake_aggregate_set_command_fn,
+};
+
+static clib_error_t *
+cake_aggregate_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
+				 vlib_cli_command_t *cmd)
+{
+  cake_main_t *cm = &cake_main;
+  u32 sw_if_index = ~0;
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "%U", unformat_vnet_sw_interface,
+		    vnet_get_main (), &sw_if_index))
+	;
+      else
+	return clib_error_return (0, "unknown input `%U'",
+				  format_unformat_error, input);
+    }
+
+  u32 found = 0;
+  cake_aggregate_t *agg;
+  pool_foreach (agg, cm->aggregates)
+    {
+      if (sw_if_index != ~0 && agg->sw_if_index != sw_if_index)
+	continue;
+
+      vlib_cli_output (
+	vm,
+	"  %U: rate %llu B/s (%llu kbps), quantum %u, "
+	"owner thread %u, children %u (active %u)",
+	format_vnet_sw_if_index_name, vnet_get_main (), agg->sw_if_index,
+	agg->rate_bytes_per_sec, agg->rate_bytes_per_sec * 8 / 1000,
+	agg->quantum, agg->owner_thread, agg->n_children,
+	agg->n_active_children);
+
+      vlib_cli_output (vm,
+		       "    buffer %u/%u bytes, shaped %llu pkts %llu bytes, "
+		       "backpressure %llu",
+		       agg->buffer_usage, agg->buffer_limit, agg->shaped_pkts,
+		       agg->shaped_bytes, agg->backpressure_events);
+
+      u32 ci = agg->child_head;
+      while (ci != ~0)
+	{
+	  cake_sched_t *child = pool_elt_at_index (cm->schedulers, ci);
+	  vlib_cli_output (vm,
+			   "      child %U: rate %llu kbps, deficit %d%s%s",
+			   format_vnet_sw_if_index_name, vnet_get_main (),
+			   child->sw_if_index,
+			   child->rate_bytes_per_sec * 8 / 1000,
+			   child->agg_deficit,
+			   child->agg_draining ? " [draining]" : "",
+			   child->agg_active ? " [active]" : "");
+	  ci = child->agg_next;
+	}
+
+      found++;
+    }
+
+  if (found == 0)
+    vlib_cli_output (vm, "  no aggregates configured");
+
+  return 0;
+}
+
+VLIB_CLI_COMMAND (cake_aggregate_show_command, static) = {
+  .path = "show cake aggregate",
+  .short_help = "show cake aggregate [<interface>]",
+  .function = cake_aggregate_show_command_fn,
+};
 
 static const char *cake_tin_mode_names[] = {
   [CAKE_TIN_MODE_BESTEFFORT] = "besteffort",

@@ -124,3 +124,101 @@ autoreply define osvbng_cake_sched_reset_stats
   u32 context;
   vl_api_interface_index_t sw_if_index;
 };
+
+/** \brief Create per-S-VLAN aggregate shaper
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - S-VLAN interface
+    @param rate_bytes_per_sec - aggregate shaping rate (bytes/sec)
+    @param buffer_limit - max aggregate buffered bytes (0 = auto)
+    @param quantum - DRR quantum per child (0 = default 65535)
+    @param owner_thread - explicit thread placement (~0 = first-packet CAS)
+*/
+autoreply define osvbng_cake_aggregate_create
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  u64 rate_bytes_per_sec;
+  u32 buffer_limit;
+  u32 quantum;
+  u32 owner_thread;
+};
+
+/** \brief Delete per-S-VLAN aggregate shaper
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - S-VLAN interface
+*/
+autoreply define osvbng_cake_aggregate_delete
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+};
+
+/** \brief Attach child scheduler to aggregate
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param child_sw_if_index - subscriber (C-VLAN) interface
+    @param agg_sw_if_index - aggregate (S-VLAN) interface
+*/
+autoreply define osvbng_cake_aggregate_attach
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t child_sw_if_index;
+  vl_api_interface_index_t agg_sw_if_index;
+};
+
+/** \brief Detach child scheduler from aggregate
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param child_sw_if_index - subscriber (C-VLAN) interface
+*/
+autoreply define osvbng_cake_aggregate_detach
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t child_sw_if_index;
+};
+
+/** \brief Dump aggregate shaper state
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - S-VLAN interface (~0 for all)
+*/
+define osvbng_cake_aggregate_dump
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+};
+
+/** \brief Aggregate shaper details (response to dump)
+    @param context - sender context
+    @param sw_if_index - S-VLAN interface
+    @param rate_bytes_per_sec - configured aggregate rate
+    @param owner_thread - owning worker thread
+    @param n_children - total attached children
+    @param n_active_children - children with queued packets
+    @param buffer_usage - current aggregate bytes queued
+    @param buffer_limit - maximum aggregate buffer bytes
+    @param shaped_pkts - total packets shaped through aggregate
+    @param shaped_bytes - total bytes shaped through aggregate
+    @param backpressure_events - aggregate buffer overflow drops
+*/
+define osvbng_cake_aggregate_details
+{
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  u64 rate_bytes_per_sec;
+  u32 owner_thread;
+  u32 n_children;
+  u32 n_active_children;
+  u32 buffer_usage;
+  u32 buffer_limit;
+  u64 shaped_pkts;
+  u64 shaped_bytes;
+  u64 backpressure_events;
+};

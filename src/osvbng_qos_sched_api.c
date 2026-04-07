@@ -109,6 +109,114 @@ vl_api_osvbng_cake_sched_reset_stats_t_handler (
   REPLY_MACRO (VL_API_OSVBNG_CAKE_SCHED_RESET_STATS_REPLY);
 }
 
+static void
+vl_api_osvbng_cake_aggregate_create_t_handler (
+  vl_api_osvbng_cake_aggregate_create_t *mp)
+{
+  cake_main_t *cm = &cake_main;
+  vl_api_osvbng_cake_aggregate_create_reply_t *rmp;
+  int rv = 0;
+
+  rv = cake_aggregate_create (
+    cm->vlib_main, ntohl (mp->sw_if_index),
+    clib_net_to_host_u64 (mp->rate_bytes_per_sec), ntohl (mp->buffer_limit),
+    ntohl (mp->quantum), ntohl (mp->owner_thread));
+
+  REPLY_MACRO (VL_API_OSVBNG_CAKE_AGGREGATE_CREATE_REPLY);
+}
+
+static void
+vl_api_osvbng_cake_aggregate_delete_t_handler (
+  vl_api_osvbng_cake_aggregate_delete_t *mp)
+{
+  cake_main_t *cm = &cake_main;
+  vl_api_osvbng_cake_aggregate_delete_reply_t *rmp;
+  int rv = 0;
+
+  rv = cake_aggregate_delete (cm->vlib_main, ntohl (mp->sw_if_index));
+
+  REPLY_MACRO (VL_API_OSVBNG_CAKE_AGGREGATE_DELETE_REPLY);
+}
+
+static void
+vl_api_osvbng_cake_aggregate_attach_t_handler (
+  vl_api_osvbng_cake_aggregate_attach_t *mp)
+{
+  cake_main_t *cm = &cake_main;
+  vl_api_osvbng_cake_aggregate_attach_reply_t *rmp;
+  int rv = 0;
+
+  rv = cake_aggregate_attach (cm->vlib_main,
+			       ntohl (mp->child_sw_if_index),
+			       ntohl (mp->agg_sw_if_index));
+
+  REPLY_MACRO (VL_API_OSVBNG_CAKE_AGGREGATE_ATTACH_REPLY);
+}
+
+static void
+vl_api_osvbng_cake_aggregate_detach_t_handler (
+  vl_api_osvbng_cake_aggregate_detach_t *mp)
+{
+  cake_main_t *cm = &cake_main;
+  vl_api_osvbng_cake_aggregate_detach_reply_t *rmp;
+  int rv = 0;
+
+  rv = cake_aggregate_detach (cm->vlib_main,
+			       ntohl (mp->child_sw_if_index));
+
+  REPLY_MACRO (VL_API_OSVBNG_CAKE_AGGREGATE_DETACH_REPLY);
+}
+
+static void
+send_cake_aggregate_details (cake_aggregate_t *agg,
+			      vl_api_registration_t *reg, u32 context)
+{
+  cake_main_t *cm = &cake_main;
+  vl_api_osvbng_cake_aggregate_details_t *rmp;
+
+  rmp = vl_msg_api_alloc (sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
+
+  rmp->_vl_msg_id =
+    ntohs (VL_API_OSVBNG_CAKE_AGGREGATE_DETAILS + cm->msg_id_base);
+  rmp->context = context;
+  rmp->sw_if_index = ntohl (agg->sw_if_index);
+  rmp->rate_bytes_per_sec = clib_host_to_net_u64 (agg->rate_bytes_per_sec);
+  rmp->owner_thread = ntohl (agg->owner_thread);
+  rmp->n_children = ntohl (agg->n_children);
+  rmp->n_active_children = ntohl (agg->n_active_children);
+  rmp->buffer_usage = ntohl (agg->buffer_usage);
+  rmp->buffer_limit = ntohl (agg->buffer_limit);
+  rmp->shaped_pkts = clib_host_to_net_u64 (agg->shaped_pkts);
+  rmp->shaped_bytes = clib_host_to_net_u64 (agg->shaped_bytes);
+  rmp->backpressure_events =
+    clib_host_to_net_u64 (agg->backpressure_events);
+
+  vl_api_send_msg (reg, (u8 *) rmp);
+}
+
+static void
+vl_api_osvbng_cake_aggregate_dump_t_handler (
+  vl_api_osvbng_cake_aggregate_dump_t *mp)
+{
+  cake_main_t *cm = &cake_main;
+  vl_api_registration_t *reg;
+
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
+
+  u32 filter_sw_if_index = ntohl (mp->sw_if_index);
+
+  cake_aggregate_t *agg;
+  pool_foreach (agg, cm->aggregates)
+    {
+      if (filter_sw_if_index != ~0 && agg->sw_if_index != filter_sw_if_index)
+	continue;
+      send_cake_aggregate_details (agg, reg, mp->context);
+    }
+}
+
 #include <osvbng_qos_sched/osvbng_qos_sched.api.c>
 
 static clib_error_t *

@@ -177,6 +177,17 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	    {
 	      vlib_node_set_state (vm, cm->dequeue_node_index,
 				   VLIB_NODE_STATE_POLLING);
+
+	      if (cs->aggregate_index != ~0)
+		{
+		  cake_aggregate_t *agg =
+		    pool_elt_at_index (cm->aggregates, cs->aggregate_index);
+		  u32 agg_expected = CAKE_AGG_OWNER_UNSET;
+		  __atomic_compare_exchange_n (
+		    &agg->owner_thread, &agg_expected, thread_index, 0,
+		    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+		}
+
 	      goto enqueue_local;
 	    }
 	}
@@ -240,6 +251,24 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	      t->handoff = 0;
 	    }
 	  continue;
+	}
+
+      if (cs->aggregate_index != ~0 && !cs->agg_draining)
+	{
+	  cake_aggregate_t *agg =
+	    pool_elt_at_index (cm->aggregates, cs->aggregate_index);
+	  if (PREDICT_FALSE (agg->buffer_usage + pkt_len >
+			     agg->buffer_limit))
+	    {
+	      cobalt_queue_full (flow, cs->target_us, cs->p_inc,
+				 (u32) (vlib_time_now (vm) * 1e6));
+	      vlib_buffer_free_one (vm, bi0);
+	      cs->dropped_pkts++;
+	      tin->drops++;
+	      n_dropped++;
+	      agg->backpressure_events++;
+	      continue;
+	    }
 	}
 
       if (PREDICT_FALSE (flow->flow_state == CAKE_FLOW_NONE))
@@ -306,6 +335,32 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  tin->bulk_flow_count++;
 	  if (flow->dst_host_idx < CAKE_HOSTS)
 	    tin->hosts[flow->dst_host_idx].bulk_flow_count++;
+	}
+
+      if (cs->aggregate_index != ~0 && !cs->agg_draining)
+	{
+	  cake_aggregate_t *agg =
+	    pool_elt_at_index (cm->aggregates, cs->aggregate_index);
+	  agg->buffer_usage += pkt_len;
+
+	  if (!cs->agg_active)
+	    {
+	      cake_agg_child_list_append (
+		agg, cm->schedulers, &agg->active_child_head,
+		&agg->active_child_tail, si);
+	      agg->n_active_children++;
+	      cs->agg_active = 1;
+	    }
+
+	  if (!clib_bitmap_get (
+		cm->per_thread[thread_index].active_agg_bitmap,
+		cs->aggregate_index))
+	    {
+	      cm->per_thread[thread_index].active_agg_bitmap =
+		clib_bitmap_set (
+		  cm->per_thread[thread_index].active_agg_bitmap,
+		  cs->aggregate_index, 1);
+	    }
 	}
 
       if (!clib_bitmap_get (cm->per_thread[thread_index].active_bitmap,
