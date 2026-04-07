@@ -6,7 +6,7 @@
  * CAKE-equivalent per-subscriber traffic scheduling.
  */
 
-option version = "1.0.0";
+option version = "2.0.0";
 import "vnet/interface_types.api";
 
 enum osvbng_cake_tin_mode : u8
@@ -24,7 +24,6 @@ enum osvbng_cake_atm_mode : u8
   OSVBNG_CAKE_ATM_PTM = 2,
 };
 
-/** Flags for scheduler behavior */
 enum osvbng_cake_flags : u32
 {
   OSVBNG_CAKE_FLAG_NONE = 0x0,
@@ -33,21 +32,6 @@ enum osvbng_cake_flags : u32
   OSVBNG_CAKE_FLAG_SPLIT_GSO = 0x4,
 };
 
-/** \brief Enable or disable per-subscriber CAKE scheduler
-    @param client_index - opaque cookie to identify the sender
-    @param context - sender context, to match reply w/ request
-    @param sw_if_index - subscriber interface
-    @param is_enable - enable if true, disable if false
-    @param rate_bytes_per_sec - shaping rate (bytes/sec). 0 on disable.
-    @param tin_mode - DiffServ tin mode (besteffort, diffserv3, diffserv4, diffserv8)
-    @param overhead_bytes - per-packet overhead adjustment (signed, for link-layer framing)
-    @param atm_mode - ATM cell rounding mode (none, ATM, PTM)
-    @param mpu - minimum packet unit (bytes, e.g. 64 for Ethernet)
-    @param buffer_limit - max queued bytes (0 = auto-calculate from rate * RTT)
-    @param target_us - CoDel AQM target (microseconds, 0 = 5000)
-    @param interval_us - CoDel AQM interval (microseconds, 0 = 100000)
-    @param flags - behavior flags (wash DSCP, ACK filter, split GSO)
-*/
 autoreply define osvbng_cake_sched_enable_disable
 {
   u32 client_index;
@@ -65,11 +49,6 @@ autoreply define osvbng_cake_sched_enable_disable
   vl_api_osvbng_cake_flags_t flags;
 };
 
-/** \brief Dump per-subscriber scheduler state
-    @param client_index - opaque cookie to identify the sender
-    @param context - sender context, to match reply w/ request
-    @param sw_if_index - subscriber interface (~0 for all)
-*/
 define osvbng_cake_sched_dump
 {
   u32 client_index;
@@ -77,23 +56,6 @@ define osvbng_cake_sched_dump
   vl_api_interface_index_t sw_if_index;
 };
 
-/** \brief Per-subscriber scheduler details (response to dump)
-    @param context - sender context
-    @param sw_if_index - subscriber interface
-    @param rate_bytes_per_sec - configured shaping rate
-    @param tin_mode - active tin mode
-    @param tin_cnt - number of active tins
-    @param buffer_usage - current bytes queued across all tins
-    @param buffer_limit - maximum buffer bytes
-    @param tin_packets - per-tin packet counters (up to 8)
-    @param tin_bytes - per-tin byte counters
-    @param tin_drops - per-tin AQM + overflow drop counters
-    @param tin_ecn_marks - per-tin ECN CE mark counters
-    @param tin_peak_delay_us - per-tin peak sojourn time (microseconds)
-    @param tin_avg_delay_us - per-tin average sojourn time (microseconds)
-    @param tin_sparse_flows - per-tin count of flows in sparse state
-    @param tin_bulk_flows - per-tin count of flows in bulk state
-*/
 define osvbng_cake_sched_details
 {
   u32 context;
@@ -113,11 +75,6 @@ define osvbng_cake_sched_details
   u32 tin_bulk_flows[8];
 };
 
-/** \brief Reset scheduler statistics for a subscriber
-    @param client_index - opaque cookie to identify the sender
-    @param context - sender context, to match reply w/ request
-    @param sw_if_index - subscriber interface
-*/
 autoreply define osvbng_cake_sched_reset_stats
 {
   u32 client_index;
@@ -125,14 +82,12 @@ autoreply define osvbng_cake_sched_reset_stats
   vl_api_interface_index_t sw_if_index;
 };
 
-/** \brief Create per-S-VLAN aggregate shaper
+/** \brief Create per-port aggregate shaper
     @param client_index - opaque cookie to identify the sender
     @param context - sender context, to match reply w/ request
-    @param sw_if_index - S-VLAN interface
+    @param sw_if_index - physical or bond interface
     @param rate_bytes_per_sec - aggregate shaping rate (bytes/sec)
     @param buffer_limit - max aggregate buffered bytes (0 = auto)
-    @param quantum - DRR quantum per child (0 = default 65535)
-    @param owner_thread - explicit thread placement (~0 = first-packet CAS)
 */
 autoreply define osvbng_cake_aggregate_create
 {
@@ -141,14 +96,12 @@ autoreply define osvbng_cake_aggregate_create
   vl_api_interface_index_t sw_if_index;
   u64 rate_bytes_per_sec;
   u32 buffer_limit;
-  u32 quantum;
-  u32 owner_thread;
 };
 
-/** \brief Delete per-S-VLAN aggregate shaper
+/** \brief Delete per-port aggregate shaper
     @param client_index - opaque cookie to identify the sender
     @param context - sender context, to match reply w/ request
-    @param sw_if_index - S-VLAN interface
+    @param sw_if_index - physical or bond interface
 */
 autoreply define osvbng_cake_aggregate_delete
 {
@@ -157,36 +110,10 @@ autoreply define osvbng_cake_aggregate_delete
   vl_api_interface_index_t sw_if_index;
 };
 
-/** \brief Attach child scheduler to aggregate
-    @param client_index - opaque cookie to identify the sender
-    @param context - sender context, to match reply w/ request
-    @param child_sw_if_index - subscriber (C-VLAN) interface
-    @param agg_sw_if_index - aggregate (S-VLAN) interface
-*/
-autoreply define osvbng_cake_aggregate_attach
-{
-  u32 client_index;
-  u32 context;
-  vl_api_interface_index_t child_sw_if_index;
-  vl_api_interface_index_t agg_sw_if_index;
-};
-
-/** \brief Detach child scheduler from aggregate
-    @param client_index - opaque cookie to identify the sender
-    @param context - sender context, to match reply w/ request
-    @param child_sw_if_index - subscriber (C-VLAN) interface
-*/
-autoreply define osvbng_cake_aggregate_detach
-{
-  u32 client_index;
-  u32 context;
-  vl_api_interface_index_t child_sw_if_index;
-};
-
 /** \brief Dump aggregate shaper state
     @param client_index - opaque cookie to identify the sender
     @param context - sender context, to match reply w/ request
-    @param sw_if_index - S-VLAN interface (~0 for all)
+    @param sw_if_index - physical or bond interface (~0 for all)
 */
 define osvbng_cake_aggregate_dump
 {
@@ -197,11 +124,8 @@ define osvbng_cake_aggregate_dump
 
 /** \brief Aggregate shaper details (response to dump)
     @param context - sender context
-    @param sw_if_index - S-VLAN interface
+    @param sw_if_index - physical or bond interface
     @param rate_bytes_per_sec - configured aggregate rate
-    @param owner_thread - owning worker thread
-    @param n_children - total attached children
-    @param n_active_children - children with queued packets
     @param buffer_usage - current aggregate bytes queued
     @param buffer_limit - maximum aggregate buffer bytes
     @param shaped_pkts - total packets shaped through aggregate
@@ -213,9 +137,6 @@ define osvbng_cake_aggregate_details
   u32 context;
   vl_api_interface_index_t sw_if_index;
   u64 rate_bytes_per_sec;
-  u32 owner_thread;
-  u32 n_children;
-  u32 n_active_children;
   u32 buffer_usage;
   u32 buffer_limit;
   u64 shaped_pkts;

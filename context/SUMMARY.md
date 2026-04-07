@@ -16,7 +16,7 @@ VPP plugin for per-subscriber QoS — covering the full pipeline from policing t
 |------|--------|---------|
 | [full-qos](specs/full-qos/) | Phase 4 complete (in osvbng-context) | Full QoS overhaul: configurable policer algorithms, dynamic ad-hoc rates, DSCP marking pipeline, live policy updates, show/oper commands, Prometheus metrics, and CAKE scheduling (Phase 5 of this spec) |
 | [cake-scheduler](specs/cake-scheduler/) | Phase 4 complete (spec finalized) | CAKE-equivalent per-subscriber scheduler: per-flow queuing, COBALT AQM, DRR, DiffServ tins, triple isolation, overhead compensation, token-bucket shaping. Codex (7 findings) + Gemini (11 findings) reviews — all accepted, 0 rejected. |
-| [hqos-qinq](specs/hqos-qinq/) | Phase 4 complete (spec finalized) | Two-level HQoS: per-S-VLAN aggregate shaper + DRR across child CAKE schedulers. Prevents QinQ subscribers from collectively exceeding S-VLAN capacity. Codex (4 findings) + Gemini (7 findings) reviews -- 7 accepted, 4 rejected. Issue [#1](https://github.com/veesix-networks/osvbng-vpp-plugin-qos/issues/1). |
+| [hqos-qinq](specs/hqos-qinq/) | Phase 5 complete (implemented) | Two-level HQoS: per-port lockless aggregate shaper + per-subscriber CAKE. Auto-attach via interface hierarchy walk, atomic token bucket shared across all workers. Issue [#1](https://github.com/veesix-networks/osvbng-vpp-plugin-qos/issues/1). |
 
 ## Spec Dependencies
 

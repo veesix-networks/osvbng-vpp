@@ -1,65 +1,64 @@
 # Decisions: hqos-qinq
 
-## Accepted
+## Design Revision (Post Phase 5 v1)
 
-### Lifecycle mutations must run under worker barrier to protect DRR list integrity
+After implementation review, the original thread-pinned DRR model was replaced with a lockless per-port aggregate model. The original design pinned all children of an aggregate to one worker thread, which defeats VPP's RSS distribution and creates a single-worker bottleneck for multi-gigabit aggregates.
+
+### Key design changes:
+1. **Aggregate scope: per physical/bond port** (was per S-VLAN). All S-VLANs on the port share one aggregate at the port rate.
+2. **Lockless atomic token bucket** (was single-owner thread). All workers check and advance the aggregate atomically via CAS. No thread pinning, no handoff overhead for the aggregate.
+3. **Auto-attach via interface hierarchy walk** (was explicit attach/detach API). `cake_sched_enable_disable` walks `sup_sw_if_index` up to the physical parent. No attach/detach API needed.
+4. **No DRR child list** (was doubly-linked list with draining state). The aggregate has no knowledge of individual children. Fairness comes from per-subscriber rate limits + natural RSS distribution.
+5. **No per-thread aggregate bitmaps** (was `active_agg_bitmap`). Workers check the aggregate inline during dequeue, gated by the atomic token bucket.
+6. **osvbng config: interface-level** (was subscriber-group or child policy reference). `interfaces.X.qos-policy: aggregate-name` applied once per port.
+
+## Accepted (from Codex Phase 3)
+
+### Lifecycle mutations must run under worker barrier
 - **Source:** CODEX
 - **Severity:** CRITICAL
-- **Resolution:** All aggregate lifecycle operations (create, attach, detach, delete) now run under `vlib_worker_thread_barrier_sync()` / `vlib_worker_thread_barrier_release()`. This pauses all worker threads during the mutation, preventing the dequeue loop from walking the DRR list concurrently. Acceptable cost since these are infrequent control-plane operations.
-
-### Replace two-phase dequeue with unified interleaved loop and persistent cursors
-- **Source:** CODEX
-- **Severity:** HIGH
-- **Resolution:** Removed the two-phase (standalone then aggregate) dequeue structure. Replaced with a single interleaved loop that alternates between standalone and aggregate processing using persistent per-thread cursors (`standalone_cursor`, `agg_cursor`). Each aggregate also maintains a persistent `drr_cursor` so DRR across children does not restart from `child_head` on every node invocation. This prevents standalone schedulers from starving aggregates (or vice versa) and ensures head-of-line fairness within aggregates.
-
-### Detach must use draining state to prevent packets escaping aggregate shaping
-- **Source:** CODEX
-- **Severity:** HIGH
-- **Resolution:** Detach no longer immediately unlinks the child and clears `aggregate_index`. Instead, the child enters a draining state (`agg_draining = 1`): it remains in the aggregate's DRR list, stops accepting new enqueues via the aggregate path, and continues to drain through aggregate shaping. When backlog reaches zero, the dequeue loop completes the detach (removes from DRR list, clears `aggregate_index`, discharges `buffer_usage`). This ensures buffer accounting stays correct and no packets escape aggregate rate control.
-
-### Explicit thread placement API for aggregate load balancing
-- **Source:** CODEX
-- **Severity:** HIGH
-- **Resolution:** `osvbng_cake_aggregate_create` now accepts an optional `owner_thread` parameter. When set, the aggregate is pinned to that worker from creation (no first-packet CAS race). When `~0` (default), falls back to first-packet CAS. The Go control plane can implement least-loaded placement by tracking per-thread aggregate counts. The spec explicitly documents that one aggregate maps to one worker's capacity as a design constraint, and that operators should distribute aggregates across workers.
-
-### Worker barrier for attach/detach thread safety (duplicate of Codex CRITICAL)
-- **Source:** GEMINI
-- **Severity:** CRITICAL
-- **Resolution:** Already addressed by Codex finding above. Gemini independently identified the same cross-thread migration hazard. Both agree: worker barrier on all lifecycle mutations.
+- **Resolution:** Still applies. `aggregate_create` and `aggregate_delete` run under worker barrier. The barrier scope is smaller now (no DRR list to protect), but still needed for pool allocation and `agg_index_by_sw_if_index` updates.
 
 ### Unified drop helper for aggregate buffer accounting
 - **Source:** GEMINI
 - **Severity:** CRITICAL
-- **Resolution:** Added `cake_agg_discharge()` helper that all buffer-free paths must call. All five existing CAKE buffer-free paths (dequeue transmit, AQM drop, overflow drop, teardown drain, handoff congestion) must be audited during implementation to ensure they call this helper. Prevents accounting drift where `agg->buffer_usage` permanently overestimates, causing permanent backpressure.
-
-### Active children list to avoid iterating idle subscribers
-- **Source:** GEMINI
-- **Severity:** HIGH
-- **Resolution:** Added `active_child_head`/`active_child_tail`/`n_active_children` to `cake_aggregate_t`. The DRR round iterates the active list only. Children move to the active list on first enqueue and are removed when backlog reaches zero. An aggregate with 1000 attached children but 2 active only visits 2 per dequeue invocation. Satisfies the "CPU cycles matter" first-class requirement.
+- **Resolution:** Still applies. `cake_agg_discharge()` now uses `__atomic_fetch_sub` instead of plain subtraction. Called on all buffer-free paths.
 
 ### Aggregate token bucket burst cap
 - **Source:** GEMINI
 - **Severity:** HIGH
-- **Resolution:** Added burst cap: `if (now_ns > agg->global_shaper_time_ns) agg->global_shaper_time_ns = now_ns;` Prevents unbounded credit accumulation during idle periods that would cause a line-rate burst when traffic resumes. Same pattern as the existing per-subscriber CAKE shaper.
+- **Resolution:** Still applies. Burst cap in the CAS loop: `if (old_time < now_ns) old_time = now_ns;`
+
+## No Longer Applicable
+
+### Replace two-phase dequeue with unified interleaved loop (CODEX)
+- **Rationale:** No separate aggregate dequeue phase exists. The aggregate check is inline within the existing per-subscriber dequeue path. No new loop, no cursors, no starvation possible.
+
+### Detach must use draining state (CODEX)
+- **Rationale:** No detach API exists. Children auto-clear `aggregate_index` on scheduler disable. No draining state needed.
+
+### Explicit thread placement API (CODEX)
+- **Rationale:** No thread pinning. All workers participate via lockless atomics. No placement needed.
+
+### Active children list to skip idle subscribers (GEMINI)
+- **Rationale:** No child list exists. The aggregate has no knowledge of children. Workers check the aggregate inline during their existing per-subscriber dequeue loop.
+
+### Worker barrier for attach/detach thread safety (CODEX + GEMINI)
+- **Rationale:** No attach/detach API exists. Auto-attach during `cake_sched_enable_disable` (already under barrier for pool allocation). Auto-clear on disable (same).
 
 ## Rejected
 
 ### Weighted DRR in Phase 1
 - **Source:** GEMINI
 - **Severity:** MEDIUM
-- **Rationale:** Equal-quantum DRR is sufficient for Phase 1. The data structures already support per-child quantum, and the spec documents weighted DRR as a future extension (section 4.10). Adding rate-proportional quantum during attach is low-effort but adds a behavioral dimension that needs its own testing. Kept as Phase 2 enhancement.
+- **Rationale:** No DRR at the aggregate level. Fairness is approximate via per-subscriber rate limits + RSS distribution.
 
 ### IPv6 metric consistency
 - **Source:** GEMINI
 - **Severity:** MEDIUM
-- **Rationale:** All aggregate counters are already `u64` in the spec. Counters are protocol-agnostic (they count all packets regardless of IP version). No separate IPv6 counters needed; the dual-stack requirement is satisfied by the per-subscriber CAKE scheduler which already handles IPv4 and IPv6 identically.
+- **Rationale:** All counters are u64 and protocol-agnostic. No change needed.
 
 ### Aggregate lookup optimization
 - **Source:** GEMINI
 - **Severity:** LOW
-- **Rationale:** Already addressed. The child's `aggregate_index` field caches the aggregate pool index, so the `agg_index_by_sw_if_index` lookup only happens during attach (control plane), not on the per-packet hot path.
-
-### Unsafe cross-thread migration
-- **Source:** GEMINI
-- **Severity:** CRITICAL
-- **Rationale:** Duplicate of Codex CRITICAL finding. Already resolved via worker barrier. Listed under Accepted as a merged finding.
+- **Rationale:** `aggregate_index` cached in `cake_sched_t`. No per-packet lookup.

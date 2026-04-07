@@ -60,12 +60,11 @@ send_cake_sched_details (cake_sched_t *cs, vl_api_registration_t *reg,
   rmp->context = context;
   rmp->sw_if_index = ntohl (cs->sw_if_index);
   rmp->rate_bytes_per_sec = clib_host_to_net_u64 (cs->rate_bytes_per_sec);
-  rmp->tin_mode = 0; /* besteffort in Phase 1 */
+  rmp->tin_mode = 0;
   rmp->tin_cnt = 1;
   rmp->buffer_usage = ntohl (cs->buffer_usage);
   rmp->buffer_limit = ntohl (cs->buffer_limit);
 
-  /* Phase 1: single tin, report aggregate stats */
   rmp->tin_packets[0] = clib_host_to_net_u64 (cs->dequeued_pkts);
   rmp->tin_bytes[0] = clib_host_to_net_u64 (cs->dequeued_bytes);
   rmp->tin_drops[0] = clib_host_to_net_u64 (cs->dropped_pkts);
@@ -117,10 +116,9 @@ vl_api_osvbng_cake_aggregate_create_t_handler (
   vl_api_osvbng_cake_aggregate_create_reply_t *rmp;
   int rv = 0;
 
-  rv = cake_aggregate_create (
-    cm->vlib_main, ntohl (mp->sw_if_index),
-    clib_net_to_host_u64 (mp->rate_bytes_per_sec), ntohl (mp->buffer_limit),
-    ntohl (mp->quantum), ntohl (mp->owner_thread));
+  rv = cake_aggregate_create (cm->vlib_main, ntohl (mp->sw_if_index),
+			       clib_net_to_host_u64 (mp->rate_bytes_per_sec),
+			       ntohl (mp->buffer_limit));
 
   REPLY_MACRO (VL_API_OSVBNG_CAKE_AGGREGATE_CREATE_REPLY);
 }
@@ -139,35 +137,6 @@ vl_api_osvbng_cake_aggregate_delete_t_handler (
 }
 
 static void
-vl_api_osvbng_cake_aggregate_attach_t_handler (
-  vl_api_osvbng_cake_aggregate_attach_t *mp)
-{
-  cake_main_t *cm = &cake_main;
-  vl_api_osvbng_cake_aggregate_attach_reply_t *rmp;
-  int rv = 0;
-
-  rv = cake_aggregate_attach (cm->vlib_main,
-			       ntohl (mp->child_sw_if_index),
-			       ntohl (mp->agg_sw_if_index));
-
-  REPLY_MACRO (VL_API_OSVBNG_CAKE_AGGREGATE_ATTACH_REPLY);
-}
-
-static void
-vl_api_osvbng_cake_aggregate_detach_t_handler (
-  vl_api_osvbng_cake_aggregate_detach_t *mp)
-{
-  cake_main_t *cm = &cake_main;
-  vl_api_osvbng_cake_aggregate_detach_reply_t *rmp;
-  int rv = 0;
-
-  rv = cake_aggregate_detach (cm->vlib_main,
-			       ntohl (mp->child_sw_if_index));
-
-  REPLY_MACRO (VL_API_OSVBNG_CAKE_AGGREGATE_DETACH_REPLY);
-}
-
-static void
 send_cake_aggregate_details (cake_aggregate_t *agg,
 			      vl_api_registration_t *reg, u32 context)
 {
@@ -182,9 +151,6 @@ send_cake_aggregate_details (cake_aggregate_t *agg,
   rmp->context = context;
   rmp->sw_if_index = ntohl (agg->sw_if_index);
   rmp->rate_bytes_per_sec = clib_host_to_net_u64 (agg->rate_bytes_per_sec);
-  rmp->owner_thread = ntohl (agg->owner_thread);
-  rmp->n_children = ntohl (agg->n_children);
-  rmp->n_active_children = ntohl (agg->n_active_children);
   rmp->buffer_usage = ntohl (agg->buffer_usage);
   rmp->buffer_limit = ntohl (agg->buffer_limit);
   rmp->shaped_pkts = clib_host_to_net_u64 (agg->shaped_pkts);
