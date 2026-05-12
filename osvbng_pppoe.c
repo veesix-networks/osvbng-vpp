@@ -743,6 +743,7 @@ osvbng_pppoe_init (vlib_main_t * vm)
 
   pem->vnet_main = vnet_get_main ();
   pem->vlib_main = vm;
+  pem->lac_session_count = 0;
 
   /* Create the session hash table */
   BV (clib_bihash_init) (&pem->session_table, "osvbng pppoe session table",

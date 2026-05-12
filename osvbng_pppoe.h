@@ -63,6 +63,16 @@ typedef struct
   u32 sw_if_index;
   u32 hw_if_index;
 
+  /* LAC bridge state. When set, this PPPoE session is bridged to an
+   * L2TPv2 session (no local PPP termination). The punt and decap
+   * paths forward full PPP frames to `l2tpv2-output` with
+   * `vnet_buffer_l2tpv2_opaque(b)` set to `lac_l2tp_session_index`.
+   * Set by the Go control plane via the new
+   * `osvbng_pppoe_set_lac_tunnel()` helper when the LAC session
+   * reaches `PhaseLACTunneled`; cleared on session teardown. */
+  u8 is_lac_tunneled;
+  u32 lac_l2tp_session_index;
+
 } osvbng_pppoe_session_t;
 
 #define foreach_pppoe_input_next        \
@@ -155,6 +165,12 @@ typedef struct
   /* convenience */
   vlib_main_t *vlib_main;
   vnet_main_t *vnet_main;
+
+  /* Number of PPPoE sessions currently in LAC-tunneled mode. Bumped
+   * by `osvbng_pppoe_set_lac_tunnel()` on set, decremented on clear.
+   * Read by other plugins (e.g. osvbng_punt) to gate LAC dispatch
+   * fast-paths on whether any LAC sessions exist at all. */
+  u32 lac_session_count;
 
 } osvbng_pppoe_main_t;
 
