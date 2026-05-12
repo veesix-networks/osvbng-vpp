@@ -105,6 +105,14 @@ typedef struct
   u32 original_pppoe_disc_node;
   u32 original_pppoe_sess_node;
 
+  /* Next-arc indices resolved lazily once the L2TPv2 plugin's graph
+   * nodes are visible. ~0 means the L2TPv2 plugin is not loaded or has
+   * not been probed yet; T=0 data packets and LAC-tunneled PPPoE
+   * sessions fall back to drop (T=0) or normal IP/punt paths (PPPoE)
+   * in that case. */
+  u32 l2tpv2_input_next_arc;	/* from osvbng-punt-l2tp -> l2tpv2-input */
+  u32 l2tpv2_output_next_arc;	/* from osvbng-punt-pppoe-sess -> l2tpv2-output */
+
   u64 packets_punted[OSVBNG_PUNT_N_PROTO];
   u64 packets_dropped[OSVBNG_PUNT_N_PROTO];
 
@@ -135,6 +143,7 @@ int osvbng_punt_enable_dhcpv6 (u32 sw_if_index);
 int osvbng_punt_disable_dhcpv6 (u32 sw_if_index);
 int osvbng_punt_enable_l2tp (u32 sw_if_index);
 int osvbng_punt_disable_l2tp (u32 sw_if_index);
+void osvbng_punt_pppoe_sess_resolve_l2tpv2_arc (vlib_main_t *vm);
 int osvbng_punt_enable_ipv6_nd (u32 sw_if_index);
 int osvbng_punt_disable_ipv6_nd (u32 sw_if_index);
 

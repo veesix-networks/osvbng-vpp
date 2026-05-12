@@ -27,4 +27,10 @@ add_vpp_plugin(osvbng_punt
 
   API_FILES
   osvbng_punt.api
+
+  # PPPoE session table is consulted by `osvbng_punt_pppoe_sess.c`
+  # to detect LAC-tunneled sessions and bypass the IP-only filter,
+  # forwarding full PPP frames to `l2tpv2-output`.
+  LINK_LIBRARIES
+  osvbng_pppoe_plugin
 )

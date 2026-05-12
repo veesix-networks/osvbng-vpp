@@ -20,11 +20,17 @@
 #include <vnet/ip/ip4_packet.h>
 #include <osvbng_punt/osvbng_punt.h>
 
+/* T-bit (Message type) in the first byte of the L2TPv2 header.
+ * RFC 2661 §3.1: T=1 control message, T=0 data message. */
+#define L2TPV2_FLAG_T_MASK 0x80
+
 typedef struct
 {
   u32 sw_if_index;
   u16 src_port;
   u16 dst_port;
+  u8 is_control;
+  u8 dispatched_to_l2tpv2;
 } osvbng_punt_l2tp_trace_t;
 
 static u8 *
@@ -34,13 +40,18 @@ format_osvbng_punt_l2tp_trace (u8 *s, va_list *args)
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
   osvbng_punt_l2tp_trace_t *t = va_arg (*args, osvbng_punt_l2tp_trace_t *);
 
-  s = format (s, "L2TP punt: sw_if_index %d, %d -> %d",
-	      t->sw_if_index, t->src_port, t->dst_port);
+  s = format (s, "L2TP punt: sw_if_index %d, %d -> %d, %s%s",
+	      t->sw_if_index, t->src_port, t->dst_port,
+	      t->is_control ? "control" : "data",
+	      t->is_control
+		? " (punted to userspace)"
+		: (t->dispatched_to_l2tpv2 ? " (to l2tpv2-input)"
+					  : " (l2tpv2 plugin absent, drop)"));
   return s;
 }
 
-#define foreach_osvbng_punt_l2tp_next \
-  _(DROP, "error-drop")
+#define foreach_osvbng_punt_l2tp_next                                          \
+  _ (DROP, "error-drop")
 
 typedef enum
 {
@@ -55,8 +66,9 @@ osvbng_punt_l2tp_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 			 vlib_frame_t *frame)
 {
   u32 n_left_from, *from, *to_next;
-  osvbng_punt_l2tp_next_t next_index;
+  u32 next_index;
   osvbng_punt_main_t *pm = &osvbng_punt_main;
+  const u32 l2tpv2_next = pm->l2tpv2_input_next_arc;
 
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
@@ -74,6 +86,9 @@ osvbng_punt_l2tp_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  vlib_buffer_t *b0;
 	  u32 next0 = OSVBNG_PUNT_L2TP_NEXT_DROP;
 	  u32 sw_if_index0;
+	  u8 *l2tp_hdr;
+	  u8 is_control;
+	  u8 dispatched = 0;
 
 	  bi0 = from[0];
 	  to_next[0] = bi0;
@@ -85,31 +100,73 @@ osvbng_punt_l2tp_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  b0 = vlib_get_buffer (vm, bi0);
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
-	  /* Rewind buffer to include UDP + IP + Ethernet headers */
-	  i16 rewind = sizeof (udp_header_t) + sizeof (ip4_header_t) + sizeof (ethernet_header_t);
+	  /* Buffer is positioned at L2TP header (UDP has been processed by
+	   * udp-local-port-1701 demux). Inspect the T-bit before deciding
+	   * the path. */
+	  l2tp_hdr = vlib_buffer_get_current (b0);
+	  is_control = (l2tp_hdr[0] & L2TPV2_FLAG_T_MASK) != 0;
 
-	  if (b0->flags & VNET_BUFFER_F_VLAN_2_DEEP)
-	    rewind += 2 * sizeof (ethernet_vlan_header_t);
-	  else if (b0->flags & VNET_BUFFER_F_VLAN_1_DEEP)
-	    rewind += sizeof (ethernet_vlan_header_t);
+	  if (is_control)
+	    {
+	      /* Control message: rewind to full L2 frame and hand off to
+	       * userspace via the existing SHM channel. Behaviour
+	       * unchanged from the pre-T-bit-dispatch code path. */
+	      i16 rewind = sizeof (udp_header_t) + sizeof (ip4_header_t)
+			   + sizeof (ethernet_header_t);
 
-	  vlib_buffer_advance (b0, -rewind);
+	      if (b0->flags & VNET_BUFFER_F_VLAN_2_DEEP)
+		rewind += 2 * sizeof (ethernet_vlan_header_t);
+	      else if (b0->flags & VNET_BUFFER_F_VLAN_1_DEEP)
+		rewind += sizeof (ethernet_vlan_header_t);
 
-	  /* Send packet to userspace */
-	  osvbng_punt_send_packet (vm, b0, sw_if_index0,
-				   OSVBNG_PUNT_PROTO_L2TP);
-	  pm->packets_punted[OSVBNG_PUNT_PROTO_L2TP]++;
+	      vlib_buffer_advance (b0, -rewind);
+
+	      osvbng_punt_send_packet (vm, b0, sw_if_index0,
+				       OSVBNG_PUNT_PROTO_L2TP);
+	      pm->packets_punted[OSVBNG_PUNT_PROTO_L2TP]++;
+	      next0 = OSVBNG_PUNT_L2TP_NEXT_DROP;
+	    }
+	  else if (l2tpv2_next != ~0u)
+	    {
+	      /* Data message and the L2TPv2 plugin is loaded: forward to
+	       * its input node with the buffer still positioned at the
+	       * L2TP header (l2tpv2-input expects that). */
+	      next0 = l2tpv2_next;
+	      dispatched = 1;
+	    }
+	  else
+	    {
+	      /* Data message but no L2TPv2 plugin loaded: drop. */
+	      pm->packets_dropped[OSVBNG_PUNT_PROTO_L2TP]++;
+	      next0 = OSVBNG_PUNT_L2TP_NEXT_DROP;
+	    }
 
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
 			     (b0->flags & VLIB_BUFFER_IS_TRACED)))
 	    {
 	      osvbng_punt_l2tp_trace_t *t =
 		vlib_add_trace (vm, node, b0, sizeof (*t));
-	      ip4_header_t *ip0 = vlib_buffer_get_current (b0);
-	      udp_header_t *udp0 = ip4_next_header (ip0);
 	      t->sw_if_index = sw_if_index0;
-	      t->src_port = clib_net_to_host_u16 (udp0->src_port);
-	      t->dst_port = clib_net_to_host_u16 (udp0->dst_port);
+	      t->is_control = is_control;
+	      t->dispatched_to_l2tpv2 = dispatched;
+	      if (is_control)
+		{
+		  ip4_header_t *ip0 = (ip4_header_t *) (vlib_buffer_get_current (b0)
+						       + sizeof (ethernet_header_t)
+						       + ((b0->flags & VNET_BUFFER_F_VLAN_2_DEEP)
+							    ? 2 * sizeof (ethernet_vlan_header_t)
+							    : (b0->flags & VNET_BUFFER_F_VLAN_1_DEEP)
+								? sizeof (ethernet_vlan_header_t)
+								: 0));
+		  udp_header_t *udp0 = ip4_next_header (ip0);
+		  t->src_port = clib_net_to_host_u16 (udp0->src_port);
+		  t->dst_port = clib_net_to_host_u16 (udp0->dst_port);
+		}
+	      else
+		{
+		  t->src_port = 0;
+		  t->dst_port = 1701;
+		}
 	    }
 
 	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
@@ -141,6 +198,23 @@ VLIB_REGISTER_NODE (osvbng_punt_l2tp_node) = {
   },
 };
 
+/* Resolve the dynamic next-arc from this node to l2tpv2-input. Called
+ * from `osvbng_punt_enable_l2tp` so the resolution happens after all
+ * plugins have finished init. Idempotent. */
+static void
+osvbng_punt_l2tp_resolve_next_arc (vlib_main_t *vm)
+{
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
+
+  if (pm->l2tpv2_input_next_arc != ~0u)
+    return;
+
+  vlib_node_t *n = vlib_get_node_by_name (vm, (u8 *) "l2tpv2-input");
+  if (n)
+    pm->l2tpv2_input_next_arc =
+      vlib_node_add_next (vm, osvbng_punt_l2tp_node.index, n->index);
+}
+
 int
 osvbng_punt_enable_l2tp (u32 sw_if_index)
 {
@@ -152,6 +226,14 @@ osvbng_punt_enable_l2tp (u32 sw_if_index)
 
   /* Register L2TP control port (1701) */
   udp_register_dst_port (vm, 1701, node_index, 1);
+
+  /* Resolve the next-arcs into the L2TPv2 plugin's graph nodes now
+   * that all plugins have finished init. Both arcs are resolved
+   * together: the L2TPv2-input arc from this node (T=0 data path) and
+   * the L2TPv2-output arc from osvbng-punt-pppoe-sess (LAC bridge).
+   * Idempotent. */
+  osvbng_punt_l2tp_resolve_next_arc (vm);
+  osvbng_punt_pppoe_sess_resolve_l2tpv2_arc (vm);
 
   hash_set (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_L2TP], sw_if_index, 1);
 

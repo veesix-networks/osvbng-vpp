@@ -190,6 +190,9 @@ osvbng_punt_init (vlib_main_t *vm)
       pm->packets_dropped[i] = 0;
     }
 
+  pm->l2tpv2_input_next_arc = ~0;
+  pm->l2tpv2_output_next_arc = ~0;
+
   osvbng_punt_policer_init ();
 
   osvbng_punt_register_ethertypes (vm);
