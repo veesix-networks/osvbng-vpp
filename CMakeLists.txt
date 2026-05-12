@@ -10,6 +10,7 @@ add_vpp_plugin(osvbng_pppoe
   osvbng_pppoe.c
   osvbng_pppoe_api.c
   osvbng_pppoe_decap.c
+  osvbng_pppoe_lac_tx.c
 
   API_FILES
   osvbng_pppoe.api
