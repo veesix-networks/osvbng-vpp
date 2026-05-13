@@ -195,6 +195,13 @@ typedef struct
 int vnet_osvbng_pppoe_add_del_session
   (vnet_osvbng_pppoe_add_del_session_args_t * a, u32 * sw_if_indexp);
 
+/* Set or clear the LAC-tunneled flag on a PPPoE session identified by
+ * sw_if_index. On set, stores lac_l2tp_session_index for the punt-path
+ * LAC bridge. Maintains osvbng_pppoe_main.lac_session_count. Returns 0
+ * on success or -1 if the sw_if_index does not resolve to a session. */
+int osvbng_pppoe_set_lac_tunnel
+  (u32 sw_if_index, u8 is_lac_tunneled, u32 lac_l2tp_session_index);
+
 always_inline u64
 pppoe_make_key (u8 * mac_address, u16 session_id)
 {

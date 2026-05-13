@@ -62,6 +62,22 @@ out:
   }));
 }
 
+static void vl_api_osvbng_pppoe_set_lac_tunnel_t_handler
+  (vl_api_osvbng_pppoe_set_lac_tunnel_t * mp)
+{
+  vl_api_osvbng_pppoe_set_lac_tunnel_reply_t *rmp;
+  osvbng_pppoe_main_t *pem = &osvbng_pppoe_main;
+  int rv;
+
+  rv = osvbng_pppoe_set_lac_tunnel (ntohl (mp->sw_if_index),
+                                    mp->is_lac_tunneled ? 1 : 0,
+                                    ntohl (mp->lac_l2tp_session_index));
+  if (rv != 0)
+    rv = VNET_API_ERROR_NO_SUCH_ENTRY;
+
+  REPLY_MACRO (VL_API_OSVBNG_PPPOE_SET_LAC_TUNNEL_REPLY);
+}
+
 static void send_osvbng_pppoe_session_details
   (osvbng_pppoe_session_t * t, vl_api_registration_t * reg, u32 context)
 {

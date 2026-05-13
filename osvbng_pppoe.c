@@ -440,6 +440,9 @@ int vnet_osvbng_pppoe_add_del_session
       t = pool_elt_at_index (pem->sessions, result.fields.session_index);
       sw_if_index = t->sw_if_index;
 
+      if (t->is_lac_tunneled && pem->lac_session_count > 0)
+        pem->lac_session_count--;
+
       vnet_reset_interface_l3_output_node (vnm->vlib_main, sw_if_index);
       vnet_sw_interface_set_flags (vnm, t->sw_if_index, 0 /* down */ );
       vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, t->sw_if_index);
@@ -731,6 +734,36 @@ VLIB_CLI_COMMAND (show_osvbng_pppoe_fib_command, static) = {
     .short_help = "show osvbng pppoe fib",
     .function = show_osvbng_pppoe_fib_command_fn,
 };
+
+int
+osvbng_pppoe_set_lac_tunnel (u32 sw_if_index, u8 is_lac_tunneled,
+                             u32 lac_l2tp_session_index)
+{
+  osvbng_pppoe_main_t *pem = &osvbng_pppoe_main;
+  osvbng_pppoe_session_t *t;
+
+  if (sw_if_index >= vec_len (pem->session_index_by_sw_if_index))
+    return -1;
+  u32 idx = pem->session_index_by_sw_if_index[sw_if_index];
+  if (idx == ~0)
+    return -1;
+
+  t = pool_elt_at_index (pem->sessions, idx);
+
+  if (t->is_lac_tunneled && !is_lac_tunneled)
+    {
+      if (pem->lac_session_count > 0)
+        pem->lac_session_count--;
+    }
+  else if (!t->is_lac_tunneled && is_lac_tunneled)
+    {
+      pem->lac_session_count++;
+    }
+
+  t->is_lac_tunneled = is_lac_tunneled ? 1 : 0;
+  t->lac_l2tp_session_index = is_lac_tunneled ? lac_l2tp_session_index : 0;
+  return 0;
+}
 
 clib_error_t *
 osvbng_pppoe_init (vlib_main_t * vm)

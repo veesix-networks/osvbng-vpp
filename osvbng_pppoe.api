@@ -51,6 +51,34 @@ define osvbng_pppoe_add_del_session_reply
   vl_api_interface_index_t sw_if_index;
 };
 
+/** \brief Set or clear the LAC-tunneled flag on a PPPoE session
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - software index of the PPPoE session interface
+    @param is_lac_tunneled - 1 to bridge subscriber↔LNS via L2TPv2, 0 to clear
+    @param lac_l2tp_session_index - L2TPv2 session sw_if_index stashed in
+           vnet_buffer for the subscriber→LNS direction; ignored when
+           is_lac_tunneled=0
+*/
+define osvbng_pppoe_set_lac_tunnel
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  bool is_lac_tunneled;
+  u32 lac_l2tp_session_index;
+};
+
+/** \brief reply for osvbng_pppoe_set_lac_tunnel
+    @param context - sender context, to match reply w/ request
+    @param retval - return code
+*/
+define osvbng_pppoe_set_lac_tunnel_reply
+{
+  u32 context;
+  i32 retval;
+};
+
 /** \brief Dump PPPoE session
     @param client_index - opaque cookie to identify the sender
     @param context - sender context, to match reply w/ request
