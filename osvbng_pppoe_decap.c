@@ -198,12 +198,17 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
                       next0 = PPPOE_INPUT_NEXT_DROP;
                       goto trace00;
                     }
-                  /* Strip Ethernet + VLAN(s) + PPPoE header so the
-                   * buffer is positioned at the PPP frame (starting
-                   * with the ppp_proto field). l2tpv2-encap-raw then
-                   * prepends IP+UDP+L2TPv2-data on top. Mirrors the
-                   * advance done in the IP-decap branch below. */
-                  u32 advance = sizeof (*h0) + sizeof (*pppoe0);
+                  /* Strip Ethernet + VLAN(s) + PPPoE-only header so
+                   * the buffer is positioned at the PPP frame's
+                   * ppp_proto field. L2TP carries the full PPP frame
+                   * (ppp_proto + payload) per RFC 2661 §3.3, so we
+                   * intentionally do NOT advance past ppp_proto —
+                   * unlike the IP-decap branch below which advances
+                   * past it to land on the IP header.
+                   *
+                   * pppoe_header_t includes ppp_proto (8 bytes total),
+                   * so subtract sizeof(u16) to keep it. */
+                  u32 advance = sizeof (*h0) + sizeof (*pppoe0) - sizeof (u16);
                   if (t0->outer_vlan != 0 && t0->inner_vlan != 0)
                     advance += 2 * sizeof (ethernet_vlan_header_t);
                   else if (t0->outer_vlan != 0)
