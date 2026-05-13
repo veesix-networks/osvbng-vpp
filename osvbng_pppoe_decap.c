@@ -12,6 +12,33 @@
 #include <vlib/vlib.h>
 #include <ppp/packet.h>
 #include <osvbng_pppoe/osvbng_pppoe.h>
+#include <osvbng_punt/osvbng_punt.h>
+
+/* Lazily resolve the dynamic next-arcs into sibling plugins. Called on
+ * first need; idempotent. Lookups happen by graph-node name, so no
+ * cross-plugin symbol reference is required at link time. */
+static_always_inline void
+pppoe_input_resolve_arcs (vlib_main_t *vm, u32 this_node_index,
+			  osvbng_pppoe_main_t *pem)
+{
+  if (PREDICT_TRUE (pem->l2tpv2_output_next_arc != ~0u
+		    && pem->punt_shm_tx_next_arc != ~0u))
+    return;
+  if (pem->l2tpv2_output_next_arc == ~0u)
+    {
+      vlib_node_t *n = vlib_get_node_by_name (vm, (u8 *) "l2tpv2-output");
+      if (n)
+	pem->l2tpv2_output_next_arc =
+	  vlib_node_add_next (vm, this_node_index, n->index);
+    }
+  if (pem->punt_shm_tx_next_arc == ~0u)
+    {
+      vlib_node_t *n = vlib_get_node_by_name (vm, (u8 *) "osvbng-punt-shm-tx");
+      if (n)
+	pem->punt_shm_tx_next_arc =
+	  vlib_node_add_next (vm, this_node_index, n->index);
+    }
+}
 
 typedef struct {
   u32 next_index;
@@ -52,6 +79,12 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
   u32 stats_sw_if_index, stats_n_packets, stats_n_bytes;
   pppoe_entry_key_t cached_key;
   pppoe_entry_result_t cached_result;
+
+  /* Resolve dynamic next-arcs (l2tpv2-output, osvbng-punt-shm-tx) at
+   * first frame so sibling plugin nodes are guaranteed to be
+   * registered. Cheap to call repeatedly — early-out once both are
+   * resolved. */
+  pppoe_input_resolve_arcs (vm, osvbng_pppoe_input_node.index, pem);
 
   from = vlib_frame_vector_args (from_frame);
   n_left_from = from_frame->n_vectors;
@@ -162,15 +195,11 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
 
           ppp_proto0 = clib_net_to_host_u16 (pppoe0->ppp_proto);
 
-          /* Only handle IP traffic - control plane should have been punted already */
-          if ((ppp_proto0 != PPP_PROTOCOL_ip4) && (ppp_proto0 != PPP_PROTOCOL_ip6))
-            {
-              error0 = PPPOE_ERROR_BAD_VER_TYPE;
-              result0.fields.session_index = ~0;
-              next0 = PPPOE_INPUT_NEXT_DROP;
-              goto trace00;
-            }
-
+          /* Look up the session first. Both IP traffic and non-IP control
+           * traffic (LCP/NCP/Echo) are dispatched per-session: IP frames
+           * decap to ip4/ip6-input, LAC-tunneled frames go to
+           * l2tpv2-output, the rest punt to userspace via the shared
+           * osvbng-punt-shm-tx graph node. */
           pppoe_lookup_1 (&pem->session_table, &cached_key, &cached_result,
                           h0->src_address, pppoe0->session_id,
                           &key0, &bucket0, &result0);
@@ -184,7 +213,53 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
 
           t0 = pool_elt_at_index (pem->sessions, result0.fields.session_index);
 
-          /* Pop Eth + VLANs + PPPoE header, leave IP payload */
+          /* LAC bridge: forward the FULL PPP frame (Eth+VLAN+PPPoE+PPP)
+           * to l2tpv2-output. No header strip — the L2TPv2 plugin's
+           * encap-raw node consumes the buffer with PPP intact and
+           * prepends Eth+IP+UDP+L2TP+PPP via midchain rewrite. The opaque
+           * carries the L2TPv2 session pool index for fast session
+           * lookup at the encap node. Caught here covers IP and non-IP
+           * (LCP/NCP/Echo) frames uniformly so all PPP control bridges
+           * through to the LNS. */
+          if (PREDICT_FALSE (t0->is_lac_tunneled))
+            {
+              if (PREDICT_FALSE (pem->l2tpv2_output_next_arc == ~0u))
+                {
+                  error0 = PPPOE_ERROR_NO_SUCH_SESSION;
+                  next0 = PPPOE_INPUT_NEXT_DROP;
+                  goto trace00;
+                }
+              /* Stash the L2TPv2 session pool index in opaque2[0] —
+               * l2tpv2-encap-raw consumes this slot to look up the
+               * session pool entry. Slot convention is defined in
+               * osvbng-vpp-plugin-l2tp/l2tpv2.h:vnet_buffer_l2tpv2_opaque
+               * (kept in sync by code review, not by header include —
+               * we deliberately avoid coupling to that header). */
+              b0->opaque2[0] = t0->lac_l2tp_session_index;
+              next0 = pem->l2tpv2_output_next_arc;
+              goto trace00;
+            }
+
+          /* Non-IP PPP (LCP/NCP/Echo) on a terminating PPPoE session:
+           * punt to the userspace control plane via the shared SHM
+           * service node. Buffer stays at the eth header — SHM consumer
+           * parses the full L2 frame. */
+          if ((ppp_proto0 != PPP_PROTOCOL_ip4) &&
+              (ppp_proto0 != PPP_PROTOCOL_ip6))
+            {
+              if (PREDICT_FALSE (pem->punt_shm_tx_next_arc == ~0u))
+                {
+                  error0 = PPPOE_ERROR_BAD_VER_TYPE;
+                  next0 = PPPOE_INPUT_NEXT_DROP;
+                  goto trace00;
+                }
+              vnet_buffer_punt_protocol (b0) = OSVBNG_PUNT_PROTO_PPPOE_SESSION;
+              next0 = pem->punt_shm_tx_next_arc;
+              goto trace00;
+            }
+
+          /* IP traffic on a terminating session: pop headers, hand off
+           * to ip4/ip6-input for normal forwarding. */
           {
             u32 advance = sizeof (*h0) + sizeof (*pppoe0);
             if (t0->outer_vlan != 0 && t0->inner_vlan != 0)

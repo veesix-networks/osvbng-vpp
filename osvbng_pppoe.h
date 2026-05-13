@@ -168,9 +168,16 @@ typedef struct
 
   /* Number of PPPoE sessions currently in LAC-tunneled mode. Bumped
    * by `osvbng_pppoe_set_lac_tunnel()` on set, decremented on clear.
-   * Read by other plugins (e.g. osvbng_punt) to gate LAC dispatch
-   * fast-paths on whether any LAC sessions exist at all. */
+   * Plugin-internal: read by osvbng-pppoe-input to gate the LAC
+   * dispatch branch on whether any LAC sessions exist at all. */
   u32 lac_session_count;
+
+  /* Next-arc indices resolved lazily at first LAC-binding / first
+   * non-IP PPP frame. ~0 means the destination plugin is not loaded
+   * — frames fall back to drop. Resolved via vlib_node_add_next on
+   * graph-node-by-name lookup; no cross-plugin symbol resolution. */
+  u32 l2tpv2_output_next_arc; /* osvbng-pppoe-input -> l2tpv2-output */
+  u32 punt_shm_tx_next_arc;   /* osvbng-pppoe-input -> osvbng-punt-shm-tx */
 
 } osvbng_pppoe_main_t;
 
