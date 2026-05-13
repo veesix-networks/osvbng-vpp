@@ -133,7 +133,18 @@ VLIB_NODE_FN (osvbng_pppoe_lac_tx_node)
 	      goto trace00;
 	    }
 
-	  ppp_proto = clib_net_to_host_u16 (*(u16 *) vlib_buffer_get_current (b0));
+	  /* Strip optional PPP HDLC Address+Control (0xff 0x03) if the
+	   * LNS sent uncompressed framing. RFC 1661 §2 reserves
+	   * 0xFF00-0xFFFF as protocol identifiers, so a leading 0xff
+	   * byte is unambiguously the HDLC Address, not a protocol. */
+	  u8 *cur = vlib_buffer_get_current (b0);
+	  if (cur[0] == 0xff && b0->current_length >= 4)
+	    {
+	      vlib_buffer_advance (b0, 2);
+	      cur = vlib_buffer_get_current (b0);
+	    }
+
+	  ppp_proto = clib_net_to_host_u16 (*(u16 *) cur);
 
 	  /* Strip the leading 2-byte PPP protocol field from the buffer;
 	   * we re-insert it inside the PPPoE header. */
