@@ -195,57 +195,57 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
 
           ppp_proto0 = clib_net_to_host_u16 (pppoe0->ppp_proto);
 
-          /* Look up the session first. Both IP traffic and non-IP control
-           * traffic (LCP/NCP/Echo) are dispatched per-session: IP frames
-           * decap to ip4/ip6-input, LAC-tunneled frames go to
-           * l2tpv2-output, the rest punt to userspace via the shared
-           * osvbng-punt-shm-tx graph node. */
+          /* Non-IP PPP (LCP/NCP/CHAP/Echo) always punts to userspace —
+           * the Go control plane drives PPP negotiation. This branch
+           * is taken BEFORE the session is in the bihash (LCP frames
+           * arrive between PADS-sent and AAA-success) AND for non-LAC
+           * sessions in steady state. LAC sessions take the bridge path
+           * below regardless of ppp_proto, so check is_lac_tunneled
+           * before punting non-IP. */
+          int is_ip0 = (ppp_proto0 == PPP_PROTOCOL_ip4) ||
+                       (ppp_proto0 == PPP_PROTOCOL_ip6);
+
           pppoe_lookup_1 (&pem->session_table, &cached_key, &cached_result,
                           h0->src_address, pppoe0->session_id,
                           &key0, &bucket0, &result0);
 
-          if (PREDICT_FALSE (result0.fields.session_index == ~0))
+          /* LAC bridge: covers all PPP protocols (LCP/NCP/IP/Echo) so
+           * subscriber control plane bridges transparently to the LNS.
+           * Only triggered if the session is in the bihash and tagged
+           * is_lac_tunneled — which means AAA completed and Go enabled
+           * the bridge flag via osvbng_pppoe_set_lac_tunnel. */
+          if (PREDICT_FALSE (result0.fields.session_index != ~0))
             {
-              error0 = PPPOE_ERROR_NO_SUCH_SESSION;
-              next0 = PPPOE_INPUT_NEXT_DROP;
-              goto trace00;
-            }
-
-          t0 = pool_elt_at_index (pem->sessions, result0.fields.session_index);
-
-          /* LAC bridge: forward the FULL PPP frame (Eth+VLAN+PPPoE+PPP)
-           * to l2tpv2-output. No header strip — the L2TPv2 plugin's
-           * encap-raw node consumes the buffer with PPP intact and
-           * prepends Eth+IP+UDP+L2TP+PPP via midchain rewrite. The opaque
-           * carries the L2TPv2 session pool index for fast session
-           * lookup at the encap node. Caught here covers IP and non-IP
-           * (LCP/NCP/Echo) frames uniformly so all PPP control bridges
-           * through to the LNS. */
-          if (PREDICT_FALSE (t0->is_lac_tunneled))
-            {
-              if (PREDICT_FALSE (pem->l2tpv2_output_next_arc == ~0u))
+              t0 = pool_elt_at_index (pem->sessions,
+                                      result0.fields.session_index);
+              if (PREDICT_FALSE (t0->is_lac_tunneled))
                 {
-                  error0 = PPPOE_ERROR_NO_SUCH_SESSION;
-                  next0 = PPPOE_INPUT_NEXT_DROP;
+                  if (PREDICT_FALSE (pem->l2tpv2_output_next_arc == ~0u))
+                    {
+                      error0 = PPPOE_ERROR_NO_SUCH_SESSION;
+                      next0 = PPPOE_INPUT_NEXT_DROP;
+                      goto trace00;
+                    }
+                  /* Stash the L2TPv2 session pool index in opaque2[0] —
+                   * l2tpv2-encap-raw reads this slot to look up the
+                   * session. Slot convention defined in
+                   * osvbng-vpp-plugin-l2tp/l2tpv2.h:vnet_buffer_l2tpv2_opaque
+                   * — deliberately not coupled by include. */
+                  b0->opaque2[0] = t0->lac_l2tp_session_index;
+                  next0 = pem->l2tpv2_output_next_arc;
                   goto trace00;
                 }
-              /* Stash the L2TPv2 session pool index in opaque2[0] —
-               * l2tpv2-encap-raw consumes this slot to look up the
-               * session pool entry. Slot convention is defined in
-               * osvbng-vpp-plugin-l2tp/l2tpv2.h:vnet_buffer_l2tpv2_opaque
-               * (kept in sync by code review, not by header include —
-               * we deliberately avoid coupling to that header). */
-              b0->opaque2[0] = t0->lac_l2tp_session_index;
-              next0 = pem->l2tpv2_output_next_arc;
-              goto trace00;
+            }
+          else
+            {
+              t0 = 0;
             }
 
-          /* Non-IP PPP (LCP/NCP/Echo) on a terminating PPPoE session:
-           * punt to the userspace control plane via the shared SHM
-           * service node. Buffer stays at the eth header — SHM consumer
-           * parses the full L2 frame. */
-          if ((ppp_proto0 != PPP_PROTOCOL_ip4) &&
-              (ppp_proto0 != PPP_PROTOCOL_ip6))
+          /* Non-IP PPP frame: punt to userspace via the shared SHM
+           * service. Works whether or not the session is in the bihash
+           * (covers the pre-PADS-complete window for both LAC and local
+           * termination flows). */
+          if (!is_ip0)
             {
               if (PREDICT_FALSE (pem->punt_shm_tx_next_arc == ~0u))
                 {
@@ -255,6 +255,14 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
                 }
               vnet_buffer_punt_protocol (b0) = OSVBNG_PUNT_PROTO_PPPOE_SESSION;
               next0 = pem->punt_shm_tx_next_arc;
+              goto trace00;
+            }
+
+          /* IP frame without a session: cannot decap. Drop. */
+          if (PREDICT_FALSE (t0 == 0))
+            {
+              error0 = PPPOE_ERROR_NO_SUCH_SESSION;
+              next0 = PPPOE_INPUT_NEXT_DROP;
               goto trace00;
             }
 
