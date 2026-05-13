@@ -1,4 +1,4 @@
-# Copyright (c) 2025 Veesix Networks
+# Copyright (c) 2025-2026 Veesix Networks
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at:
@@ -21,16 +21,11 @@ add_vpp_plugin(osvbng_punt
   osvbng_punt_dhcp6.c
   osvbng_punt_pppoe_disc.c
   osvbng_punt_pppoe_sess.c
+  osvbng_punt_shm_tx.c
   osvbng_punt_l2tp.c
   osvbng_punt_ipv6_nd.c
   osvbng_punt_api.c
 
   API_FILES
   osvbng_punt.api
-
-  # PPPoE session table is consulted by `osvbng_punt_pppoe_sess.c`
-  # to detect LAC-tunneled sessions and bypass the IP-only filter,
-  # forwarding full PPP frames to `l2tpv2-output`.
-  LINK_LIBRARIES
-  osvbng_pppoe_plugin
 )

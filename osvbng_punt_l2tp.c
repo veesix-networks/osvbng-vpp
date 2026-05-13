@@ -227,13 +227,10 @@ osvbng_punt_enable_l2tp (u32 sw_if_index)
   /* Register L2TP control port (1701) */
   udp_register_dst_port (vm, 1701, node_index, 1);
 
-  /* Resolve the next-arcs into the L2TPv2 plugin's graph nodes now
-   * that all plugins have finished init. Both arcs are resolved
-   * together: the L2TPv2-input arc from this node (T=0 data path) and
-   * the L2TPv2-output arc from osvbng-punt-pppoe-sess (LAC bridge).
-   * Idempotent. */
+  /* Resolve the T=0 → l2tpv2-input next-arc now that all plugins have
+   * finished init. LAC bridge dispatch is owned by osvbng_pppoe and
+   * resolves its own l2tpv2-output arc independently. Idempotent. */
   osvbng_punt_l2tp_resolve_next_arc (vm);
-  osvbng_punt_pppoe_sess_resolve_l2tpv2_arc (vm);
 
   hash_set (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_L2TP], sw_if_index, 1);
 

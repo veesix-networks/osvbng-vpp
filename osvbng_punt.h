@@ -105,13 +105,12 @@ typedef struct
   u32 original_pppoe_disc_node;
   u32 original_pppoe_sess_node;
 
-  /* Next-arc indices resolved lazily once the L2TPv2 plugin's graph
+  /* Next-arc index resolved lazily once the L2TPv2 plugin's graph
    * nodes are visible. ~0 means the L2TPv2 plugin is not loaded or has
-   * not been probed yet; T=0 data packets and LAC-tunneled PPPoE
-   * sessions fall back to drop (T=0) or normal IP/punt paths (PPPoE)
-   * in that case. */
+   * not been probed yet; T=0 data packets fall back to drop in that
+   * case. LAC dispatch lives entirely inside osvbng_pppoe now and
+   * doesn't need an arc cached here. */
   u32 l2tpv2_input_next_arc;	/* from osvbng-punt-l2tp -> l2tpv2-input */
-  u32 l2tpv2_output_next_arc;	/* from osvbng-punt-pppoe-sess -> l2tpv2-output */
 
   u64 packets_punted[OSVBNG_PUNT_N_PROTO];
   u64 packets_dropped[OSVBNG_PUNT_N_PROTO];
@@ -132,6 +131,14 @@ extern vlib_node_registration_t osvbng_punt_pppoe_disc_node;
 extern vlib_node_registration_t osvbng_punt_pppoe_sess_node;
 extern vlib_node_registration_t osvbng_punt_l2tp_node;
 extern vlib_node_registration_t osvbng_punt_ipv6_nd_node;
+extern vlib_node_registration_t osvbng_punt_shm_tx_node;
+
+/* Buffer-opaque slot carrying an osvbng_punt_protocol_t from the
+ * classifier node (e.g. osvbng-pppoe-input on non-IP control, or
+ * l2tpv2-input on T=1 control) to osvbng-punt-shm-tx. Lives in
+ * b->opaque2[1] (b->opaque2[0] is reserved by the L2TPv2 plugin for
+ * its session opaque on the LAC bridge path). */
+#define vnet_buffer_punt_protocol(b) ((b)->opaque2[1])
 
 int osvbng_punt_enable_disable (u32 sw_if_index,
 				osvbng_punt_protocol_t protocol,
@@ -143,7 +150,6 @@ int osvbng_punt_enable_dhcpv6 (u32 sw_if_index);
 int osvbng_punt_disable_dhcpv6 (u32 sw_if_index);
 int osvbng_punt_enable_l2tp (u32 sw_if_index);
 int osvbng_punt_disable_l2tp (u32 sw_if_index);
-void osvbng_punt_pppoe_sess_resolve_l2tpv2_arc (vlib_main_t *vm);
 int osvbng_punt_enable_ipv6_nd (u32 sw_if_index);
 int osvbng_punt_disable_ipv6_nd (u32 sw_if_index);
 
