@@ -21,14 +21,14 @@ static_always_inline void
 pppoe_input_resolve_arcs (vlib_main_t *vm, u32 this_node_index,
 			  osvbng_pppoe_main_t *pem)
 {
-  if (PREDICT_TRUE (pem->l2tpv2_output_next_arc != ~0u
+  if (PREDICT_TRUE (pem->l2tpv2_encap_raw_next_arc != ~0u
 		    && pem->punt_shm_tx_next_arc != ~0u))
     return;
-  if (pem->l2tpv2_output_next_arc == ~0u)
+  if (pem->l2tpv2_encap_raw_next_arc == ~0u)
     {
-      vlib_node_t *n = vlib_get_node_by_name (vm, (u8 *) "l2tpv2-output");
+      vlib_node_t *n = vlib_get_node_by_name (vm, (u8 *) "l2tpv2-encap-raw");
       if (n)
-	pem->l2tpv2_output_next_arc =
+	pem->l2tpv2_encap_raw_next_arc =
 	  vlib_node_add_next (vm, this_node_index, n->index);
     }
   if (pem->punt_shm_tx_next_arc == ~0u)
@@ -80,7 +80,7 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
   pppoe_entry_key_t cached_key;
   pppoe_entry_result_t cached_result;
 
-  /* Resolve dynamic next-arcs (l2tpv2-output, osvbng-punt-shm-tx) at
+  /* Resolve dynamic next-arcs (l2tpv2-encap-raw, osvbng-punt-shm-tx) at
    * first frame so sibling plugin nodes are guaranteed to be
    * registered. Cheap to call repeatedly — early-out once both are
    * resolved. */
@@ -220,7 +220,7 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
                                       result0.fields.session_index);
               if (PREDICT_FALSE (t0->is_lac_tunneled))
                 {
-                  if (PREDICT_FALSE (pem->l2tpv2_output_next_arc == ~0u))
+                  if (PREDICT_FALSE (pem->l2tpv2_encap_raw_next_arc == ~0u))
                     {
                       error0 = PPPOE_ERROR_NO_SUCH_SESSION;
                       next0 = PPPOE_INPUT_NEXT_DROP;
@@ -232,7 +232,7 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
                    * osvbng-vpp-plugin-l2tp/l2tpv2.h:vnet_buffer_l2tpv2_opaque
                    * — deliberately not coupled by include. */
                   b0->opaque2[0] = t0->lac_l2tp_session_index;
-                  next0 = pem->l2tpv2_output_next_arc;
+                  next0 = pem->l2tpv2_encap_raw_next_arc;
                   goto trace00;
                 }
             }

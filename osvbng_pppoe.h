@@ -65,7 +65,7 @@ typedef struct
 
   /* LAC bridge state. When set, this PPPoE session is bridged to an
    * L2TPv2 session (no local PPP termination). The punt and decap
-   * paths forward full PPP frames to `l2tpv2-output` with
+   * paths forward full PPP frames to `l2tpv2-encap-raw` with
    * `vnet_buffer_l2tpv2_opaque(b)` set to `lac_l2tp_session_index`.
    * Set by the Go control plane via the new
    * `osvbng_pppoe_set_lac_tunnel()` helper when the LAC session
@@ -176,7 +176,7 @@ typedef struct
    * non-IP PPP frame. ~0 means the destination plugin is not loaded
    * — frames fall back to drop. Resolved via vlib_node_add_next on
    * graph-node-by-name lookup; no cross-plugin symbol resolution. */
-  u32 l2tpv2_output_next_arc; /* osvbng-pppoe-input -> l2tpv2-output */
+  u32 l2tpv2_encap_raw_next_arc; /* osvbng-pppoe-input -> l2tpv2-encap-raw */
   u32 punt_shm_tx_next_arc;   /* osvbng-pppoe-input -> osvbng-punt-shm-tx */
 
 } osvbng_pppoe_main_t;
