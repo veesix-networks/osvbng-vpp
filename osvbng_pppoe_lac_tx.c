@@ -148,12 +148,13 @@ VLIB_NODE_FN (osvbng_pppoe_lac_tx_node)
 	  u32 encap_len = sizeof (ethernet_header_t) + vlan_bytes
 			  + sizeof (pppoe_header_t);
 
-	  if (PREDICT_FALSE (vlib_buffer_advance (b0, -(i32) encap_len) < 0))
+	  if (PREDICT_FALSE (b0->current_data < (i32) encap_len))
 	    {
 	      error0 = OSVBNG_PPPOE_LAC_TX_ERROR_TRUNCATED;
 	      pkts_truncated++;
 	      goto trace00;
 	    }
+	  vlib_buffer_advance (b0, -(i32) encap_len);
 
 	  ethernet_header_t *eth = vlib_buffer_get_current (b0);
 	  clib_memcpy (eth->dst_address, s->client_mac, 6);
