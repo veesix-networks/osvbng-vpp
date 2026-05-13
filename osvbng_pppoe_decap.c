@@ -198,6 +198,18 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
                       next0 = PPPOE_INPUT_NEXT_DROP;
                       goto trace00;
                     }
+                  /* Strip Ethernet + VLAN(s) + PPPoE header so the
+                   * buffer is positioned at the PPP frame (starting
+                   * with the ppp_proto field). l2tpv2-encap-raw then
+                   * prepends IP+UDP+L2TPv2-data on top. Mirrors the
+                   * advance done in the IP-decap branch below. */
+                  u32 advance = sizeof (*h0) + sizeof (*pppoe0);
+                  if (t0->outer_vlan != 0 && t0->inner_vlan != 0)
+                    advance += 2 * sizeof (ethernet_vlan_header_t);
+                  else if (t0->outer_vlan != 0)
+                    advance += sizeof (ethernet_vlan_header_t);
+                  vlib_buffer_advance (b0, advance);
+
                   /* Stash the L2TPv2 session pool index in opaque2[0] —
                    * l2tpv2-encap-raw reads this slot to look up the
                    * session. Slot convention defined in
