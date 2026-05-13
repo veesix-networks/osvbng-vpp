@@ -14,31 +14,9 @@
 #include <osvbng_pppoe/osvbng_pppoe.h>
 #include <osvbng_punt/osvbng_punt.h>
 
-/* Lazily resolve the dynamic next-arcs into sibling plugins. Called on
- * first need; idempotent. Lookups happen by graph-node name, so no
- * cross-plugin symbol reference is required at link time. */
-static_always_inline void
-pppoe_input_resolve_arcs (vlib_main_t *vm, u32 this_node_index,
-			  osvbng_pppoe_main_t *pem)
-{
-  if (PREDICT_TRUE (pem->l2tpv2_encap_raw_next_arc != ~0u
-		    && pem->punt_shm_tx_next_arc != ~0u))
-    return;
-  if (pem->l2tpv2_encap_raw_next_arc == ~0u)
-    {
-      vlib_node_t *n = vlib_get_node_by_name (vm, (u8 *) "l2tpv2-encap-raw");
-      if (n)
-	pem->l2tpv2_encap_raw_next_arc =
-	  vlib_node_add_next (vm, this_node_index, n->index);
-    }
-  if (pem->punt_shm_tx_next_arc == ~0u)
-    {
-      vlib_node_t *n = vlib_get_node_by_name (vm, (u8 *) "osvbng-punt-shm-tx");
-      if (n)
-	pem->punt_shm_tx_next_arc =
-	  vlib_node_add_next (vm, this_node_index, n->index);
-    }
-}
+/* Dynamic next-arcs (l2tpv2-encap-raw, osvbng-punt-shm-tx) are resolved
+ * once at plugin init in osvbng_pppoe_init (osvbng_pppoe.c) — must run
+ * on the main thread per vlib_node_add_next's thread-0 assertion. */
 
 typedef struct {
   u32 next_index;
@@ -79,12 +57,6 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
   u32 stats_sw_if_index, stats_n_packets, stats_n_bytes;
   pppoe_entry_key_t cached_key;
   pppoe_entry_result_t cached_result;
-
-  /* Resolve dynamic next-arcs (l2tpv2-encap-raw, osvbng-punt-shm-tx) at
-   * first frame so sibling plugin nodes are guaranteed to be
-   * registered. Cheap to call repeatedly — early-out once both are
-   * resolved. */
-  pppoe_input_resolve_arcs (vm, osvbng_pppoe_input_node.index, pem);
 
   from = vlib_frame_vector_args (from_frame);
   n_left_from = from_frame->n_vectors;

@@ -780,6 +780,26 @@ osvbng_pppoe_init (vlib_main_t * vm)
   pem->l2tpv2_encap_raw_next_arc = ~0;
   pem->punt_shm_tx_next_arc = ~0;
 
+  /* Resolve dynamic next-arcs from osvbng-pppoe-input into sibling
+   * plugins now. vlib_node_add_next must be called from the main
+   * thread (asserted in vlib/node.c), so it cannot run lazily from
+   * the worker-thread node function. Both target nodes are already
+   * registered by their VLIB_REGISTER_NODE which runs before any
+   * VLIB_INIT_FUNCTION. ~0 indicates the target plugin is not loaded
+   * — frames in that disposition fall back to drop. */
+  {
+    vlib_node_t *target = vlib_get_node_by_name (vm,
+						 (u8 *) "l2tpv2-encap-raw");
+    if (target)
+      pem->l2tpv2_encap_raw_next_arc =
+	vlib_node_add_next (vm, osvbng_pppoe_input_node.index, target->index);
+
+    target = vlib_get_node_by_name (vm, (u8 *) "osvbng-punt-shm-tx");
+    if (target)
+      pem->punt_shm_tx_next_arc =
+	vlib_node_add_next (vm, osvbng_pppoe_input_node.index, target->index);
+  }
+
   /* Create the session hash table */
   BV (clib_bihash_init) (&pem->session_table, "osvbng pppoe session table",
                          PPPOE_NUM_BUCKETS, PPPOE_MEMORY_SIZE);
