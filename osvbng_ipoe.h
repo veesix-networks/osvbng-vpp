@@ -163,9 +163,6 @@ typedef struct
   /* Reverse lookup: ipoe_session sw_if_index -> session_index */
   u32 *session_index_by_sw_if_index;
 
-  /* Free hw_if_indices for recycling */
-  u32 *free_ipoe_session_hw_if_indices;
-
   /* Bitmap of interfaces with IPoE enabled */
   uword *enabled_by_sw_if_index;
 

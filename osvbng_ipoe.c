@@ -10,7 +10,6 @@
 #include <vnet/fib/fib_table.h>
 #include <vnet/fib/fib_entry.h>
 #include <vnet/fib/fib_source.h>
-#include <vnet/mfib/mfib_table.h>
 #include <vnet/dpo/interface_tx_dpo.h>
 #include <vnet/adj/adj_midchain.h>
 #include <vnet/adj/adj.h>
@@ -242,25 +241,14 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
       ipoe_session_table_del (&im->session_table, a->encap_if_index,
                               a->inner_vlan, a->client_mac);
 
-      /* Keep the hw interface alive for recycle (matches upstream VPP
-       * pppoe plugin pattern at src/plugins/pppoe/pppoe.c:411-427).
-       * vnet_delete_hw_interface would invalidate the index we're about
-       * to push onto the free list. Instead admin-down + hide the sw
-       * interface; on recycle the same hw_if_index is reused with a new
-       * dev_instance. */
-      vnet_sw_interface_set_flags (vnm, s->sw_if_index, 0 /* down */);
-      vnet_sw_interface_t *si_down = vnet_get_sw_interface (vnm, s->sw_if_index);
-      si_down->flags |= VNET_SW_INTERFACE_FLAG_HIDDEN;
-
-      /* Clear reverse lookup so any adjacency callback that fires
-       * during the admin-down sees ~0 and bails. FIB entries already
-       * removed above. */
+      /* Clear reverse lookup before deleting the hw interface so any
+       * adjacency callback that fires during teardown bails at the
+       * early ~0 check. */
       im->session_index_by_sw_if_index[s->sw_if_index] = ~0;
 
-      /* Push hw_if_index onto recycle list */
-      vec_add1 (im->free_ipoe_session_hw_if_indices, s->hw_if_index);
+      vnet_sw_interface_set_flags (vnm, s->sw_if_index, 0 /* down */);
+      vnet_delete_hw_interface (vnm, s->hw_if_index);
 
-      /* Free session struct */
       pool_put (im->sessions, s);
 
       return 0;
@@ -283,52 +271,15 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
   s->inner_vlan = a->inner_vlan;
   s->decap_fib_index = a->decap_fib_index;
 
-  /* Create virtual interface */
-  u8 is_recycled = 0;
-  if (vec_len (im->free_ipoe_session_hw_if_indices) > 0)
-    {
-      is_recycled = 1;
+  hw_if_index = vnet_register_interface (
+    vnm, ipoe_device_class.index, s - im->sessions,
+    ipoe_hw_class.index, s - im->sessions);
 
-      /* Recycle old hw_if_index */
-      hw_if_index = im->free_ipoe_session_hw_if_indices
-        [vec_len (im->free_ipoe_session_hw_if_indices) - 1];
-      vec_dec_len (im->free_ipoe_session_hw_if_indices, 1);
-
-      hi = vnet_get_hw_interface (vnm, hw_if_index);
-      hi->dev_instance = s - im->sessions;
-      hi->hw_instance = hi->dev_instance;
-
-      /* Clear counters */
-      vnet_interface_counter_lock (&vnm->interface_main);
-      vlib_zero_combined_counter (
-        &vnm->interface_main.combined_sw_if_counters[VNET_INTERFACE_COUNTER_TX],
-        hi->sw_if_index);
-      vlib_zero_combined_counter (
-        &vnm->interface_main.combined_sw_if_counters[VNET_INTERFACE_COUNTER_RX],
-        hi->sw_if_index);
-      vnet_interface_counter_unlock (&vnm->interface_main);
-    }
-  else
-    {
-      /* Create new interface */
-      hw_if_index = vnet_register_interface (
-        vnm, ipoe_device_class.index, s - im->sessions,
-        ipoe_hw_class.index, s - im->sessions);
-
-      hi = vnet_get_hw_interface (vnm, hw_if_index);
-    }
+  hi = vnet_get_hw_interface (vnm, hw_if_index);
 
   s->hw_if_index = hw_if_index;
   s->sw_if_index = sw_if_index = hi->sw_if_index;
 
-  /* Un-hide the sw interface (recycled sessions were hidden on teardown) */
-  if (is_recycled)
-    {
-      vnet_sw_interface_t *si_show = vnet_get_sw_interface (vnm, sw_if_index);
-      si_show->flags &= ~VNET_SW_INTERFACE_FLAG_HIDDEN;
-    }
-
-  /* Set interface to up */
   vnet_hw_interface_set_flags (vnm, hw_if_index,
                                VNET_HW_INTERFACE_FLAG_LINK_UP);
   vnet_sw_interface_set_flags (vnm, sw_if_index,
@@ -336,50 +287,18 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
   vnet_set_interface_l3_output_node (vnm->vlib_main, sw_if_index,
                                      (u8 *) "tunnel-output");
 
-  /* Setup reverse lookup */
   vec_validate_init_empty (im->session_index_by_sw_if_index, sw_if_index, ~0);
   im->session_index_by_sw_if_index[sw_if_index] = s - im->sessions;
 
-  /* Bind interface to correct IP table (VRF) */
   {
     u32 table_id = 0;
     if (s->decap_fib_index != 0)
       table_id =
         fib_table_get_table_id (s->decap_fib_index, FIB_PROTOCOL_IP4);
 
-    if (is_recycled)
-      {
-        /*
-         * vnet_delete_hw_interface cleared fib/mfib indices to ~0.
-         * ip_table_bind tries to fib_table_unlock the old binding which
-         * crashes on ~0. Directly restore the bindings and lock the tables.
-         */
-        u32 fib6 = fib_table_find (FIB_PROTOCOL_IP6, table_id);
-        u32 mfib4 = mfib_table_find (FIB_PROTOCOL_IP4, table_id);
-        u32 mfib6 = mfib_table_find (FIB_PROTOCOL_IP6, table_id);
-
-        ip4_main.fib_index_by_sw_if_index[sw_if_index] = s->decap_fib_index;
-        fib_table_lock (s->decap_fib_index, FIB_PROTOCOL_IP4,
-                        FIB_SOURCE_INTERFACE);
-
-        ip6_main.fib_index_by_sw_if_index[sw_if_index] = fib6;
-        fib_table_lock (fib6, FIB_PROTOCOL_IP6, FIB_SOURCE_INTERFACE);
-
-        ip4_main.mfib_index_by_sw_if_index[sw_if_index] = mfib4;
-        mfib_table_lock (mfib4, FIB_PROTOCOL_IP4, MFIB_SOURCE_DEFAULT_ROUTE);
-
-        ip6_main.mfib_index_by_sw_if_index[sw_if_index] = mfib6;
-        mfib_table_lock (mfib6, FIB_PROTOCOL_IP6, MFIB_SOURCE_DEFAULT_ROUTE);
-
-        s->decap_fib_index_ip6 = fib6;
-      }
-    else
-      {
-        ip_table_bind (FIB_PROTOCOL_IP4, sw_if_index, table_id);
-        ip_table_bind (FIB_PROTOCOL_IP6, sw_if_index, table_id);
-        s->decap_fib_index_ip6 =
-          fib_table_find (FIB_PROTOCOL_IP6, table_id);
-      }
+    ip_table_bind (FIB_PROTOCOL_IP4, sw_if_index, table_id);
+    ip_table_bind (FIB_PROTOCOL_IP6, sw_if_index, table_id);
+    s->decap_fib_index_ip6 = fib_table_find (FIB_PROTOCOL_IP6, table_id);
   }
 
   /* Add to lookup table */
