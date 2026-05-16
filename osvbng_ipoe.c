@@ -242,22 +242,25 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
       ipoe_session_table_del (&im->session_table, a->encap_if_index,
                               a->inner_vlan, a->client_mac);
 
-      /* Clear reverse lookup BEFORE vnet_delete_hw_interface. Interface
-       * teardown fires adjacency callbacks (ipoe_update_adj /
-       * ipoe_build_rewrite) that look the session up via
-       * session_index_by_sw_if_index. By this point FIB entries are
-       * already removed (above), so any callback observing ~0 here can
-       * safely bail at its existing early-return. */
-      u32 hw_if_index_to_recycle = s->hw_if_index;
-      u32 sw_if_index_to_clear = s->sw_if_index;
-      im->session_index_by_sw_if_index[sw_if_index_to_clear] = ~0;
+      /* Keep the hw interface alive for recycle (matches upstream VPP
+       * pppoe plugin pattern at src/plugins/pppoe/pppoe.c:411-427).
+       * vnet_delete_hw_interface would invalidate the index we're about
+       * to push onto the free list. Instead admin-down + hide the sw
+       * interface; on recycle the same hw_if_index is reused with a new
+       * dev_instance. */
+      vnet_sw_interface_set_flags (vnm, s->sw_if_index, 0 /* down */);
+      vnet_sw_interface_t *si_down = vnet_get_sw_interface (vnm, s->sw_if_index);
+      si_down->flags |= VNET_SW_INTERFACE_FLAG_HIDDEN;
 
-      vnet_delete_hw_interface (vnm, hw_if_index_to_recycle);
+      /* Clear reverse lookup so any adjacency callback that fires
+       * during the admin-down sees ~0 and bails. FIB entries already
+       * removed above. */
+      im->session_index_by_sw_if_index[s->sw_if_index] = ~0;
 
-      /* Recycle hw_if_index */
-      vec_add1 (im->free_ipoe_session_hw_if_indices, hw_if_index_to_recycle);
+      /* Push hw_if_index onto recycle list */
+      vec_add1 (im->free_ipoe_session_hw_if_indices, s->hw_if_index);
 
-      /* Free session */
+      /* Free session struct */
       pool_put (im->sessions, s);
 
       return 0;
@@ -317,6 +320,13 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
 
   s->hw_if_index = hw_if_index;
   s->sw_if_index = sw_if_index = hi->sw_if_index;
+
+  /* Un-hide the sw interface (recycled sessions were hidden on teardown) */
+  if (is_recycled)
+    {
+      vnet_sw_interface_t *si_show = vnet_get_sw_interface (vnm, sw_if_index);
+      si_show->flags &= ~VNET_SW_INTERFACE_FLAG_HIDDEN;
+    }
 
   /* Set interface to up */
   vnet_hw_interface_set_flags (vnm, hw_if_index,
