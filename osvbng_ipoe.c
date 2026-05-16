@@ -242,12 +242,17 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
       ipoe_session_table_del (&im->session_table, a->encap_if_index,
                               a->inner_vlan, a->client_mac);
 
-      /* Delete interface first (before clearing reverse lookup, as callbacks may need it) */
+      /* Clear reverse lookup BEFORE vnet_delete_hw_interface. Interface
+       * teardown fires adjacency callbacks (ipoe_update_adj /
+       * ipoe_build_rewrite) that look the session up via
+       * session_index_by_sw_if_index. By this point FIB entries are
+       * already removed (above), so any callback observing ~0 here can
+       * safely bail at its existing early-return. */
       u32 hw_if_index_to_recycle = s->hw_if_index;
-      vnet_delete_hw_interface (vnm, s->hw_if_index);
+      u32 sw_if_index_to_clear = s->sw_if_index;
+      im->session_index_by_sw_if_index[sw_if_index_to_clear] = ~0;
 
-      /* Clear reverse lookup after interface deletion */
-      im->session_index_by_sw_if_index[s->sw_if_index] = ~0;
+      vnet_delete_hw_interface (vnm, hw_if_index_to_recycle);
 
       /* Recycle hw_if_index */
       vec_add1 (im->free_ipoe_session_hw_if_indices, hw_if_index_to_recycle);
