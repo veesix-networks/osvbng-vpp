@@ -40,6 +40,9 @@ typedef struct
   u8 local_mac[6];              /* BNG MAC address (src in TX frames) */
   u16 outer_vlan;               /* S-VLAN (0 if untagged) - for TX rewrite */
   u16 inner_vlan;               /* C-VLAN (0 if none) - for lookup + TX rewrite */
+  u16 outer_tpid;               /* Snapshot of parent sub-interface TPID
+                                   (ETHERNET_TYPE_DOT1AD or _VLAN) for outer
+                                   tag emission. Resolved at session add. */
 
   /*
    * Dual-stack IP bindings (independent lifecycles)

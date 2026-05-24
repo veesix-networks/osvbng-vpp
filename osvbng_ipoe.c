@@ -97,8 +97,8 @@ ipoe_build_rewrite (vnet_main_t *vnm, u32 sw_if_index, vnet_link_t link_type,
 
   if (s->outer_vlan && s->inner_vlan)
     {
-      /* Q-in-Q: 802.1ad S-VLAN + 802.1Q C-VLAN */
-      eth->type = clib_host_to_net_u16 (ETHERNET_TYPE_DOT1AD);
+      /* Q-in-Q: outer TPID per sub-interface config, inner 0x8100 */
+      eth->type = clib_host_to_net_u16 (s->outer_tpid);
 
       ethernet_vlan_header_t *svlan = (ethernet_vlan_header_t *) p;
       svlan->priority_cfi_and_id =
@@ -114,8 +114,8 @@ ipoe_build_rewrite (vnet_main_t *vnm, u32 sw_if_index, vnet_link_t link_type,
     }
   else if (s->outer_vlan)
     {
-      /* Single S-VLAN */
-      eth->type = clib_host_to_net_u16 (ETHERNET_TYPE_DOT1AD);
+      /* Single S-VLAN: TPID per sub-interface config */
+      eth->type = clib_host_to_net_u16 (s->outer_tpid);
 
       ethernet_vlan_header_t *vlan = (ethernet_vlan_header_t *) p;
       vlan->priority_cfi_and_id =
@@ -270,6 +270,18 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
   s->outer_vlan = a->outer_vlan;
   s->inner_vlan = a->inner_vlan;
   s->decap_fib_index = a->decap_fib_index;
+
+  /* Snapshot the parent sub-interface's TPID for use in egress rewrite.
+   * Falls back to 0x8100 (dot1q) if encap is not a sub-interface. */
+  {
+    vnet_sw_interface_t *encap_sw =
+      vnet_get_sw_interface (vnm, a->encap_if_index);
+    s->outer_tpid =
+      (encap_sw->type == VNET_SW_INTERFACE_TYPE_SUB &&
+       encap_sw->sub.eth.flags.dot1ad)
+        ? ETHERNET_TYPE_DOT1AD
+        : ETHERNET_TYPE_VLAN;
+  }
 
   hw_if_index = vnet_register_interface (
     vnm, ipoe_device_class.index, s - im->sessions,
