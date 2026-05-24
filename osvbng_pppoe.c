@@ -135,8 +135,8 @@ pppoe_build_rewrite (vnet_main_t * vnm,
 
   if (t->outer_vlan != 0 && t->inner_vlan != 0)
     {
-      /* Q-in-Q: S-VLAN (0x88a8) + C-VLAN (0x8100) */
-      eth_hdr->type = clib_host_to_net_u16 (ETHERNET_TYPE_DOT1AD);
+      /* Q-in-Q: outer TPID per sub-interface config, inner 0x8100 */
+      eth_hdr->type = clib_host_to_net_u16 (t->outer_tpid);
 
       ethernet_vlan_header_t *outer_vlan = (ethernet_vlan_header_t *) p;
       outer_vlan->priority_cfi_and_id = clib_host_to_net_u16 (t->outer_vlan);
@@ -150,8 +150,8 @@ pppoe_build_rewrite (vnet_main_t * vnm,
     }
   else if (t->outer_vlan != 0)
     {
-      /* Single VLAN tag */
-      eth_hdr->type = clib_host_to_net_u16 (ETHERNET_TYPE_VLAN);
+      /* Single VLAN tag: TPID per sub-interface config */
+      eth_hdr->type = clib_host_to_net_u16 (t->outer_tpid);
 
       ethernet_vlan_header_t *vlan = (ethernet_vlan_header_t *) p;
       vlan->priority_cfi_and_id = clib_host_to_net_u16 (t->outer_vlan);
@@ -360,6 +360,20 @@ int vnet_osvbng_pppoe_add_del_session
 #undef _
 
       clib_memcpy (t->client_mac, a->client_mac, 6);
+
+      /* Snapshot the parent sub-interface's TPID for use in egress
+       * rewrite (both the IP-path build_rewrite and the per-packet
+       * LAC TX node). Falls back to 0x8100 (dot1q) if encap is not a
+       * sub-interface. */
+      {
+        vnet_sw_interface_t *encap_sw =
+          vnet_get_sw_interface (vnm, a->encap_if_index);
+        t->outer_tpid =
+          (encap_sw->type == VNET_SW_INTERFACE_TYPE_SUB &&
+           encap_sw->sub.eth.flags.dot1ad)
+            ? ETHERNET_TYPE_DOT1AD
+            : ETHERNET_TYPE_VLAN;
+      }
 
       /* update pppoe fib with session_index */
       result.fields.session_index = t - pem->sessions;

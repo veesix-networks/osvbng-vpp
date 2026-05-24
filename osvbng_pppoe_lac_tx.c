@@ -174,7 +174,7 @@ VLIB_NODE_FN (osvbng_pppoe_lac_tx_node)
 	  u8 *p = (u8 *) (eth + 1);
 	  if (s->outer_vlan != 0 && s->inner_vlan != 0)
 	    {
-	      eth->type = clib_host_to_net_u16 (ETHERNET_TYPE_DOT1AD);
+	      eth->type = clib_host_to_net_u16 (s->outer_tpid);
 	      ethernet_vlan_header_t *o = (ethernet_vlan_header_t *) p;
 	      o->priority_cfi_and_id = clib_host_to_net_u16 (s->outer_vlan);
 	      o->type = clib_host_to_net_u16 (ETHERNET_TYPE_VLAN);
@@ -186,7 +186,7 @@ VLIB_NODE_FN (osvbng_pppoe_lac_tx_node)
 	    }
 	  else if (s->outer_vlan != 0)
 	    {
-	      eth->type = clib_host_to_net_u16 (ETHERNET_TYPE_VLAN);
+	      eth->type = clib_host_to_net_u16 (s->outer_tpid);
 	      ethernet_vlan_header_t *v = (ethernet_vlan_header_t *) p;
 	      v->priority_cfi_and_id = clib_host_to_net_u16 (s->outer_vlan);
 	      v->type = clib_host_to_net_u16 (ETHERNET_TYPE_PPPOE_SESSION);

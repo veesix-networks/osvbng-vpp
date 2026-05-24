@@ -59,6 +59,10 @@ typedef struct
   u16 outer_vlan;  /* S-VLAN (0 if untagged) */
   u16 inner_vlan;  /* C-VLAN (0 if not Q-in-Q) */
 
+  /* Snapshot of parent sub-interface TPID (ETHERNET_TYPE_DOT1AD or
+   * ETHERNET_TYPE_VLAN) for outer-tag emission. Resolved at session add. */
+  u16 outer_tpid;
+
   /* vnet intfc index */
   u32 sw_if_index;
   u32 hw_if_index;
