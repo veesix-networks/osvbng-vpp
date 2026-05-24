@@ -180,7 +180,27 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
       kv.key = key.as_u64;
 
       if (clib_bihash_search_inline_8_8 (&cm->inside_lookup, &kv) == 0)
-	return VNET_API_ERROR_ENTRY_ALREADY_EXISTS;
+	{
+	  /* Duplicate add for an existing (inside_ip, inside_fib_index)
+	   * lookup key. Compare every mutable input against the stored
+	   * mapping. If all match, the call is an idempotent no-op
+	   * (recovery replay of an unchanged session). If any drift
+	   * (pool renumbered, outside-IP rebound, port block resized,
+	   * subscriber interface re-indexed), return
+	   * ENTRY_NEEDS_REFRESH and let the caller delete-and-recreate
+	   * to converge. */
+	  cgnat_mapping_t *existing =
+	    pool_elt_at_index (cm->mappings, (u32) kv.value);
+
+	  if (existing->outside_ip.as_u32 == outside_ip->as_u32 &&
+	      existing->port_block_start == port_start &&
+	      existing->port_block_end == port_end &&
+	      existing->pool_index == pool_index &&
+	      existing->sw_if_index == sw_if_index)
+	    return 0;
+
+	  return VNET_API_ERROR_ENTRY_NEEDS_REFRESH;
+	}
 
       cgnat_mapping_t *m;
       pool_get_zero (cm->mappings, m);

@@ -64,6 +64,22 @@ typedef enum
 
 extern char *cgnat_error_strings[];
 
+/*
+ * Plugin-shared API return code for the duplicate-add idempotency
+ * contract. Returned by cgnat_add_del_subscriber_mapping() when a
+ * mapping already exists for the (inside_ip, inside_fib_index)
+ * lookup key but one or more mutable inputs (outside_ip, port range,
+ * pool, sw_if_index) have drifted from the stored record. The caller
+ * must delete-and-recreate the mapping to converge on the new inputs.
+ *
+ * Value is chosen outside VPP's vnet_api_error_t range (-1..-171)
+ * to avoid collision. Same numeric value across all osvbng plugins
+ * (ipoe, pppoe, cgnat) so the Go control plane has one constant.
+ */
+#ifndef VNET_API_ERROR_ENTRY_NEEDS_REFRESH
+#define VNET_API_ERROR_ENTRY_NEEDS_REFRESH (-500)
+#endif
+
 typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
