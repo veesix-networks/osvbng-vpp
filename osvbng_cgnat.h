@@ -164,6 +164,13 @@ typedef struct
 
 typedef struct
 {
+  fib_prefix_t prefix;
+  u32 vrf_id;
+  u32 fib_index;
+} cgnat_inside_prefix_entry_t;
+
+typedef struct
+{
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
 
   u32 pool_id;
@@ -181,12 +188,15 @@ typedef struct
 
   u32 timeouts[CGNAT_N_PROTOS];
 
+  u32 outside_vrf_table_id;
   u32 outside_fib_index;
   u8 outside_fib_valid;
 
   fib_prefix_t *outside_prefixes;
   fib_node_index_t *outside_fib_entries;
   dpo_id_t dpo;
+
+  cgnat_inside_prefix_entry_t *inside_prefixes;
 
   cgnat_det_params_t *det_params;
   u32 n_det_params;
@@ -260,6 +270,8 @@ int cgnat_enable_on_session (u32 pool_id, u32 sw_if_index, u8 is_enable);
 int cgnat_add_del_bypass (fib_prefix_t *prefix, u32 vrf_id, u8 is_add);
 int cgnat_pool_add_outside_prefix (u32 pool_id, fib_prefix_t *prefix);
 int cgnat_pool_del_outside_prefix (u32 pool_id, fib_prefix_t *prefix);
+int cgnat_pool_inside_prefix_add_del (u32 pool_id, fib_prefix_t *prefix,
+				      u32 vrf_id, u8 is_add);
 void cgnat_dpo_module_init (void);
 
 extern vlib_node_registration_t cgnat_out2in_node;

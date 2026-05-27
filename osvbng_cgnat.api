@@ -257,6 +257,64 @@ define osvbng_cgnat_subscriber_mapping_details
   u32 active_sessions;
 };
 
+/** \brief Dump pools (~0 for all) */
+define osvbng_cgnat_pool_dump
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+};
+
+define osvbng_cgnat_pool_details
+{
+  u32 context;
+  u32 pool_id;
+  vl_api_osvbng_cgnat_pool_mode_t mode;
+  vl_api_osvbng_cgnat_address_pooling_t address_pooling;
+  vl_api_osvbng_cgnat_filtering_t filtering;
+  u16 block_size;
+  u8 max_blocks_per_sub;
+  u32 max_sessions_per_sub;
+  u16 port_range_start;
+  u16 port_range_end;
+  u16 port_reuse_timeout;
+  u8 alg_bitmask;
+  vl_api_osvbng_cgnat_timeouts_t timeouts;
+  u32 outside_vrf_table_id;
+  u32 active_mappings;
+};
+
+/** \brief Dump inside prefixes for a pool (~0 for all pools) */
+define osvbng_cgnat_pool_inside_prefix_dump
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+};
+
+define osvbng_cgnat_pool_inside_prefix_details
+{
+  u32 context;
+  u32 pool_id;
+  vl_api_prefix_t prefix;
+  u32 vrf_id;
+};
+
+/** \brief Dump outside addresses for a pool (~0 for all pools) */
+define osvbng_cgnat_pool_outside_address_dump
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+};
+
+define osvbng_cgnat_pool_outside_address_details
+{
+  u32 context;
+  u32 pool_id;
+  vl_api_prefix_t prefix;
+};
+
 /*
  * Local Variables:
  * eval: (c-set-style "gnu")

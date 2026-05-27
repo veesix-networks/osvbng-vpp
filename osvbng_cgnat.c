@@ -24,6 +24,64 @@ char *cgnat_error_strings[] = {
 #undef cgnat_error
 };
 
+static u8
+cgnat_pool_hard_drift (const cgnat_pool_t *cur, const cgnat_pool_t *cfg)
+{
+  return cur->mode != cfg->mode ||
+	 cur->address_pooling != cfg->address_pooling ||
+	 cur->filtering != cfg->filtering ||
+	 cur->block_size != cfg->block_size ||
+	 cur->port_range_start != cfg->port_range_start ||
+	 cur->port_range_end != cfg->port_range_end;
+}
+
+static void
+cgnat_pool_soft_update (cgnat_pool_t *cur, const cgnat_pool_t *cfg)
+{
+  cur->max_blocks_per_sub = cfg->max_blocks_per_sub;
+  cur->max_sessions_per_sub = cfg->max_sessions_per_sub;
+  cur->port_reuse_timeout = cfg->port_reuse_timeout;
+  cur->alg_bitmask = cfg->alg_bitmask;
+  clib_memcpy (cur->timeouts, cfg->timeouts, sizeof (cur->timeouts));
+}
+
+static void
+cgnat_pool_cascade_delete (u32 pool_index)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  u32 *kill = NULL;
+  cgnat_session_t *s;
+
+  pool_foreach (s, cm->sessions)
+    {
+      if (s->pool_index == pool_index)
+	vec_add1 (kill, s - cm->sessions);
+    }
+  for (u32 i = 0; i < vec_len (kill); i++)
+    cgnat_session_delete (pool_elt_at_index (cm->sessions, kill[i]));
+  vec_reset_length (kill);
+
+  cgnat_mapping_t *m;
+  pool_foreach (m, cm->mappings)
+    {
+      if (m->pool_index == pool_index)
+	vec_add1 (kill, m - cm->mappings);
+    }
+  for (u32 i = 0; i < vec_len (kill); i++)
+    {
+      cgnat_mapping_t *mm = pool_elt_at_index (cm->mappings, kill[i]);
+      clib_bihash_kv_8_8_t kv;
+      cgnat_inside_key_t key;
+      key.ip.as_u32 = mm->inside_ip.as_u32;
+      key.fib_index = mm->inside_fib_index;
+      kv.key = key.as_u64;
+      clib_bihash_add_del_8_8 (&cm->inside_lookup, &kv, 0);
+      vec_free (mm->port_reuse_timestamps);
+      pool_put (cm->mappings, mm);
+    }
+  vec_free (kill);
+}
+
 int
 cgnat_pool_add_del (cgnat_pool_t *cfg, u8 is_add)
 {
@@ -35,7 +93,13 @@ cgnat_pool_add_del (cgnat_pool_t *cfg, u8 is_add)
   if (is_add)
     {
       if (p)
-	return VNET_API_ERROR_ENTRY_ALREADY_EXISTS;
+	{
+	  cgnat_pool_t *cur = pool_elt_at_index (cm->pools, p[0]);
+	  if (cgnat_pool_hard_drift (cur, cfg))
+	    return VNET_API_ERROR_ENTRY_NEEDS_REFRESH;
+	  cgnat_pool_soft_update (cur, cfg);
+	  return 0;
+	}
 
       cgnat_pool_t *pool;
       pool_get_zero (cm->pools, pool);
@@ -53,6 +117,7 @@ cgnat_pool_add_del (cgnat_pool_t *cfg, u8 is_add)
       pool->port_reuse_timeout = cfg->port_reuse_timeout;
       pool->alg_bitmask = cfg->alg_bitmask;
       clib_memcpy (pool->timeouts, cfg->timeouts, sizeof (pool->timeouts));
+      pool->outside_vrf_table_id = 0;
       pool->outside_fib_index = ~0;
       pool->outside_fib_valid = 0;
 
@@ -81,6 +146,8 @@ cgnat_pool_add_del (cgnat_pool_t *cfg, u8 is_add)
       u32 pool_index = p[0];
       cgnat_pool_t *pool = pool_elt_at_index (cm->pools, pool_index);
 
+      cgnat_pool_cascade_delete (pool_index);
+
       for (u32 i = 0; i < vec_len (pool->outside_prefixes); i++)
 	{
 	  if (pool->outside_fib_valid &&
@@ -93,6 +160,7 @@ cgnat_pool_add_del (cgnat_pool_t *cfg, u8 is_add)
       vec_free (pool->outside_fib_entries);
       dpo_reset (&pool->dpo);
 
+      vec_free (pool->inside_prefixes);
       vec_free (pool->det_params);
       hash_unset (cm->pool_by_id, pool->pool_id);
       pool_put (cm->pools, pool);
@@ -131,6 +199,7 @@ cgnat_set_outside_fib (u32 pool_id, u32 vrf_id)
 	}
     }
 
+  pool->outside_vrf_table_id = vrf_id;
   pool->outside_fib_index = fib_index;
   pool->outside_fib_valid = 1;
 
@@ -294,6 +363,12 @@ cgnat_pool_add_outside_prefix (u32 pool_id, fib_prefix_t *prefix)
   u32 pool_index = p[0];
   cgnat_pool_t *pool = pool_elt_at_index (cm->pools, pool_index);
 
+  for (u32 i = 0; i < vec_len (pool->outside_prefixes); i++)
+    if (pool->outside_prefixes[i].fp_len == prefix->fp_len &&
+	pool->outside_prefixes[i].fp_addr.ip4.as_u32 ==
+	  prefix->fp_addr.ip4.as_u32)
+      return 0;
+
   vec_add1 (pool->outside_prefixes, *prefix);
   fib_node_index_t fei = FIB_NODE_INDEX_INVALID;
 
@@ -314,6 +389,46 @@ cgnat_pool_add_outside_prefix (u32 pool_id, fib_prefix_t *prefix)
 		   pool_id, format_ip4_address, &prefix->fp_addr.ip4,
 		   prefix->fp_len,
 		   fei != FIB_NODE_INDEX_INVALID ? "installed" : "deferred");
+  return 0;
+}
+
+int
+cgnat_pool_inside_prefix_add_del (u32 pool_id, fib_prefix_t *prefix, u32 vrf_id,
+				  u8 is_add)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  uword *p = hash_get (cm->pool_by_id, pool_id);
+  if (!p)
+    return VNET_API_ERROR_NO_SUCH_ENTRY;
+
+  cgnat_pool_t *pool = pool_elt_at_index (cm->pools, p[0]);
+  u32 fib_index = fib_table_find (FIB_PROTOCOL_IP4, vrf_id);
+  if (fib_index == ~0)
+    fib_index = 0;
+
+  for (u32 i = 0; i < vec_len (pool->inside_prefixes); i++)
+    {
+      cgnat_inside_prefix_entry_t *e = &pool->inside_prefixes[i];
+      if (e->prefix.fp_len == prefix->fp_len &&
+	  e->prefix.fp_addr.ip4.as_u32 == prefix->fp_addr.ip4.as_u32 &&
+	  e->vrf_id == vrf_id)
+	{
+	  if (is_add)
+	    return 0;
+	  vec_del1 (pool->inside_prefixes, i);
+	  return 0;
+	}
+    }
+
+  if (!is_add)
+    return 0;
+
+  cgnat_inside_prefix_entry_t e = {
+    .prefix = *prefix,
+    .vrf_id = vrf_id,
+    .fib_index = fib_index,
+  };
+  vec_add1 (pool->inside_prefixes, e);
   return 0;
 }
 

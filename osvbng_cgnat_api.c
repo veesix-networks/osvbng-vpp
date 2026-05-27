@@ -89,6 +89,14 @@ vl_api_osvbng_cgnat_pool_add_del_inside_prefix_t_handler (
   u8 len = mp->prefix.len;
   u32 vrf_id = ntohl (mp->vrf_id);
 
+  fib_prefix_t pfx;
+  clib_memset (&pfx, 0, sizeof (pfx));
+  pfx.fp_proto = FIB_PROTOCOL_IP4;
+  pfx.fp_len = len;
+  pfx.fp_addr.ip4.as_u32 = base.as_u32;
+
+  rv = cgnat_pool_inside_prefix_add_del (pool_id, &pfx, vrf_id, mp->is_add);
+
   if (mp->is_add && pool->mode == CGNAT_POOL_MODE_DETERMINISTIC)
     {
       cgnat_det_params_t dp;
@@ -321,6 +329,146 @@ vl_api_osvbng_cgnat_subscriber_mapping_dump_t_handler (
       cgnat_pool_t *pool = pool_elt_at_index (cm->pools, m->pool_index);
       if (filter_pool_id == ~0 || pool->pool_id == filter_pool_id)
 	send_subscriber_mapping_details (m, pool->pool_id, reg, mp->context);
+    }
+}
+
+static u32
+count_mappings_for_pool (u32 pool_index)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  u32 n = 0;
+  cgnat_mapping_t *m;
+  pool_foreach (m, cm->mappings)
+    if (m->pool_index == pool_index)
+      n++;
+  return n;
+}
+
+static void
+send_pool_details (cgnat_pool_t *pool, u32 pool_index,
+		   vl_api_registration_t *reg, u32 context)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  vl_api_osvbng_cgnat_pool_details_t *rmp = vl_msg_api_alloc (sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
+
+  rmp->_vl_msg_id =
+    htons (VL_API_OSVBNG_CGNAT_POOL_DETAILS + cm->msg_id_base);
+  rmp->context = context;
+  rmp->pool_id = htonl (pool->pool_id);
+  rmp->mode = (vl_api_osvbng_cgnat_pool_mode_t) pool->mode;
+  rmp->address_pooling =
+    (vl_api_osvbng_cgnat_address_pooling_t) pool->address_pooling;
+  rmp->filtering = (vl_api_osvbng_cgnat_filtering_t) pool->filtering;
+  rmp->block_size = htons (pool->block_size);
+  rmp->max_blocks_per_sub = pool->max_blocks_per_sub;
+  rmp->max_sessions_per_sub = htonl (pool->max_sessions_per_sub);
+  rmp->port_range_start = htons (pool->port_range_start);
+  rmp->port_range_end = htons (pool->port_range_end);
+  rmp->port_reuse_timeout = htons (pool->port_reuse_timeout);
+  rmp->alg_bitmask = pool->alg_bitmask;
+  rmp->timeouts.tcp_established = htonl (pool->timeouts[CGNAT_PROTO_TCP]);
+  rmp->timeouts.tcp_transitory = htonl (pool->timeouts[CGNAT_PROTO_TCP]);
+  rmp->timeouts.udp = htonl (pool->timeouts[CGNAT_PROTO_UDP]);
+  rmp->timeouts.icmp = htonl (pool->timeouts[CGNAT_PROTO_ICMP]);
+  rmp->outside_vrf_table_id = htonl (pool->outside_vrf_table_id);
+  rmp->active_mappings = htonl (count_mappings_for_pool (pool_index));
+
+  vl_api_send_msg (reg, (u8 *) rmp);
+}
+
+static void
+vl_api_osvbng_cgnat_pool_dump_t_handler (vl_api_osvbng_cgnat_pool_dump_t *mp)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  vl_api_registration_t *reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
+
+  u32 filter = ntohl (mp->pool_id);
+  cgnat_pool_t *pool;
+  pool_foreach (pool, cm->pools)
+    if (filter == ~0 || pool->pool_id == filter)
+      send_pool_details (pool, pool - cm->pools, reg, mp->context);
+}
+
+static void
+send_inside_prefix_details (u32 pool_id, cgnat_inside_prefix_entry_t *e,
+			    vl_api_registration_t *reg, u32 context)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  vl_api_osvbng_cgnat_pool_inside_prefix_details_t *rmp =
+    vl_msg_api_alloc (sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
+
+  rmp->_vl_msg_id =
+    htons (VL_API_OSVBNG_CGNAT_POOL_INSIDE_PREFIX_DETAILS + cm->msg_id_base);
+  rmp->context = context;
+  rmp->pool_id = htonl (pool_id);
+  ip_prefix_encode (&e->prefix, &rmp->prefix);
+  rmp->vrf_id = htonl (e->vrf_id);
+
+  vl_api_send_msg (reg, (u8 *) rmp);
+}
+
+static void
+vl_api_osvbng_cgnat_pool_inside_prefix_dump_t_handler (
+  vl_api_osvbng_cgnat_pool_inside_prefix_dump_t *mp)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  vl_api_registration_t *reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
+
+  u32 filter = ntohl (mp->pool_id);
+  cgnat_pool_t *pool;
+  pool_foreach (pool, cm->pools)
+    {
+      if (filter != ~0 && pool->pool_id != filter)
+	continue;
+      for (u32 i = 0; i < vec_len (pool->inside_prefixes); i++)
+	send_inside_prefix_details (pool->pool_id, &pool->inside_prefixes[i],
+				    reg, mp->context);
+    }
+}
+
+static void
+send_outside_address_details (u32 pool_id, fib_prefix_t *pfx,
+			      vl_api_registration_t *reg, u32 context)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  vl_api_osvbng_cgnat_pool_outside_address_details_t *rmp =
+    vl_msg_api_alloc (sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
+
+  rmp->_vl_msg_id =
+    htons (VL_API_OSVBNG_CGNAT_POOL_OUTSIDE_ADDRESS_DETAILS + cm->msg_id_base);
+  rmp->context = context;
+  rmp->pool_id = htonl (pool_id);
+  ip_prefix_encode (pfx, &rmp->prefix);
+
+  vl_api_send_msg (reg, (u8 *) rmp);
+}
+
+static void
+vl_api_osvbng_cgnat_pool_outside_address_dump_t_handler (
+  vl_api_osvbng_cgnat_pool_outside_address_dump_t *mp)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  vl_api_registration_t *reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
+
+  u32 filter = ntohl (mp->pool_id);
+  cgnat_pool_t *pool;
+  pool_foreach (pool, cm->pools)
+    {
+      if (filter != ~0 && pool->pool_id != filter)
+	continue;
+      for (u32 i = 0; i < vec_len (pool->outside_prefixes); i++)
+	send_outside_address_details (pool->pool_id,
+				      &pool->outside_prefixes[i], reg,
+				      mp->context);
     }
 }
 
