@@ -211,7 +211,8 @@ VLIB_NODE_FN (cgnat_in2out_node)
 		}
 
 	      s0 = cgnat_session_create (m0, &ip0->dst_address, dst_port0,
-					 proto0, outside_port0, now);
+					 proto0, outside_port0, src_port0,
+					 now);
 	      if (PREDICT_FALSE (!s0))
 		{
 		  cgnat_port_free (m0, outside_port0);
@@ -222,7 +223,6 @@ VLIB_NODE_FN (cgnat_in2out_node)
 		  goto trace;
 		}
 
-	      s0->inside_port = src_port0;
 	      pkts_created++;
 	      trace_action = CGNAT_TRACE_CREATED;
 	    }

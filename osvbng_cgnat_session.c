@@ -114,7 +114,8 @@ cgnat_port_free (cgnat_mapping_t *m, u16 port)
 
 cgnat_session_t *
 cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
-		      u16 remote_port, u8 proto, u16 outside_port, f64 now)
+		      u16 remote_port, u8 proto, u16 outside_port,
+		      u16 inside_port, f64 now)
 {
   cgnat_main_t *cm = &cgnat_main;
   cgnat_pool_t *pool = pool_elt_at_index (cm->pools, mapping->pool_index);
@@ -129,7 +130,7 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
   s->inside_ip.as_u32 = mapping->inside_ip.as_u32;
   s->outside_ip.as_u32 = mapping->outside_ip.as_u32;
   s->remote_ip.as_u32 = remote_ip->as_u32;
-  s->inside_port = 0;
+  s->inside_port = inside_port;
   s->outside_port = clib_host_to_net_u16 (outside_port);
   s->remote_port = remote_port;
   s->proto = proto;

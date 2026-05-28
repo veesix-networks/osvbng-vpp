@@ -281,7 +281,8 @@ int cgnat_pool_update (u32 pool_id, u32 max_sessions, u8 alg_bitmask,
 cgnat_session_t *cgnat_session_create (cgnat_mapping_t *mapping,
 				       ip4_address_t *remote_ip,
 				       u16 remote_port, u8 proto,
-				       u16 outside_port, f64 now);
+				       u16 outside_port, u16 inside_port,
+				       f64 now);
 cgnat_session_t *cgnat_session_lookup_in2out (ip4_address_t *src_ip,
 					      ip4_address_t *dst_ip,
 					      u16 src_port, u16 dst_port,
