@@ -170,6 +170,18 @@ VLIB_NODE_FN (cgnat_in2out_node)
 	      goto trace;
 	    }
 
+	  /* Skip translation when dst is a local-receive address in this FIB
+	   * (subscriber default gateway, BNG loopback, broadcast). Let
+	   * ip4-lookup deliver to the receive DPO so LCP punts to Linux. */
+	  if (PREDICT_FALSE (
+		cgnat_is_local_receive (fib_index0, &ip0->dst_address)))
+	    {
+	      trace_action = CGNAT_TRACE_BYPASSED;
+	      vnet_feature_next (&next0, b0);
+	      pkts_bypassed++;
+	      goto trace;
+	    }
+
 	  /* Find subscriber mapping */
 	  m0 = cgnat_mapping_lookup (&ip0->src_address, fib_index0);
 	  if (PREDICT_FALSE (!m0))

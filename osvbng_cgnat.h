@@ -20,7 +20,10 @@
 #include <vnet/fib/fib_table.h>
 #include <vnet/fib/fib_entry.h>
 #include <vnet/fib/fib_source.h>
+#include <vnet/fib/ip4_fib.h>
 #include <vnet/dpo/dpo.h>
+#include <vnet/dpo/load_balance.h>
+#include <vnet/dpo/receive_dpo.h>
 #include <vlib/vlib.h>
 
 #define CGNAT_ALG_FTP  (1 << 0)
@@ -312,6 +315,20 @@ cgnat_mapping_lookup (ip4_address_t *inside_ip, u32 fib_index)
   if (clib_bihash_search_inline_8_8 (&cm->inside_lookup, &kv) == 0)
     return pool_elt_at_index (cm->mappings, (u32) kv.value);
   return NULL;
+}
+
+/* Fast-path check: does `dst` resolve to a local-receive DPO in `fib_index`?
+ * Used by cgnat-in2out to skip translation for packets aimed at a BNG-owned
+ * address (subscriber default gateway, loopback, subnet/global broadcast,
+ * etc.) so they fall through to ip4-lookup → receive → punt-to-LCP instead
+ * of being NAT'd and shipped upstream into the void. */
+always_inline int
+cgnat_is_local_receive (u32 fib_index, ip4_address_t *dst)
+{
+  u32 lbi = ip4_fib_forwarding_lookup (fib_index, dst);
+  const load_balance_t *lb = load_balance_get (lbi);
+  const dpo_id_t *dpo = load_balance_get_bucket_i (lb, 0);
+  return dpo->dpoi_type == DPO_RECEIVE;
 }
 
 always_inline int
