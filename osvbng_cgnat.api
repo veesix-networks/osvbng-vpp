@@ -315,6 +315,86 @@ define osvbng_cgnat_pool_outside_address_details
   vl_api_prefix_t prefix;
 };
 
+/** \brief Dump active CGNAT sessions (translations), filtered and windowed.
+
+    All filter fields are optional: a zero/empty value means "do not filter on
+    this field". Sentinels: 0.0.0.0 for IPs, 0 for ports/proto/pool_id (port 0
+    is reserved and pool_id 0 is not used by deployments).
+
+    Ports are presented host-order on the wire (the session struct stores them
+    network-order; the handler converts). For ICMP, inside_port/outside_port
+    carry the ICMP identifier and remote_port is 0.
+
+    The plugin both filters and windows: the walk resumes from start_index (a
+    session pool index) and emits at most `limit` matches, each carrying its own
+    session_index so the caller can resume the next page. limit 0 means the
+    plugin default (CGNAT_SESSION_DUMP_DEFAULT_LIMIT).
+
+    @param inside_ip - filter on subscriber address (0.0.0.0 = any)
+    @param outside_ip - filter on translated address (0.0.0.0 = any)
+    @param remote_ip - filter on remote peer address (0.0.0.0 = any)
+    @param inside_port - filter on subscriber port (0 = any; host-order)
+    @param outside_port - filter on translated port (0 = any; host-order)
+    @param remote_port - filter on remote port (0 = any; host-order)
+    @param proto - filter on IP protocol, IP_PROTOCOL_* (0 = any)
+    @param pool_id - filter on pool (0 = any)
+    @param start_index - resume cursor; session pool index to start from (0 = begin)
+    @param limit - max sessions to emit this page (0 = plugin default)
+*/
+define osvbng_cgnat_session_dump
+{
+  u32 client_index;
+  u32 context;
+
+  vl_api_ip4_address_t inside_ip;
+  vl_api_ip4_address_t outside_ip;
+  vl_api_ip4_address_t remote_ip;
+  u16 inside_port;
+  u16 outside_port;
+  u16 remote_port;
+  u8 proto;
+  u32 pool_id;
+  u32 start_index;
+  u32 limit;
+};
+
+/** \brief One active CGNAT session. Ports host-order; age is seconds since the
+    session was last active (computed at dump time). */
+define osvbng_cgnat_session_details
+{
+  u32 context;
+  u32 session_index;
+  u32 pool_id;
+  vl_api_ip4_address_t inside_ip;
+  vl_api_ip4_address_t outside_ip;
+  vl_api_ip4_address_t remote_ip;
+  u16 inside_port;
+  u16 outside_port;
+  u16 remote_port;
+  u8 proto;
+  u8 alg_flags;
+  u32 inside_fib_index;
+  u32 mapping_index;
+  f64 age;
+  u32 timeout;
+  u64 total_pkts;
+  u64 total_bytes;
+};
+
+/** \brief Count active CGNAT sessions (global, O(1) — no table walk). */
+define osvbng_cgnat_session_count
+{
+  u32 client_index;
+  u32 context;
+};
+
+define osvbng_cgnat_session_count_reply
+{
+  u32 context;
+  i32 retval;
+  u64 total;
+};
+
 /*
  * Local Variables:
  * eval: (c-set-style "gnu")

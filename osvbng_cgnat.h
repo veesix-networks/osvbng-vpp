@@ -39,6 +39,8 @@
 #define CGNAT_PROTO_OTHER 3
 #define CGNAT_N_PROTOS 4
 
+#define CGNAT_SESSION_DUMP_DEFAULT_LIMIT 1024
+
 typedef enum
 {
   CGNAT_POOL_MODE_PBA = 0,
