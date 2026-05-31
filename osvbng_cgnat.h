@@ -601,6 +601,23 @@ cgnat_set_tcp_session_state (cgnat_session_t *s, cgnat_pool_t *pool,
   s->timeout = cgnat_session_timeout_for_tcp (pool, s->tcp_state);
 }
 
+/* Find the det_params entry on `pool` that covers `inside_ip`. Walks pool
+ * det_params (usually 1-2 entries — one per inside prefix). Returns NULL on
+ * miss (operator hasn't configured a covering inside prefix yet). */
+always_inline cgnat_det_params_t *
+cgnat_det_lookup_params_inside (cgnat_pool_t *pool, ip4_address_t *inside_ip)
+{
+  u32 ip_h = clib_net_to_host_u32 (inside_ip->as_u32);
+  for (u32 i = 0; i < pool->n_det_params; i++)
+    {
+      cgnat_det_params_t *dp = &pool->det_params[i];
+      u32 base_h = clib_net_to_host_u32 (dp->inside_base.as_u32);
+      if (ip_h >= base_h && ip_h < base_h + dp->inside_count)
+	return dp;
+    }
+  return NULL;
+}
+
 always_inline int
 cgnat_det_forward (cgnat_det_params_t *dp, ip4_address_t *inside_ip,
 		   ip4_address_t *outside_ip_out, u16 *port_start_out,

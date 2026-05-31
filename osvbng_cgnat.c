@@ -240,11 +240,40 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
     return VNET_API_ERROR_NO_SUCH_ENTRY;
 
   u32 pool_index = p[0];
+  cgnat_pool_t *pool = pool_elt_at_index (cm->pools, pool_index);
 
   u32 fib_index =
     fib_table_find (FIB_PROTOCOL_IP4, inside_vrf_id);
   if (fib_index == ~0)
     fib_index = 0;
+
+  /* Deterministic mode: override operator-provided outside_ip and port range
+   * with the algorithmic mapping from the matching det_params entry. The
+   * operator only has to pick the inside_ip; the algorithm picks the rest
+   * (RFC 7422). PBA pools use operator-provided values as before. */
+  ip4_address_t det_outside_ip = *outside_ip;
+  u16 det_port_start = port_start;
+  u16 det_port_end = port_end;
+  if (is_add && pool->mode == CGNAT_POOL_MODE_DETERMINISTIC)
+    {
+      cgnat_det_params_t *dp =
+	cgnat_det_lookup_params_inside (pool, inside_ip);
+      if (!dp)
+	{
+	  vlib_log_err (
+	    cm->log_class,
+	    "mapping %U: deterministic pool %u has no det_params covering this "
+	    "inside IP (operator must add the inside prefix first)",
+	    format_ip4_address, inside_ip, pool_id);
+	  return VNET_API_ERROR_NO_SUCH_ENTRY;
+	}
+      if (cgnat_det_forward (dp, inside_ip, &det_outside_ip, &det_port_start,
+			     &det_port_end))
+	return VNET_API_ERROR_NO_SUCH_ENTRY;
+      outside_ip = &det_outside_ip;
+      port_start = det_port_start;
+      port_end = det_port_end;
+    }
 
   if (is_add)
     {
