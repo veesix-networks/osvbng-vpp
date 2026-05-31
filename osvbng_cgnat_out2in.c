@@ -72,7 +72,7 @@ cgnat_out2in_ports_from_reass (vlib_buffer_t *b0, ip4_header_t *ip0,
     return CGNAT_ERROR_NO_REASS_METADATA;
 
   if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.is_non_first_fragment))
-    return CGNAT_ERROR_FRAGMENT_DROP;
+    return CGNAT_ERROR_FRAGMENT_DROP;  /* sentinel — caller routes to slow */
 
   if (proto0 == IP_PROTOCOL_TCP || proto0 == IP_PROTOCOL_UDP)
     {
@@ -192,11 +192,14 @@ VLIB_NODE_FN (cgnat_out2in_node)
 						      &src_port0, &dst_port0);
 	    if (PREDICT_FALSE (rerr))
 	      {
-		next0 = CGNAT_OUT2IN_NEXT_DROP;
 		if (rerr == CGNAT_ERROR_FRAGMENT_DROP)
-		  pkts_frag_drop++;
-		else
-		  pkts_no_reass++;
+		  {
+		    next0 = CGNAT_OUT2IN_NEXT_SLOWPATH;
+		    pkts_slowpath++;
+		    goto trace;
+		  }
+		next0 = CGNAT_OUT2IN_NEXT_DROP;
+		pkts_no_reass++;
 		pkts_dropped++;
 		b0->error = node->errors[rerr];
 		goto trace;
@@ -302,15 +305,38 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 	  proto0 = ip0->protocol;
 
+	  /* Non-first fragment: IP-only rewrite via aux fragment record.
+	   * Out2in packet has src=remote, dst=outside_ip; the aux key was
+	   * installed under (remote, outside, proto, outside_fib). */
+	  if (PREDICT_FALSE (
+		vnet_buffer (b0)->ip.reass.is_non_first_fragment))
+	    {
+	      u32 fib_index0 = vec_elt (ip4_main.fib_index_by_sw_if_index,
+					sw_if_index0);
+	      cgnat_frag_rewrite_t *fr = cgnat_frag_rewrite_lookup (
+		ip0->src_address, ip0->dst_address, proto0, fib_index0);
+	      if (PREDICT_FALSE (!fr))
+		{
+		  next0 = CGNAT_OUT2IN_NEXT_DROP;
+		  pkts_frag_drop++;
+		  pkts_dropped++;
+		  b0->error = node->errors[CGNAT_ERROR_FRAGMENT_DROP];
+		  goto enqueue;
+		}
+	      ip0->dst_address = fr->inside_ip;
+	      ip0->checksum = ip_csum_fold (
+		ip_csum_add_even (ip0->checksum, fr->l3_csum_delta_o2i));
+	      vnet_buffer (b0)->sw_if_index[VLIB_TX] = fr->inside_fib_index;
+	      next0 = CGNAT_OUT2IN_NEXT_LOOKUP;
+	      goto enqueue;
+	    }
+
 	  {
 	    int rerr = cgnat_out2in_ports_from_reass (b0, ip0, proto0,
 						      &src_port0, &dst_port0);
 	    if (PREDICT_FALSE (rerr))
 	      {
-		if (rerr == CGNAT_ERROR_FRAGMENT_DROP)
-		  pkts_frag_drop++;
-		else
-		  pkts_no_reass++;
+		pkts_no_reass++;
 		pkts_dropped++;
 		b0->error = node->errors[rerr];
 		goto enqueue;

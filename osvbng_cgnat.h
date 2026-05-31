@@ -145,17 +145,43 @@ typedef struct
 
   /* Line 2: written on every translated packet (bookkeeping). Separate cache
    * line keeps the read-mostly flow records out of the dirty-line write set.
-   * 8 + 8 + 8 + 8 + 2 + 30 = 64. */
+   * frag_rewrite_index is an O(1) back-pointer into cm->frag_rewrite_pool so
+   * session_delete can refcount-down without re-keying the aux bihash.
+   * 8 + 8 + 8 + 8 + 4 + 2 + 26 = 64. */
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline2);
   f64 last_active;
   u64 total_pkts;
   u64 total_bytes;
   f64 timeout;
+  u32 frag_rewrite_index;
   u8 tcp_flags[2];
-  u8 _pad2[30];
+  u8 _pad2[26];
 } cgnat_session_t;
 
 STATIC_ASSERT_SIZEOF (cgnat_session_t, 192);
+
+/* Refcounted IP-only rewrite record for non-first fragments. The aux bihash
+ * (cm->frag_aux) is keyed on (saddr, daddr, proto, fib_index) and resolves
+ * to one of these in cm->frag_rewrite_pool. Refcount tracks how many sessions
+ * share the same (saddr, daddr, proto, fib); session_create increments,
+ * session_delete decrements + evicts at zero so a non-first fragment can
+ * always find a live rewrite record while ANY sibling session is alive. */
+/* Slowpath-only record, no cache-line alignment needed (accessed only on the
+ * fragment slow path which is rare; alignment optimisation would just waste
+ * 24 bytes per entry). */
+typedef struct
+{
+  ip_csum_t l3_csum_delta_i2o;
+  ip_csum_t l3_csum_delta_o2i;
+  ip4_address_t inside_ip;
+  ip4_address_t outside_ip;
+  u32 inside_fib_index;
+  u32 outside_fib_index;
+  u32 refcount;
+  u32 _pad0;
+} cgnat_frag_rewrite_t;
+
+STATIC_ASSERT_SIZEOF (cgnat_frag_rewrite_t, 40);
 
 /* Inline read accessors derive #151 wire-compatible field names from the new
  * two-flow-record layout. Writers (cgnat_session_create) touch flow fields
@@ -345,6 +371,13 @@ typedef struct
   clib_bihash_16_8_t session_table_in2out;
   clib_bihash_16_8_t session_table_out2in;
 
+  /* Fragment rewrite pool + aux lookup (D14). bihash_16_8 keyed on
+   * (saddr, daddr, proto, fib_index) — same shape as the session tables so
+   * collisions only occur on the true (saddr,daddr,proto,fib) equivalence
+   * class, NOT cross-VRF subscribers happening to share an inside IP. */
+  cgnat_frag_rewrite_t *frag_rewrite_pool;
+  clib_bihash_16_8_t frag_aux;
+
   cgnat_bypass_entry_t *bypass_entries;
   u32 bypass_entry_count;
   fib_source_t bypass_fib_src;
@@ -401,6 +434,12 @@ u16 cgnat_port_alloc (cgnat_mapping_t *m, f64 now);
 void cgnat_port_free (cgnat_mapping_t *m, u16 port);
 void cgnat_session_expire_walk (vlib_main_t *vm, f64 now);
 void cgnat_session_table_init (void);
+
+/* Aux fragment rewrite record lookup for non-first fragments. Returns NULL
+ * on miss (drop with FRAGMENT_DROP at the caller). */
+cgnat_frag_rewrite_t *cgnat_frag_rewrite_lookup (ip4_address_t saddr,
+						 ip4_address_t daddr,
+						 u8 proto, u32 fib_index);
 
 always_inline cgnat_mapping_t *
 cgnat_mapping_lookup (ip4_address_t *inside_ip, u32 fib_index)

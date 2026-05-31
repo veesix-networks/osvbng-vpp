@@ -35,6 +35,147 @@ cgnat_session_table_init (void)
 
   clib_bihash_init_16_8 (&cm->session_table_out2in, "cgnat sessions out2in",
 			  64 * 1024, 64 << 20);
+
+  /* Aux fragment rewrite bihash (D14). Smaller than the session tables —
+   * one entry per (saddr, daddr, proto, fib) equivalence class, not per
+   * flow. 16k buckets / 16MB is comfortably oversized for the typical CGN
+   * destination cardinality. */
+  clib_bihash_init_16_8 (&cm->frag_aux, "cgnat frag-aux rewrite", 16 * 1024,
+			 16 << 20);
+}
+
+static inline void
+cgnat_frag_make_key (cgnat_session_key_t *key, u32 saddr, u32 daddr, u8 proto,
+		     u32 fib_index)
+{
+  key->src_ip.as_u32 = saddr;
+  key->dst_ip.as_u32 = daddr;
+  key->src_port = 0;
+  key->dst_port = 0;
+  key->proto = proto;
+  key->_pad = 0;
+  key->fib_index_lo16 = (u16) fib_index;
+}
+
+cgnat_frag_rewrite_t *
+cgnat_frag_rewrite_lookup (ip4_address_t saddr, ip4_address_t daddr, u8 proto,
+			   u32 fib_index)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  clib_bihash_kv_16_8_t kv;
+  cgnat_session_key_t key;
+
+  cgnat_frag_make_key (&key, saddr.as_u32, daddr.as_u32, proto, fib_index);
+  clib_memcpy (&kv.key, &key, 16);
+
+  if (clib_bihash_search_inline_16_8 (&cm->frag_aux, &kv) == 0)
+    return pool_elt_at_index (cm->frag_rewrite_pool, (u32) kv.value);
+
+  return NULL;
+}
+
+/* Refcount-install an aux rewrite record for (saddr, daddr, proto, fib).
+ * Returns the pool index — caller (cgnat_session_create) stashes it on the
+ * session for O(1) decrement at delete. */
+static u32
+cgnat_frag_rewrite_acquire (ip4_address_t inside_ip, ip4_address_t outside_ip,
+			    ip4_address_t remote_ip, u8 proto, u32 inside_fib,
+			    u32 outside_fib)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  cgnat_frag_rewrite_t *r;
+
+  /* Look up by i2o-side key first (inside → remote). */
+  r = cgnat_frag_rewrite_lookup (inside_ip, remote_ip, proto, inside_fib);
+  if (r)
+    {
+      r->refcount++;
+      return r - cm->frag_rewrite_pool;
+    }
+
+  /* Allocate + install both directions' aux entries (in2out and out2in
+   * fragments arrive on opposite interfaces; both need a key). */
+  pool_get_zero (cm->frag_rewrite_pool, r);
+  u32 idx = r - cm->frag_rewrite_pool;
+  r->inside_ip = inside_ip;
+  r->outside_ip = outside_ip;
+  r->inside_fib_index = inside_fib;
+  r->outside_fib_index = outside_fib;
+
+  ip_csum_t l3_i2o = 0;
+  l3_i2o = ip_csum_sub_even (l3_i2o, inside_ip.as_u32);
+  l3_i2o = ip_csum_add_even (l3_i2o, outside_ip.as_u32);
+  r->l3_csum_delta_i2o = l3_i2o;
+
+  ip_csum_t l3_o2i = 0;
+  l3_o2i = ip_csum_sub_even (l3_o2i, outside_ip.as_u32);
+  l3_o2i = ip_csum_add_even (l3_o2i, inside_ip.as_u32);
+  r->l3_csum_delta_o2i = l3_o2i;
+
+  r->refcount = 1;
+
+  /* In2out fragment key: (inside_ip, remote_ip, proto, inside_fib). */
+  {
+    clib_bihash_kv_16_8_t kv;
+    cgnat_session_key_t key;
+    cgnat_frag_make_key (&key, inside_ip.as_u32, remote_ip.as_u32, proto,
+			 inside_fib);
+    clib_memcpy (&kv.key, &key, 16);
+    kv.value = idx;
+    clib_bihash_add_del_16_8 (&cm->frag_aux, &kv, 1);
+  }
+
+  /* Out2in fragment key: (remote_ip, outside_ip, proto, outside_fib).
+   * Note saddr/daddr ordering matches the way out2in lookups present them
+   * (packet's actual src/dst — remote in src slot, outside_ip in dst slot). */
+  {
+    clib_bihash_kv_16_8_t kv;
+    cgnat_session_key_t key;
+    cgnat_frag_make_key (&key, remote_ip.as_u32, outside_ip.as_u32, proto,
+			 outside_fib);
+    clib_memcpy (&kv.key, &key, 16);
+    kv.value = idx;
+    clib_bihash_add_del_16_8 (&cm->frag_aux, &kv, 1);
+  }
+
+  return idx;
+}
+
+static void
+cgnat_frag_rewrite_release (u32 frag_rewrite_index, ip4_address_t remote_ip,
+			    u8 proto)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  if (pool_is_free_index (cm->frag_rewrite_pool, frag_rewrite_index))
+    return;
+
+  cgnat_frag_rewrite_t *r =
+    pool_elt_at_index (cm->frag_rewrite_pool, frag_rewrite_index);
+  if (r->refcount > 1)
+    {
+      r->refcount--;
+      return;
+    }
+
+  /* Last reference — evict both directions from the aux bihash. */
+  {
+    clib_bihash_kv_16_8_t kv;
+    cgnat_session_key_t key;
+    cgnat_frag_make_key (&key, r->inside_ip.as_u32, remote_ip.as_u32, proto,
+			 r->inside_fib_index);
+    clib_memcpy (&kv.key, &key, 16);
+    clib_bihash_add_del_16_8 (&cm->frag_aux, &kv, 0);
+  }
+  {
+    clib_bihash_kv_16_8_t kv;
+    cgnat_session_key_t key;
+    cgnat_frag_make_key (&key, remote_ip.as_u32, r->outside_ip.as_u32, proto,
+			 r->outside_fib_index);
+    clib_memcpy (&kv.key, &key, 16);
+    clib_bihash_add_del_16_8 (&cm->frag_aux, &kv, 0);
+  }
+
+  pool_put (cm->frag_rewrite_pool, r);
 }
 
 cgnat_session_t *
@@ -196,6 +337,12 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
   s->last_active = now;
   s->timeout = cgnat_session_timeout (pool, cgnat_proto_from_ip (proto));
 
+  /* Refcount-acquire the aux fragment rewrite record. Non-first fragments
+   * (which have no L4 header) fall back to this record for IP-only rewrite. */
+  s->frag_rewrite_index = cgnat_frag_rewrite_acquire (
+    mapping->inside_ip, mapping->outside_ip, *remote_ip, proto,
+    mapping->inside_fib_index, out_fib);
+
   if (pool->alg_bitmask)
     {
       u8 cgnat_proto = cgnat_proto_from_ip (proto);
@@ -286,6 +433,10 @@ cgnat_session_delete (cgnat_session_t *s)
   }
 
   cgnat_port_free (m, clib_net_to_host_u16 (s->i2o.rewrite_sport));
+
+  /* Refcount-release the aux fragment rewrite record; evict if last. */
+  cgnat_frag_rewrite_release (s->frag_rewrite_index, s->i2o.daddr,
+			      s->i2o.proto);
 
   if (m->session_count > 0)
     m->session_count--;

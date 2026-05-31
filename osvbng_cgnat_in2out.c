@@ -114,10 +114,10 @@ cgnat_in2out_ports_from_reass (vlib_buffer_t *b0, ip4_header_t *ip0, u8 proto0,
   if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.l4_hdr_truncated))
     return CGNAT_ERROR_NO_REASS_METADATA;
 
-  /* Non-first fragments have no L4 header. Phase 4 replaces this drop with
-   * a refcounted aux-key lookup. */
+  /* Non-first fragments have no L4 header — caller hands off to the slow
+   * node which does an IP-only rewrite via the aux fragment record. */
   if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.is_non_first_fragment))
-    return CGNAT_ERROR_FRAGMENT_DROP;
+    return CGNAT_ERROR_FRAGMENT_DROP;  /* sentinel — caller routes to slow */
 
   if (proto0 == IP_PROTOCOL_TCP || proto0 == IP_PROTOCOL_UDP)
     {
@@ -246,12 +246,18 @@ VLIB_NODE_FN (cgnat_in2out_node)
 						      &src_port0, &dst_port0);
 	    if (PREDICT_FALSE (rerr))
 	      {
+		if (rerr == CGNAT_ERROR_FRAGMENT_DROP)
+		  {
+		    /* Non-first fragment — slow node does the IP-only
+		     * rewrite via aux fragment record lookup. */
+		    next0 = CGNAT_IN2OUT_NEXT_SLOWPATH;
+		    trace_action = CGNAT_TRACE_SLOWPATH;
+		    pkts_slowpath++;
+		    goto trace;
+		  }
 		trace_action = CGNAT_TRACE_DROPPED;
 		next0 = CGNAT_IN2OUT_NEXT_DROP;
-		if (rerr == CGNAT_ERROR_FRAGMENT_DROP)
-		  pkts_frag_drop++;
-		else
-		  pkts_no_reass++;
+		pkts_no_reass++;
 		b0->error = node->errors[rerr];
 		goto trace;
 	      }
@@ -420,6 +426,33 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 	  proto0 = ip0->protocol;
 
+	  u32 fib_index0 =
+	    vec_elt (ip4_main.fib_index_by_sw_if_index, sw_if_index0);
+
+	  /* Non-first fragment: IP-only rewrite via aux fragment record.
+	   * No port extraction needed (the fragment has no L4 header). */
+	  if (PREDICT_FALSE (
+		vnet_buffer (b0)->ip.reass.is_non_first_fragment))
+	    {
+	      cgnat_frag_rewrite_t *fr = cgnat_frag_rewrite_lookup (
+		ip0->src_address, ip0->dst_address, proto0, fib_index0);
+	      if (PREDICT_FALSE (!fr))
+		{
+		  trace_action = CGNAT_TRACE_DROPPED;
+		  next0 = CGNAT_IN2OUT_NEXT_DROP;
+		  pkts_frag_drop++;
+		  b0->error = node->errors[CGNAT_ERROR_FRAGMENT_DROP];
+		  goto trace;
+		}
+	      ip0->src_address = fr->outside_ip;
+	      ip0->checksum = ip_csum_fold (
+		ip_csum_add_even (ip0->checksum, fr->l3_csum_delta_i2o));
+	      vnet_buffer (b0)->sw_if_index[VLIB_TX] = fr->outside_fib_index;
+	      pkts_translated++;
+	      trace_action = CGNAT_TRACE_TRANSLATED;
+	      goto trace;
+	    }
+
 	  {
 	    int rerr = cgnat_in2out_ports_from_reass (b0, ip0, proto0,
 						      &src_port0, &dst_port0);
@@ -427,17 +460,11 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 	      {
 		trace_action = CGNAT_TRACE_DROPPED;
 		next0 = CGNAT_IN2OUT_NEXT_DROP;
-		if (rerr == CGNAT_ERROR_FRAGMENT_DROP)
-		  pkts_frag_drop++;
-		else
-		  pkts_no_reass++;
+		pkts_no_reass++;
 		b0->error = node->errors[rerr];
 		goto trace;
 	      }
 	  }
-
-	  u32 fib_index0 =
-	    vec_elt (ip4_main.fib_index_by_sw_if_index, sw_if_index0);
 
 	  /* Re-lookup the mapping. The fast path already verified it existed,
 	   * but mappings can be deleted between the fast-path lookup and the
