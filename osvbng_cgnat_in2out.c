@@ -569,7 +569,7 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 
 	      s0 = cgnat_session_create (m0, &ip0->dst_address, dst_port0,
 					 proto0, outside_port0, src_port0,
-					 now);
+					 now, vm->thread_index);
 	      if (PREDICT_FALSE (!s0))
 		{
 		  if (needs_port)

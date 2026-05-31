@@ -42,6 +42,15 @@ cgnat_session_table_init (void)
    * destination cardinality. */
   clib_bihash_init_16_8 (&cm->frag_aux, "cgnat frag-aux rewrite", 16 * 1024,
 			 16 << 20);
+
+  clib_spinlock_init (&cm->frag_rewrite_lock);
+
+  /* Per-thread state allocation. At INIT time vlib_num_workers() may still
+   * return 0 (workers spawn after init); size for at least the main thread
+   * here so single-worker deployments work. Commit 2 of the multi-worker
+   * amendment moves this to a VLIB_MAIN_LOOP_ENTER_FUNCTION that resizes
+   * to vlib_num_workers() + 1 once all workers exist. */
+  vec_validate_aligned (cm->per_thread_data, 0, CLIB_CACHE_LINE_BYTES);
 }
 
 static inline void
@@ -68,6 +77,11 @@ cgnat_frag_rewrite_lookup (ip4_address_t saddr, ip4_address_t daddr, u8 proto,
   cgnat_frag_make_key (&key, saddr.as_u32, daddr.as_u32, proto, fib_index);
   clib_memcpy (&kv.key, &key, 16);
 
+  /* aux frag_rewrite_pool is shared across workers — readers are safe under
+   * concurrent allocation because pool_elt_at_index is a vec-index + base
+   * pointer load (pool_get may realloc on grow but bihash insert is gated
+   * by per-bucket lock, ordering the realloc-then-bihash-insert so the
+   * lookup sees a consistent state). */
   if (clib_bihash_search_inline_16_8 (&cm->frag_aux, &kv) == 0)
     return pool_elt_at_index (cm->frag_rewrite_pool, (u32) kv.value);
 
@@ -76,7 +90,11 @@ cgnat_frag_rewrite_lookup (ip4_address_t saddr, ip4_address_t daddr, u8 proto,
 
 /* Refcount-install an aux rewrite record for (saddr, daddr, proto, fib).
  * Returns the pool index — caller (cgnat_session_create) stashes it on the
- * session for O(1) decrement at delete. */
+ * session for O(1) decrement at delete. Serialised under frag_rewrite_lock
+ * because two workers may race to create sessions sharing the same aux
+ * tuple; pool_get can realloc and the refcount must be atomic with the
+ * insert. The lock is on the slow path only (one acquire per new session)
+ * so contention is microscopic. */
 static u32
 cgnat_frag_rewrite_acquire (ip4_address_t inside_ip, ip4_address_t outside_ip,
 			    ip4_address_t remote_ip, u8 proto, u32 inside_fib,
@@ -84,19 +102,23 @@ cgnat_frag_rewrite_acquire (ip4_address_t inside_ip, ip4_address_t outside_ip,
 {
   cgnat_main_t *cm = &cgnat_main;
   cgnat_frag_rewrite_t *r;
+  u32 idx;
 
-  /* Look up by i2o-side key first (inside → remote). */
+  clib_spinlock_lock (&cm->frag_rewrite_lock);
+
   r = cgnat_frag_rewrite_lookup (inside_ip, remote_ip, proto, inside_fib);
   if (r)
     {
       r->refcount++;
-      return r - cm->frag_rewrite_pool;
+      idx = r - cm->frag_rewrite_pool;
+      clib_spinlock_unlock (&cm->frag_rewrite_lock);
+      return idx;
     }
 
   /* Allocate + install both directions' aux entries (in2out and out2in
    * fragments arrive on opposite interfaces; both need a key). */
   pool_get_zero (cm->frag_rewrite_pool, r);
-  u32 idx = r - cm->frag_rewrite_pool;
+  idx = r - cm->frag_rewrite_pool;
   r->inside_ip = inside_ip;
   r->outside_ip = outside_ip;
   r->inside_fib_index = inside_fib;
@@ -138,6 +160,7 @@ cgnat_frag_rewrite_acquire (ip4_address_t inside_ip, ip4_address_t outside_ip,
     clib_bihash_add_del_16_8 (&cm->frag_aux, &kv, 1);
   }
 
+  clib_spinlock_unlock (&cm->frag_rewrite_lock);
   return idx;
 }
 
@@ -146,14 +169,21 @@ cgnat_frag_rewrite_release (u32 frag_rewrite_index, ip4_address_t remote_ip,
 			    u8 proto)
 {
   cgnat_main_t *cm = &cgnat_main;
+
+  clib_spinlock_lock (&cm->frag_rewrite_lock);
+
   if (pool_is_free_index (cm->frag_rewrite_pool, frag_rewrite_index))
-    return;
+    {
+      clib_spinlock_unlock (&cm->frag_rewrite_lock);
+      return;
+    }
 
   cgnat_frag_rewrite_t *r =
     pool_elt_at_index (cm->frag_rewrite_pool, frag_rewrite_index);
   if (r->refcount > 1)
     {
       r->refcount--;
+      clib_spinlock_unlock (&cm->frag_rewrite_lock);
       return;
     }
 
@@ -176,6 +206,25 @@ cgnat_frag_rewrite_release (u32 frag_rewrite_index, ip4_address_t remote_ip,
   }
 
   pool_put (cm->frag_rewrite_pool, r);
+  clib_spinlock_unlock (&cm->frag_rewrite_lock);
+}
+
+/* Resolve a packed bihash value into a session pointer in the owning
+ * thread's per-thread pool. Safe to call from any worker — pool_elt_at_index
+ * is a vec-index + base load; concurrent pool_get on the owning thread
+ * doesn't realloc on top of an active index. */
+always_inline cgnat_session_t *
+cgnat_session_from_value (u64 value)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  u32 ti = cgnat_value_thread_index (value);
+  u32 si = cgnat_value_entry_index (value);
+  if (PREDICT_FALSE (ti >= vec_len (cm->per_thread_data)))
+    return NULL;
+  cgnat_per_thread_data_t *tsm = vec_elt_at_index (cm->per_thread_data, ti);
+  if (PREDICT_FALSE (pool_is_free_index (tsm->sessions, si)))
+    return NULL;
+  return pool_elt_at_index (tsm->sessions, si);
 }
 
 cgnat_session_t *
@@ -192,7 +241,7 @@ cgnat_session_lookup_in2out (ip4_address_t *src_ip, ip4_address_t *dst_ip,
   clib_memcpy (&kv.key, &key, 16);
 
   if (clib_bihash_search_inline_16_8 (&cm->session_table_in2out, &kv) == 0)
-    return pool_elt_at_index (cm->sessions, (u32) kv.value);
+    return cgnat_session_from_value (kv.value);
 
   return NULL;
 }
@@ -211,7 +260,7 @@ cgnat_session_lookup_out2in (ip4_address_t *dst_ip, ip4_address_t *src_ip,
   clib_memcpy (&kv.key, &key, 16);
 
   if (clib_bihash_search_inline_16_8 (&cm->session_table_out2in, &kv) == 0)
-    return pool_elt_at_index (cm->sessions, (u32) kv.value);
+    return cgnat_session_from_value (kv.value);
 
   return NULL;
 }
@@ -280,17 +329,20 @@ cgnat_flow_csum_calc (cgnat_flow_t *f, u32 old_addr, u32 new_addr, u16 old_port,
 cgnat_session_t *
 cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
 		      u16 remote_port, u8 proto, u16 outside_port,
-		      u16 inside_port, f64 now)
+		      u16 inside_port, f64 now, u32 thread_index)
 {
   cgnat_main_t *cm = &cgnat_main;
   cgnat_pool_t *pool = pool_elt_at_index (cm->pools, mapping->pool_index);
+  cgnat_per_thread_data_t *tsm =
+    vec_elt_at_index (cm->per_thread_data, thread_index);
 
   if (mapping->session_count >= pool->max_sessions_per_sub)
     return NULL;
 
   cgnat_session_t *s;
-  pool_get_zero (cm->sessions, s);
-  u32 session_index = s - cm->sessions;
+  pool_get_zero (tsm->sessions, s);
+  u32 session_index = s - tsm->sessions;
+  s->thread_index = thread_index;
 
   u16 outside_port_n = clib_host_to_net_u16 (outside_port);
   u32 inside_fib = mapping->inside_fib_index;
@@ -368,7 +420,7 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
     cgnat_session_make_key (&key, &s->i2o.saddr, &s->i2o.daddr, s->i2o.sport,
 			    s->i2o.dport, s->i2o.proto, s->i2o.fib_index);
     clib_memcpy (&kv.key, &key, 16);
-    kv.value = session_index;
+    kv.value = cgnat_pack_value (thread_index, session_index);
     clib_bihash_add_del_16_8 (&cm->session_table_in2out, &kv, 1);
   }
 
@@ -380,7 +432,7 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
     cgnat_session_make_key (&key, &s->o2i.saddr, &s->o2i.daddr, s->o2i.sport,
 			    s->o2i.dport, s->o2i.proto, s->o2i.fib_index);
     clib_memcpy (&kv.key, &key, 16);
-    kv.value = session_index;
+    kv.value = cgnat_pack_value (thread_index, session_index);
     clib_bihash_add_del_16_8 (&cm->session_table_out2in, &kv, 1);
   }
 
@@ -429,53 +481,41 @@ cgnat_session_delete (cgnat_session_t *s)
   if (m->session_count > 0)
     m->session_count--;
 
-  pool_put (cm->sessions, s);
-}
-
-typedef struct
-{
-  f64 now;
-  u32 *expired;
-} cgnat_expire_ctx_t;
-
-static int
-cgnat_expire_walk_cb (clib_bihash_kv_16_8_t *kv, void *arg)
-{
-  cgnat_expire_ctx_t *ctx = arg;
-  cgnat_main_t *cm = &cgnat_main;
-  u32 si = (u32) kv->value;
-
-  if (pool_is_free_index (cm->sessions, si))
-    return BIHASH_WALK_CONTINUE;
-
-  cgnat_session_t *s = pool_elt_at_index (cm->sessions, si);
-
-  if ((ctx->now - s->last_active) > s->timeout)
-    vec_add1 (ctx->expired, si);
-
-  return BIHASH_WALK_CONTINUE;
+  cgnat_per_thread_data_t *tsm =
+    vec_elt_at_index (cm->per_thread_data, s->thread_index);
+  pool_put (tsm->sessions, s);
 }
 
 void
 cgnat_session_expire_walk (vlib_main_t *vm, f64 now)
 {
   cgnat_main_t *cm = &cgnat_main;
-  cgnat_expire_ctx_t ctx = { .now = now, .expired = NULL };
 
-  clib_bihash_foreach_key_value_pair_16_8 (&cm->session_table_in2out,
-					   cgnat_expire_walk_cb, &ctx);
-
-  for (u32 i = 0; i < vec_len (ctx.expired); i++)
+  /* Walk each per-thread session pool. Commit 1 keeps this as a
+   * main-thread sweep that touches per-thread pools directly — safe under
+   * the kept single-worker ASSERT (only thread 0 has any sessions). Commit
+   * 3 of the amendment replaces this with per-thread expire processes so
+   * each worker reaps its own pool without cross-thread access. */
+  for (u32 ti = 0; ti < vec_len (cm->per_thread_data); ti++)
     {
-      u32 si = ctx.expired[i];
-      if (!pool_is_free_index (cm->sessions, si))
-	{
-	  cgnat_session_t *s = pool_elt_at_index (cm->sessions, si);
-	  cgnat_session_delete (s);
-	}
-    }
+      cgnat_per_thread_data_t *tsm = vec_elt_at_index (cm->per_thread_data, ti);
+      u32 *expired = NULL;
+      cgnat_session_t *s;
 
-  vec_free (ctx.expired);
+      pool_foreach (s, tsm->sessions)
+	{
+	  if ((now - s->last_active) > s->timeout)
+	    vec_add1 (expired, s - tsm->sessions);
+	}
+
+      for (u32 i = 0; i < vec_len (expired); i++)
+	{
+	  u32 si = expired[i];
+	  if (!pool_is_free_index (tsm->sessions, si))
+	    cgnat_session_delete (pool_elt_at_index (tsm->sessions, si));
+	}
+      vec_free (expired);
+    }
 }
 
 static uword
