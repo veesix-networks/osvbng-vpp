@@ -400,10 +400,16 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 	      inner_ip->checksum = ip_csum_fold (
 		ip_csum_add_even (inner_ip->checksum, s0->o2i.l3_csum_delta));
 
-	      /* Rewrite inner sport (outside_port → inside_port). */
+	      /* Rewrite inner sport (outside_port → inside_port). The inner
+	       * header in an ICMP error is a copy of the ORIGINAL outbound
+	       * packet, so inner.src_port = NATed outside_port and
+	       * inner.dst_port = the remote application's port (which must
+	       * stay intact — tracepath / traceroute / PMTUd correlate the
+	       * ICMP error back to their probe by inner.dst_port). Only the
+	       * src side is the NATed port. */
 	      if (inner_proto == IP_PROTOCOL_TCP ||
 		  inner_proto == IP_PROTOCOL_UDP)
-		((nat_tcp_udp_header_t *) inner_l4)->dst_port =
+		((nat_tcp_udp_header_t *) inner_l4)->src_port =
 		  s0->o2i.rewrite_dport;
 	      else if (inner_proto == IP_PROTOCOL_ICMP)
 		{
