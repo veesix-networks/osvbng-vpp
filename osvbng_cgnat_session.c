@@ -322,28 +322,37 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
   u32 inside_fib = mapping->inside_fib_index;
   u32 out_fib = pool->outside_fib_valid ? pool->outside_fib_index : 0;
 
+  /* nat44-ed convention for ICMP echo: there's no L4 dst-port concept, so
+   * the session key replicates the echo-id into BOTH src_port and dst_port
+   * slots. Keeps the install symmetric with the slowpath inner-ICMP-error
+   * lookup (which also uses echo_id in both port positions per nat44-ed's
+   * nat_get_icmp_session_lookup_values) so traceroute / tracepath / PMTUd
+   * ICMP errors can resolve back to the originating session. For TCP/UDP
+   * the dst_port is the remote's real L4 port — use it as-is. */
+  u16 i2o_dport = (proto == IP_PROTOCOL_ICMP) ? inside_port : remote_port;
+  u16 o2i_dport = (proto == IP_PROTOCOL_ICMP) ? outside_port_n : remote_port;
+
   /* i2o: subscriber → outside. Match is the inside-perspective tuple; rewrite
    * replaces saddr/sport with the outside-allocated tuple. */
   s->i2o.saddr = mapping->inside_ip;
   s->i2o.daddr = *remote_ip;
   s->i2o.sport = inside_port;
-  s->i2o.dport = remote_port;
+  s->i2o.dport = i2o_dport;
   s->i2o.proto = proto;
   s->i2o.fib_index = inside_fib;
   s->i2o.rewrite_saddr = mapping->outside_ip;
   s->i2o.rewrite_daddr = *remote_ip;
   s->i2o.rewrite_sport = outside_port_n;
-  s->i2o.rewrite_dport = remote_port;
+  s->i2o.rewrite_dport = i2o_dport;
   s->i2o.rewrite_fib_index = out_fib;
 
   /* o2i: outside → subscriber. Match is the outside-perspective tuple
-   * (outside_ip in the src slot, outside_port in the sport slot — same
-   * convention the existing lookup callers use); rewrite replaces daddr/dport
-   * with the subscriber's inside tuple. */
+   * (outside_ip in the src slot, outside_port in the sport slot); rewrite
+   * replaces daddr/dport with the subscriber's inside tuple. */
   s->o2i.saddr = mapping->outside_ip;
   s->o2i.daddr = *remote_ip;
   s->o2i.sport = outside_port_n;
-  s->o2i.dport = remote_port;
+  s->o2i.dport = o2i_dport;
   s->o2i.proto = proto;
   s->o2i.fib_index = out_fib;
   s->o2i.rewrite_saddr = mapping->outside_ip;

@@ -86,16 +86,22 @@ cgnat_in2out_ports_from_reass (vlib_buffer_t *b0, ip4_header_t *ip0, u8 proto0,
     }
   else if (proto0 == IP_PROTOCOL_ICMP)
     {
-      /* sv-reass stashes the ICMP echo identifier in l4_src_port for echo
-       * request/reply; ICMP errors are handled by the slowpath inner-tuple
-       * rewrite (leave ports zero here — the lookup will miss and route to
-       * the slow node). Other ICMP types (timestamp, info request, address
-       * mask, etc.) we don't translate — drop explicitly rather than fall
-       * through and allocate a degenerate (saddr, daddr, 0, 0, ICMP, fib)
-       * session. Mirrors nat44-ed's BAD_ICMP_TYPE early drop. */
+      /* sv-reass stashes the ICMP echo identifier in BOTH l4_src_port and
+       * l4_dst_port for echo request/reply (it has no concept of "port" for
+       * ICMP so it populates both with the echo id). nat44-ed's
+       * nat_get_icmp_session_lookup_values reads both — we mirror it so the
+       * session key carries echo_id in both slots, which lets the slowpath
+       * inner-ICMP lookup (which also uses echo_id in both ports per
+       * nat44-ed convention) actually find the session for traceroute /
+       * tracepath / PMTUd ICMP errors. ICMP errors fall through with zero
+       * ports here — the slowpath inner-tuple lookup recovers the original
+       * session. Other ICMP types we don't translate — drop explicitly. */
       u8 icmp_type = vnet_buffer (b0)->ip.reass.icmp_type_or_tcp_flags;
       if (icmp_type == ICMP4_echo_request || icmp_type == ICMP4_echo_reply)
-	*src_port = vnet_buffer (b0)->ip.reass.l4_src_port;
+	{
+	  *src_port = vnet_buffer (b0)->ip.reass.l4_src_port;
+	  *dst_port = vnet_buffer (b0)->ip.reass.l4_src_port;
+	}
       else if (!icmp_type_is_error_message (icmp_type))
 	return CGNAT_ERROR_BAD_ICMP_TYPE;
     }

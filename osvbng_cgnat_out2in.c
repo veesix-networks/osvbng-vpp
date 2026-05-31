@@ -76,7 +76,12 @@ cgnat_out2in_ports_from_reass (vlib_buffer_t *b0, ip4_header_t *ip0,
 	(icmp46_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
       if (icmp->type == ICMP4_echo_request || icmp->type == ICMP4_echo_reply)
 	{
+	  /* nat44-ed convention: echo_id in both src_port and dst_port slots
+	   * of the session key. Aligns the install / fast-path lookup /
+	   * slowpath inner-ICMP error lookup so traceroute / tracepath /
+	   * PMTUd via ICMP errors actually finds the session. */
 	  u16 *echo_id = (u16 *) (icmp + 1);
+	  *src_port = *echo_id;
 	  *dst_port = *echo_id;
 	}
       else if (!icmp_type_is_error_message (icmp->type))
