@@ -461,7 +461,21 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 		  icmp46_header_t *inner_icmp = inner_l4;
 		  nat_icmp_echo_header_t *inner_echo =
 		    (nat_icmp_echo_header_t *) (inner_icmp + 1);
-		  inner_echo->identifier = s0->i2o.rewrite_sport;
+		  /* Update inner_icmp checksum incrementally so the inner stays
+		   * internally self-consistent — the outer ICMP checksum recompute
+		   * below covers the byte change, but stricter subscriber stacks
+		   * validate the inner ICMP's own checksum independently and would
+		   * reject otherwise. Mirrors nat44-ed's nat_6t_flow_icmp_translate
+		   * inner ICMP-id rewrite. */
+		  u16 old_id = inner_echo->identifier;
+		  u16 new_id = s0->i2o.rewrite_sport;
+		  if (old_id != new_id)
+		    {
+		      inner_icmp->checksum = ip_csum_fold (ip_csum_update (
+			inner_icmp->checksum, old_id, new_id,
+			nat_icmp_echo_header_t, identifier));
+		      inner_echo->identifier = new_id;
+		    }
 		}
 
 	      icmp0->checksum = 0;
