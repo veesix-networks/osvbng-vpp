@@ -289,7 +289,11 @@ typedef struct
   u16 next_port;
   u32 session_count;
 
-  u64 *port_reuse_timestamps;
+  /* Per-port f64 timestamp of last release; cgnat_port_alloc skips ports
+   * still in the RFC 6056 reuse cooldown. Was declared u64* historically and
+   * reinterpret-cast as f64 on read/write — same width on 64-bit, but
+   * strict-aliasing fragile; phase 10 fixes the type. */
+  f64 *port_reuse_timestamps;
 } cgnat_mapping_t;
 
 typedef struct

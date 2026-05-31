@@ -148,6 +148,7 @@ cgnat_out2in_translate (vlib_main_t *vm, vlib_buffer_t *b0, ip4_header_t *ip0,
 VLIB_NODE_FN (cgnat_out2in_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
+  ASSERT (vm->thread_index == 0);
   u32 n_left_from, *from, *to_next;
   cgnat_out2in_next_t next_index;
   u32 pkts_translated = 0;
@@ -271,6 +272,7 @@ VLIB_NODE_FN (cgnat_out2in_node)
 VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
+  ASSERT (vm->thread_index == 0);
   u32 n_left_from, *from, *to_next;
   cgnat_out2in_next_t next_index;
   u32 pkts_dropped = 0;

@@ -226,9 +226,13 @@ cgnat_port_alloc (cgnat_mapping_t *m, f64 now)
       u16 port = m->next_port;
       u32 port_offset = port - m->port_block_start;
 
-      m->next_port++;
-      if (m->next_port > m->port_block_end)
-	m->next_port = m->port_block_start;
+      /* Advance via u32 so port_block_end == 65535 doesn't u16-wrap
+       * silently to 0 (which would bypass the > end check and let us
+       * return ports outside the configured block). */
+      u32 next = (u32) m->next_port + 1;
+      if (next > m->port_block_end)
+	next = m->port_block_start;
+      m->next_port = (u16) next;
 
       if (port_offset < vec_len (m->port_reuse_timestamps))
 	{
@@ -351,37 +355,10 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
     mapping->inside_ip, mapping->outside_ip, *remote_ip, proto,
     mapping->inside_fib_index, out_fib);
 
-  if (pool->alg_bitmask)
-    {
-      u8 cgnat_proto = cgnat_proto_from_ip (proto);
-      if (cgnat_proto == CGNAT_PROTO_TCP)
-	{
-	  if (remote_port == clib_host_to_net_u16 (21) &&
-	      (pool->alg_bitmask & CGNAT_ALG_FTP))
-	    s->alg_flags = CGNAT_ALG_FTP;
-	  else if (remote_port == clib_host_to_net_u16 (5060) &&
-		   (pool->alg_bitmask & CGNAT_ALG_SIP))
-	    s->alg_flags = CGNAT_ALG_SIP;
-	  else if (remote_port == clib_host_to_net_u16 (554) &&
-		   (pool->alg_bitmask & CGNAT_ALG_RTSP))
-	    s->alg_flags = CGNAT_ALG_RTSP;
-	  else if (remote_port == clib_host_to_net_u16 (1723) &&
-		   (pool->alg_bitmask & CGNAT_ALG_PPTP))
-	    s->alg_flags = CGNAT_ALG_PPTP;
-	}
-      else if (cgnat_proto == CGNAT_PROTO_UDP)
-	{
-	  if (remote_port == clib_host_to_net_u16 (69) &&
-	      (pool->alg_bitmask & CGNAT_ALG_TFTP))
-	    s->alg_flags = CGNAT_ALG_TFTP;
-	  else if (remote_port == clib_host_to_net_u16 (5060) &&
-		   (pool->alg_bitmask & CGNAT_ALG_SIP))
-	    s->alg_flags = CGNAT_ALG_SIP;
-	  else if (remote_port == clib_host_to_net_u16 (53) &&
-		   (pool->alg_bitmask & CGNAT_ALG_DNS))
-	    s->alg_flags = CGNAT_ALG_DNS;
-	}
-    }
+  /* alg_flags stays zero — no ALG packet processing is implemented; the
+   * field is retained for #151 wire-format compatibility only. Real ALG
+   * handlers (FTP / SIP / PPTP / etc.) are tracked separately and would
+   * set this field at session create alongside the actual rewrite logic. */
 
   /* Install in2out entry: keyed on i2o.match (inside_ip, remote_ip,
    * inside_port, remote_port, proto, inside_fib). */

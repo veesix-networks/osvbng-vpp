@@ -78,22 +78,6 @@ cgnat_l4_checksum_update_port (ip_csum_t *sum, u16 old_port, u16 new_port)
   *sum = ip_csum_update (*sum, old_port, new_port, tcp_header_t, src_port);
 }
 
-always_inline int
-cgnat_is_hairpin (cgnat_main_t *cm, ip4_address_t *dst_ip)
-{
-  clib_bihash_kv_8_8_t kv;
-  cgnat_inside_key_t key;
-
-  key.ip.as_u32 = dst_ip->as_u32;
-  key.fib_index = 0;
-  kv.key = key.as_u64;
-
-  if (clib_bihash_search_inline_8_8 (&cm->inside_lookup, &kv) == 0)
-    return 1;
-
-  return 0;
-}
-
 /* Pull L4 ports from the sv-reass-populated buffer metadata.
  * Returns 0 on success, non-zero error code if sv-reass didn't populate
  * (operator disabled it, refcnt-enable failed, etc.) — caller drops with
@@ -198,13 +182,16 @@ cgnat_in2out_translate (vlib_main_t *vm, vlib_buffer_t *b0, ip4_header_t *ip0,
 VLIB_NODE_FN (cgnat_in2out_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
+  /* Single-worker invariant (D15) — cm->sessions / mapping->session_count /
+   * cgnat_port_alloc are not thread-safe. ASSERT no-ops in production
+   * builds; CI catches misconfigured multi-worker deployments. */
+  ASSERT (vm->thread_index == 0);
   cgnat_main_t *cm = &cgnat_main;
   u32 n_left_from, *from, *to_next;
   cgnat_in2out_next_t next_index;
   u32 pkts_translated = 0;
   u32 pkts_bypassed = 0;
   u32 pkts_dropped = 0;
-  u32 pkts_hairpinned = 0;
   u32 pkts_slowpath = 0;
   u32 pkts_no_reass = 0;
   u32 pkts_frag_drop = 0;
@@ -329,16 +316,7 @@ VLIB_NODE_FN (cgnat_in2out_node)
 
 	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = pool0->outside_fib_index;
 
-	  if (PREDICT_FALSE (cgnat_is_hairpin (cm, &ip0->dst_address)))
-	    {
-	      next0 = CGNAT_IN2OUT_NEXT_HAIRPIN;
-	      trace_action = CGNAT_TRACE_HAIRPINNED;
-	      pkts_hairpinned++;
-	    }
-	  else
-	    {
-	      pkts_translated++;
-	    }
+	  pkts_translated++;
 
 	trace:
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
@@ -369,8 +347,6 @@ VLIB_NODE_FN (cgnat_in2out_node)
   vlib_node_increment_counter (vm, node->node_index, CGNAT_ERROR_DROP,
 			       pkts_dropped);
   vlib_node_increment_counter (vm, node->node_index,
-			       CGNAT_ERROR_HAIRPINNED, pkts_hairpinned);
-  vlib_node_increment_counter (vm, node->node_index,
 			       CGNAT_ERROR_NO_REASS_METADATA, pkts_no_reass);
   vlib_node_increment_counter (vm, node->node_index,
 			       CGNAT_ERROR_FRAGMENT_DROP, pkts_frag_drop);
@@ -384,13 +360,13 @@ VLIB_NODE_FN (cgnat_in2out_node)
 VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
+  ASSERT (vm->thread_index == 0);
   cgnat_main_t *cm = &cgnat_main;
   u32 n_left_from, *from, *to_next;
   cgnat_in2out_next_t next_index;
   u32 pkts_translated = 0;
   u32 pkts_created = 0;
   u32 pkts_dropped = 0;
-  u32 pkts_hairpinned = 0;
   u32 pkts_no_reass = 0;
   u32 pkts_frag_drop = 0;
   f64 now = vlib_time_now (vm);
@@ -640,16 +616,7 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 
 	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = pool0->outside_fib_index;
 
-	  if (PREDICT_FALSE (cgnat_is_hairpin (cm, &ip0->dst_address)))
-	    {
-	      next0 = CGNAT_IN2OUT_NEXT_HAIRPIN;
-	      trace_action = CGNAT_TRACE_HAIRPINNED;
-	      pkts_hairpinned++;
-	    }
-	  else
-	    {
-	      pkts_translated++;
-	    }
+	  pkts_translated++;
 
 	trace:
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
@@ -680,8 +647,6 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
   vlib_node_increment_counter (vm, node->node_index, CGNAT_ERROR_DROP,
 			       pkts_dropped);
   vlib_node_increment_counter (vm, node->node_index,
-			       CGNAT_ERROR_HAIRPINNED, pkts_hairpinned);
-  vlib_node_increment_counter (vm, node->node_index,
 			       CGNAT_ERROR_NO_REASS_METADATA, pkts_no_reass);
   vlib_node_increment_counter (vm, node->node_index,
 			       CGNAT_ERROR_FRAGMENT_DROP, pkts_frag_drop);
@@ -700,7 +665,7 @@ VLIB_REGISTER_NODE (cgnat_in2out_node) = {
   .next_nodes = {
     [CGNAT_IN2OUT_NEXT_DROP] = "error-drop",
     [CGNAT_IN2OUT_NEXT_LOOKUP] = "ip4-lookup",
-    [CGNAT_IN2OUT_NEXT_HAIRPIN] = "cgnat-out2in",
+    [CGNAT_IN2OUT_NEXT_HAIRPIN] = "error-drop",
     [CGNAT_IN2OUT_NEXT_SLOWPATH] = "cgnat-in2out-slowpath",
   },
 };
@@ -716,7 +681,7 @@ VLIB_REGISTER_NODE (cgnat_in2out_slowpath_node) = {
   .next_nodes = {
     [CGNAT_IN2OUT_NEXT_DROP] = "error-drop",
     [CGNAT_IN2OUT_NEXT_LOOKUP] = "ip4-lookup",
-    [CGNAT_IN2OUT_NEXT_HAIRPIN] = "cgnat-out2in",
+    [CGNAT_IN2OUT_NEXT_HAIRPIN] = "error-drop",
     [CGNAT_IN2OUT_NEXT_SLOWPATH] = "error-drop",
   },
 };
