@@ -350,6 +350,7 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
       m->sw_if_index = sw_if_index;
       m->next_port = port_start;
       m->session_count = 0;
+      clib_spinlock_init (&m->lock);
 
       u32 block_size = port_end - port_start + 1;
       vec_validate_init_empty (m->port_reuse_timestamps, block_size - 1,
@@ -365,6 +366,7 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
 	    {
 	      clib_bihash_add_del_8_8 (&cm->inside_lookup, &kv, 0);
 	      vec_free (m->port_reuse_timestamps);
+	      clib_spinlock_free (&m->lock);
 	      pool_put (cm->mappings, m);
 	      vlib_log_err (cm->log_class,
 			    "mapping %U sv-reass refcnt-enable failed (sw_if %u rv %d) — rolled back",
@@ -405,6 +407,7 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
       /* TODO: walk and delete all sessions for this mapping */
 
       vec_free (m->port_reuse_timestamps);
+      clib_spinlock_free (&m->lock);
       clib_bihash_add_del_8_8 (&cm->inside_lookup, &kv, 0);
       pool_put (cm->mappings, m);
 

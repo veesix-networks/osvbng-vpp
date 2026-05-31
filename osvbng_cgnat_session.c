@@ -269,7 +269,9 @@ u16
 cgnat_port_alloc (cgnat_mapping_t *m, f64 now)
 {
   u32 block_size = m->port_block_end - m->port_block_start + 1;
+  u16 result = 0;
 
+  clib_spinlock_lock (&m->lock);
   for (u32 attempts = 0; attempts < block_size; attempts++)
     {
       u16 port = m->next_port;
@@ -290,10 +292,11 @@ cgnat_port_alloc (cgnat_mapping_t *m, f64 now)
 	    continue;
 	}
 
-      return port;
+      result = port;
+      break;
     }
-
-  return 0;
+  clib_spinlock_unlock (&m->lock);
+  return result;
 }
 
 void
@@ -302,8 +305,10 @@ cgnat_port_free (cgnat_mapping_t *m, u16 port)
   u32 port_offset = port - m->port_block_start;
   cgnat_main_t *cm = &cgnat_main;
 
+  clib_spinlock_lock (&m->lock);
   if (port_offset < vec_len (m->port_reuse_timestamps))
     m->port_reuse_timestamps[port_offset] = vlib_time_now (cm->vlib_main);
+  clib_spinlock_unlock (&m->lock);
 }
 
 /* Precompute the L3+L4 checksum deltas for one direction. All inputs in
@@ -336,8 +341,16 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
   cgnat_per_thread_data_t *tsm =
     vec_elt_at_index (cm->per_thread_data, thread_index);
 
+  /* Reserve the per-subscriber slot under the mapping lock so two workers
+   * can't both pass the cap check on the same mapping simultaneously. */
+  clib_spinlock_lock (&mapping->lock);
   if (mapping->session_count >= pool->max_sessions_per_sub)
-    return NULL;
+    {
+      clib_spinlock_unlock (&mapping->lock);
+      return NULL;
+    }
+  mapping->session_count++;
+  clib_spinlock_unlock (&mapping->lock);
 
   cgnat_session_t *s;
   pool_get_zero (tsm->sessions, s);
@@ -436,8 +449,6 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
     clib_bihash_add_del_16_8 (&cm->session_table_out2in, &kv, 1);
   }
 
-  mapping->session_count++;
-
   return s;
 }
 
@@ -478,8 +489,10 @@ cgnat_session_delete (cgnat_session_t *s)
   cgnat_frag_rewrite_release (s->frag_rewrite_index, s->i2o.daddr,
 			      s->i2o.proto);
 
+  clib_spinlock_lock (&m->lock);
   if (m->session_count > 0)
     m->session_count--;
+  clib_spinlock_unlock (&m->lock);
 
   cgnat_per_thread_data_t *tsm =
     vec_elt_at_index (cm->per_thread_data, s->thread_index);
