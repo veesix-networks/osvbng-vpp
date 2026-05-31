@@ -44,16 +44,6 @@ format_cgnat_out2in_trace (u8 *s, va_list *args)
   return s;
 }
 
-always_inline void
-cgnat_out2in_ip4_checksum_update (ip4_header_t *ip, ip4_address_t old_addr,
-				  ip4_address_t new_addr)
-{
-  ip_csum_t sum = ip->checksum;
-  sum = ip_csum_update (sum, old_addr.as_u32, new_addr.as_u32, ip4_header_t,
-			dst_address);
-  ip->checksum = ip_csum_fold (sum);
-}
-
 /* Pull L4 ports from the sv-reass-populated buffer metadata.
  * Mirror of cgnat_in2out_ports_from_reass; the only difference is that for
  * out2in the ICMP echo identifier is the *destination* identifier from our

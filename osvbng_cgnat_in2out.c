@@ -54,30 +54,6 @@ format_cgnat_in2out_trace (u8 *s, va_list *args)
   return s;
 }
 
-always_inline void
-cgnat_ip4_checksum_update (ip4_header_t *ip, ip4_address_t old_addr,
-			   ip4_address_t new_addr)
-{
-  ip_csum_t sum = ip->checksum;
-  sum = ip_csum_update (sum, old_addr.as_u32, new_addr.as_u32, ip4_header_t,
-			src_address);
-  ip->checksum = ip_csum_fold (sum);
-}
-
-always_inline void
-cgnat_l4_checksum_update_ip (ip_csum_t *sum, ip4_address_t old_addr,
-			     ip4_address_t new_addr)
-{
-  *sum = ip_csum_update (*sum, old_addr.as_u32, new_addr.as_u32,
-			 ip4_header_t, src_address);
-}
-
-always_inline void
-cgnat_l4_checksum_update_port (ip_csum_t *sum, u16 old_port, u16 new_port)
-{
-  *sum = ip_csum_update (*sum, old_port, new_port, tcp_header_t, src_port);
-}
-
 /* Pull L4 ports from the sv-reass-populated buffer metadata.
  * Returns 0 on success, non-zero error code if sv-reass didn't populate
  * (operator disabled it, refcnt-enable failed, etc.) — caller drops with
