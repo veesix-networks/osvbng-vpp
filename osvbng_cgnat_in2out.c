@@ -429,6 +429,101 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 	  u32 fib_index0 =
 	    vec_elt (ip4_main.fib_index_by_sw_if_index, sw_if_index0);
 
+	  /* ICMP error inner-rewrite (D4) — symmetric of out2in. Outer is
+	   * inside_ip → somewhere with proto=ICMP error type; inner was a
+	   * packet that arrived at the subscriber (so inner.dst=inside_ip,
+	   * inner.dport=inside_port). Rewrite outer src (inside→outside) +
+	   * inner dst + inner dport so the remote sees an error with the
+	   * outside identity, not the inside leak. */
+	  if (PREDICT_FALSE (
+		proto0 == IP_PROTOCOL_ICMP &&
+		icmp_type_is_error_message (
+		  vnet_buffer (b0)->ip.reass.icmp_type_or_tcp_flags)))
+	    {
+	      icmp46_header_t *icmp0 =
+		(icmp46_header_t *) ip4_next_header (ip0);
+	      nat_icmp_echo_header_t *echo0 =
+		(nat_icmp_echo_header_t *) (icmp0 + 1);
+	      ip4_header_t *inner_ip = (ip4_header_t *) (echo0 + 1);
+	      void *inner_l4 = ip4_next_header (inner_ip);
+
+	      ip4_address_t lookup_src = inner_ip->dst_address;
+	      ip4_address_t lookup_dst = inner_ip->src_address;
+	      u16 lookup_sport = 0, lookup_dport = 0;
+	      u8 inner_proto = inner_ip->protocol;
+
+	      if (inner_proto == IP_PROTOCOL_TCP ||
+		  inner_proto == IP_PROTOCOL_UDP)
+		{
+		  nat_tcp_udp_header_t *th = inner_l4;
+		  lookup_sport = th->dst_port;
+		  lookup_dport = th->src_port;
+		}
+	      else if (inner_proto == IP_PROTOCOL_ICMP)
+		{
+		  icmp46_header_t *inner_icmp = inner_l4;
+		  nat_icmp_echo_header_t *inner_echo =
+		    (nat_icmp_echo_header_t *) (inner_icmp + 1);
+		  lookup_sport = inner_echo->identifier;
+		  lookup_dport = inner_echo->identifier;
+		}
+	      else
+		{
+		  trace_action = CGNAT_TRACE_DROPPED;
+		  next0 = CGNAT_IN2OUT_NEXT_DROP;
+		  pkts_dropped++;
+		  b0->error = node->errors[CGNAT_ERROR_NO_SESSION];
+		  goto trace;
+		}
+
+	      cgnat_session_t *s0 = cgnat_session_lookup_in2out (
+		&lookup_src, &lookup_dst, lookup_sport, lookup_dport,
+		inner_proto, fib_index0);
+	      if (PREDICT_FALSE (!s0))
+		{
+		  trace_action = CGNAT_TRACE_DROPPED;
+		  next0 = CGNAT_IN2OUT_NEXT_DROP;
+		  pkts_dropped++;
+		  b0->error = node->errors[CGNAT_ERROR_NO_SESSION];
+		  goto trace;
+		}
+
+	      ip0->src_address = s0->i2o.rewrite_saddr;
+	      ip0->checksum = ip_csum_fold (
+		ip_csum_add_even (ip0->checksum, s0->i2o.l3_csum_delta));
+
+	      inner_ip->dst_address = s0->i2o.rewrite_saddr;
+	      inner_ip->checksum = ip_csum_fold (
+		ip_csum_add_even (inner_ip->checksum, s0->i2o.l3_csum_delta));
+
+	      if (inner_proto == IP_PROTOCOL_TCP ||
+		  inner_proto == IP_PROTOCOL_UDP)
+		((nat_tcp_udp_header_t *) inner_l4)->src_port =
+		  s0->i2o.rewrite_sport;
+	      else if (inner_proto == IP_PROTOCOL_ICMP)
+		{
+		  icmp46_header_t *inner_icmp = inner_l4;
+		  nat_icmp_echo_header_t *inner_echo =
+		    (nat_icmp_echo_header_t *) (inner_icmp + 1);
+		  inner_echo->identifier = s0->i2o.rewrite_sport;
+		}
+
+	      icmp0->checksum = 0;
+	      ip_csum_t sum = ip_incremental_checksum_buffer (
+		vm, b0, (u8 *) icmp0 - (u8 *) vlib_buffer_get_current (b0),
+		ntohs (ip0->length) - ip4_header_bytes (ip0), 0);
+	      icmp0->checksum = ~ip_csum_fold (sum);
+
+	      s0->last_active = now;
+	      s0->total_pkts++;
+	      s0->total_bytes += vlib_buffer_length_in_chain (vm, b0);
+
+	      vnet_buffer (b0)->sw_if_index[VLIB_TX] = s0->i2o.rewrite_fib_index;
+	      trace_action = CGNAT_TRACE_TRANSLATED;
+	      pkts_translated++;
+	      goto trace;
+	    }
+
 	  /* Non-first fragment: IP-only rewrite via aux fragment record.
 	   * No port extraction needed (the fragment has no L4 header). */
 	  if (PREDICT_FALSE (

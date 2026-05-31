@@ -272,6 +272,7 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
   u32 pkts_dropped = 0;
   u32 pkts_no_reass = 0;
   u32 pkts_frag_drop = 0;
+  f64 now = vlib_time_now (vm);
 
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
@@ -327,6 +328,109 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 	      ip0->checksum = ip_csum_fold (
 		ip_csum_add_even (ip0->checksum, fr->l3_csum_delta_o2i));
 	      vnet_buffer (b0)->sw_if_index[VLIB_TX] = fr->inside_fib_index;
+	      next0 = CGNAT_OUT2IN_NEXT_LOOKUP;
+	      goto enqueue;
+	    }
+
+	  /* ICMP error inner-rewrite (D4). The packet's outer header carries
+	   * router_that_sent_error → outside_ip; the inner header (echoed in
+	   * the ICMP payload) is the original outbound that triggered the
+	   * error and carries outside_ip → remote. Look up by the inner tuple
+	   * and rewrite outer dst + inner src + inner sport so the inside
+	   * subscriber sees an ICMP error with proper inside addressing. */
+	  if (PREDICT_FALSE (
+		proto0 == IP_PROTOCOL_ICMP &&
+		icmp_type_is_error_message (
+		  vnet_buffer (b0)->ip.reass.icmp_type_or_tcp_flags)))
+	    {
+	      u32 fib_index0 = vec_elt (ip4_main.fib_index_by_sw_if_index,
+					sw_if_index0);
+	      icmp46_header_t *icmp0 =
+		(icmp46_header_t *) ip4_next_header (ip0);
+	      nat_icmp_echo_header_t *echo0 =
+		(nat_icmp_echo_header_t *) (icmp0 + 1);
+	      ip4_header_t *inner_ip = (ip4_header_t *) (echo0 + 1);
+	      void *inner_l4 = ip4_next_header (inner_ip);
+
+	      ip4_address_t lookup_dst = inner_ip->src_address;
+	      ip4_address_t lookup_src = inner_ip->dst_address;
+	      u16 lookup_dport = 0, lookup_sport = 0;
+	      u8 inner_proto = inner_ip->protocol;
+
+	      if (inner_proto == IP_PROTOCOL_TCP ||
+		  inner_proto == IP_PROTOCOL_UDP)
+		{
+		  nat_tcp_udp_header_t *th = inner_l4;
+		  lookup_dport = th->src_port;
+		  lookup_sport = th->dst_port;
+		}
+	      else if (inner_proto == IP_PROTOCOL_ICMP)
+		{
+		  icmp46_header_t *inner_icmp = inner_l4;
+		  nat_icmp_echo_header_t *inner_echo =
+		    (nat_icmp_echo_header_t *) (inner_icmp + 1);
+		  lookup_dport = inner_echo->identifier;
+		  lookup_sport = inner_echo->identifier;
+		}
+	      else
+		{
+		  next0 = CGNAT_OUT2IN_NEXT_DROP;
+		  pkts_dropped++;
+		  b0->error = node->errors[CGNAT_ERROR_NO_SESSION];
+		  goto enqueue;
+		}
+
+	      cgnat_session_t *s0 = cgnat_session_lookup_out2in (
+		&lookup_dst, &lookup_src, lookup_dport, lookup_sport,
+		inner_proto, fib_index0);
+	      if (PREDICT_FALSE (!s0))
+		{
+		  next0 = CGNAT_OUT2IN_NEXT_DROP;
+		  pkts_dropped++;
+		  b0->error = node->errors[CGNAT_ERROR_NO_SESSION];
+		  goto enqueue;
+		}
+
+	      /* Rewrite outer dst (outside_ip → inside_ip) — same address
+	       * change as s->o2i so we can reuse its precomputed delta. */
+	      ip0->dst_address = s0->o2i.rewrite_daddr;
+	      ip0->checksum = ip_csum_fold (
+		ip_csum_add_even (ip0->checksum, s0->o2i.l3_csum_delta));
+
+	      /* Rewrite inner src (outside_ip → inside_ip) — the inner IP
+	       * src was our outside_ip; flip it to the subscriber's inside_ip
+	       * so the application sees a well-formed inner. Same delta. */
+	      inner_ip->src_address = s0->o2i.rewrite_daddr;
+	      inner_ip->checksum = ip_csum_fold (
+		ip_csum_add_even (inner_ip->checksum, s0->o2i.l3_csum_delta));
+
+	      /* Rewrite inner sport (outside_port → inside_port). */
+	      if (inner_proto == IP_PROTOCOL_TCP ||
+		  inner_proto == IP_PROTOCOL_UDP)
+		((nat_tcp_udp_header_t *) inner_l4)->dst_port =
+		  s0->o2i.rewrite_dport;
+	      else if (inner_proto == IP_PROTOCOL_ICMP)
+		{
+		  icmp46_header_t *inner_icmp = inner_l4;
+		  nat_icmp_echo_header_t *inner_echo =
+		    (nat_icmp_echo_header_t *) (inner_icmp + 1);
+		  inner_echo->identifier = s0->o2i.rewrite_dport;
+		}
+
+	      /* Outer ICMP checksum: covers ICMP header + payload (inner IP +
+	       * 8 bytes of inner L4). Recompute from scratch — slow path
+	       * cost is fine, simpler than tracking every byte that changed. */
+	      icmp0->checksum = 0;
+	      ip_csum_t sum = ip_incremental_checksum_buffer (
+		vm, b0, (u8 *) icmp0 - (u8 *) vlib_buffer_get_current (b0),
+		ntohs (ip0->length) - ip4_header_bytes (ip0), 0);
+	      icmp0->checksum = ~ip_csum_fold (sum);
+
+	      s0->last_active = now;
+	      s0->total_pkts++;
+	      s0->total_bytes += vlib_buffer_length_in_chain (vm, b0);
+
+	      vnet_buffer (b0)->sw_if_index[VLIB_TX] = s0->o2i.rewrite_fib_index;
 	      next0 = CGNAT_OUT2IN_NEXT_LOOKUP;
 	      goto enqueue;
 	    }

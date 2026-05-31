@@ -17,6 +17,7 @@
 #include <vnet/vnet.h>
 #include <vnet/ip/ip.h>
 #include <vnet/ip/ip4_packet.h>
+#include <vnet/ip/icmp46_packet.h>
 #include <vnet/fib/fib_table.h>
 #include <vnet/fib/fib_entry.h>
 #include <vnet/fib/fib_source.h>
@@ -25,6 +26,7 @@
 #include <vnet/dpo/load_balance.h>
 #include <vnet/dpo/receive_dpo.h>
 #include <vlib/vlib.h>
+#include <nat/lib/lib.h>		/* nat_icmp_echo_header_t, nat_tcp_udp_header_t */
 
 #define CGNAT_ALG_FTP  (1 << 0)
 #define CGNAT_ALG_TFTP (1 << 1)
@@ -588,6 +590,29 @@ cgnat_pool_for_outside_ip (ip4_address_t *outside_ip)
 	}
     }
   return NULL;
+}
+
+/* RFC 792 ICMP types we treat as errors. Errors carry the inner IP+L4 header
+ * in their payload — the NAT slowpath uses that inner header to find the
+ * original session and rewrite both the outer dst and the inner src/sport so
+ * subscribers see correctly-targeted ICMP errors (the path that makes
+ * traceroute / PMTUD / Dest-Unreach feedback work). Lifted from VPP's
+ * cnat plugin (cnat_node.h:99-113), matches what nat44-ed's
+ * nat_get_icmp_session_lookup_values dispatches on. */
+always_inline u8
+icmp_type_is_error_message (u8 icmp_type)
+{
+  switch (icmp_type)
+    {
+    case ICMP4_destination_unreachable:
+    case ICMP4_source_quench:
+    case ICMP4_redirect:
+    case ICMP4_alternate_host_address:
+    case ICMP4_time_exceeded:
+    case ICMP4_parameter_problem:
+      return 1;
+    }
+  return 0;
 }
 
 #endif /* __included_osvbng_cgnat_h__ */
