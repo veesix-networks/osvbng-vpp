@@ -193,6 +193,22 @@ cgnat_set_outside_fib (u32 pool_id, u32 vrf_id)
   u32 pool_index = p[0];
   cgnat_pool_t *pool = pool_elt_at_index (cm->pools, pool_index);
 
+  /* Drain-or-reject under live sessions (M4). i2o flow records cache the
+   * outside_fib_index at session create — silently mutating it now would
+   * leak post-translate packets into the OLD outside FIB until each session
+   * naturally expires. Operators move outside-VRF by clearing sessions first
+   * (osvbng-context#139 = clear cgnat sessions CLI). The check covers both
+   * an in-place VRF change (same pool, new vrf_id) and a re-bind that
+   * coincidentally lands on the same vrf_id. */
+  if (pool->outside_fib_valid && pool_elts (cm->sessions) > 0)
+    {
+      vlib_log_warn (cm->log_class,
+		     "pool %u SetOutsideVRF %u rejected: %u live sessions "
+		     "(clear sessions first; see osvbng-context#139)",
+		     pool_id, vrf_id, pool_elts (cm->sessions));
+      return VNET_API_ERROR_INSTANCE_IN_USE;
+    }
+
   if (pool->outside_fib_valid)
     {
       for (u32 i = 0; i < vec_len (pool->outside_prefixes); i++)
