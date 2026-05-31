@@ -639,68 +639,50 @@ vl_api_osvbng_cgnat_session_dump_t_handler (
 
   f64 now = vlib_time_now (cm->vlib_main);
 
-  /* Walk per-thread session pools by index with per-slot validity rechecks,
+  /* Walk the shared session pool by index with per-slot validity rechecks,
      mirroring cgnat_session_expire_walk. No worker barrier: this read-only walk
      accepts the same races the expiry walker already does, rather than stalling
-     the dataplane on the shared core for every page. Cursor encodes thread_index
-     in the high bits so #151's pagination resumes correctly across thread
-     boundaries. Layout: cursor = (thread_index << 24) | per_thread_index — gives
-     us 256 threads and ~16M sessions per thread, comfortably above any sane
-     deployment. */
+     the dataplane on the shared core for every page. */
   u32 emitted = 0;
-  u32 start_ti = (start_index >> 24) & 0xff;
-  u32 start_si_within = start_index & 0x00ffffff;
-  for (u32 ti = start_ti; ti < vec_len (cm->per_thread_data) && emitted < limit;
-       ti++)
+  u32 n = vec_len (cm->sessions);
+  for (u32 si = start_index; si < n && emitted < limit; si++)
     {
-      cgnat_per_thread_data_t *tsm =
-	vec_elt_at_index (cm->per_thread_data, ti);
-      u32 n = vec_len (tsm->sessions);
-      u32 si_start = (ti == start_ti) ? start_si_within : 0;
-      for (u32 si = si_start; si < n && emitted < limit; si++)
-	{
-	  if (pool_is_free_index (tsm->sessions, si))
-	    continue;
+      if (pool_is_free_index (cm->sessions, si))
+	continue;
 
-	  cgnat_session_t *s = pool_elt_at_index (tsm->sessions, si);
+      cgnat_session_t *s = pool_elt_at_index (cm->sessions, si);
 
-	  if (f_inside.as_u32 &&
-	      cgnat_session_inside_ip (s).as_u32 != f_inside.as_u32)
-	    continue;
-	  if (f_outside.as_u32 &&
-	      cgnat_session_outside_ip (s).as_u32 != f_outside.as_u32)
-	    continue;
-	  if (f_remote.as_u32 &&
-	      cgnat_session_remote_ip (s).as_u32 != f_remote.as_u32)
-	    continue;
-	  if (f_inside_port &&
-	      clib_net_to_host_u16 (cgnat_session_inside_port (s)) !=
-		f_inside_port)
-	    continue;
-	  if (f_outside_port &&
-	      clib_net_to_host_u16 (cgnat_session_outside_port (s)) !=
-		f_outside_port)
-	    continue;
-	  if (f_remote_port &&
-	      clib_net_to_host_u16 (cgnat_session_remote_port (s)) !=
-		f_remote_port)
-	    continue;
-	  if (f_proto && cgnat_session_proto (s) != f_proto)
-	    continue;
+      if (f_inside.as_u32 &&
+	  cgnat_session_inside_ip (s).as_u32 != f_inside.as_u32)
+	continue;
+      if (f_outside.as_u32 &&
+	  cgnat_session_outside_ip (s).as_u32 != f_outside.as_u32)
+	continue;
+      if (f_remote.as_u32 &&
+	  cgnat_session_remote_ip (s).as_u32 != f_remote.as_u32)
+	continue;
+      if (f_inside_port &&
+	  clib_net_to_host_u16 (cgnat_session_inside_port (s)) != f_inside_port)
+	continue;
+      if (f_outside_port &&
+	  clib_net_to_host_u16 (cgnat_session_outside_port (s)) !=
+	    f_outside_port)
+	continue;
+      if (f_remote_port &&
+	  clib_net_to_host_u16 (cgnat_session_remote_port (s)) != f_remote_port)
+	continue;
+      if (f_proto && cgnat_session_proto (s) != f_proto)
+	continue;
 
-	  if (pool_is_free_index (cm->pools, s->pool_index))
-	    continue;
-	  cgnat_pool_t *pool = pool_elt_at_index (cm->pools, s->pool_index);
-	  if (f_pool_id && pool->pool_id != f_pool_id)
-	    continue;
+      if (pool_is_free_index (cm->pools, s->pool_index))
+	continue;
+      cgnat_pool_t *pool = pool_elt_at_index (cm->pools, s->pool_index);
+      if (f_pool_id && pool->pool_id != f_pool_id)
+	continue;
 
-	  /* Emitted session_index encodes (thread_index, per_thread_index)
-	   * so the cursor returned to the client can resume here next page. */
-	  u32 wire_index = (ti << 24) | (si & 0x00ffffff);
-	  send_session_details (s, wire_index, pool->pool_id,
-				now - s->last_active, reg, mp->context);
-	  emitted++;
-	}
+      send_session_details (s, si, pool->pool_id, now - s->last_active, reg,
+			    mp->context);
+      emitted++;
     }
 }
 
@@ -711,7 +693,7 @@ vl_api_osvbng_cgnat_session_count_t_handler (
   cgnat_main_t *cm = &cgnat_main;
   vl_api_osvbng_cgnat_session_count_reply_t *rmp;
   int rv = 0;
-  u64 total = cgnat_session_count_total ();
+  u64 total = pool_elts (cm->sessions);
 
   REPLY_MACRO2 (VL_API_OSVBNG_CGNAT_SESSION_COUNT_REPLY,
 		({ rmp->total = clib_host_to_net_u64 (total); }));

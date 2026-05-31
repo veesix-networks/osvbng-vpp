@@ -53,28 +53,14 @@ cgnat_pool_cascade_delete (u32 pool_index)
   u32 *kill = NULL;
   cgnat_session_t *s;
 
-  /* Iterate sessions across all per-thread pools. Sessions owned by other
-   * workers are still safe to delete from the API thread under the
-   * single-worker invariant kept in commit 1; commit 2 of the amendment
-   * will dispatch deletes to owning workers via handoff when actual
-   * multi-worker activates. */
-  for (u32 ti = 0; ti < vec_len (cm->per_thread_data); ti++)
+  pool_foreach (s, cm->sessions)
     {
-      cgnat_per_thread_data_t *tsm =
-	vec_elt_at_index (cm->per_thread_data, ti);
-      pool_foreach (s, tsm->sessions)
-	{
-	  if (s->pool_index == pool_index)
-	    vec_add1 (kill, s - tsm->sessions);
-	}
-      for (u32 i = 0; i < vec_len (kill); i++)
-	{
-	  if (!pool_is_free_index (tsm->sessions, kill[i]))
-	    cgnat_session_delete (
-	      pool_elt_at_index (tsm->sessions, kill[i]));
-	}
-      vec_reset_length (kill);
+      if (s->pool_index == pool_index)
+	vec_add1 (kill, s - cm->sessions);
     }
+  for (u32 i = 0; i < vec_len (kill); i++)
+    cgnat_session_delete (pool_elt_at_index (cm->sessions, kill[i]));
+  vec_reset_length (kill);
 
   cgnat_mapping_t *m;
   pool_foreach (m, cm->mappings)
@@ -214,12 +200,12 @@ cgnat_set_outside_fib (u32 pool_id, u32 vrf_id)
    * (osvbng-context#139 = clear cgnat sessions CLI). The check covers both
    * an in-place VRF change (same pool, new vrf_id) and a re-bind that
    * coincidentally lands on the same vrf_id. */
-  if (pool->outside_fib_valid && cgnat_session_count_total () > 0)
+  if (pool->outside_fib_valid && pool_elts (cm->sessions) > 0)
     {
       vlib_log_warn (cm->log_class,
-		     "pool %u SetOutsideVRF %u rejected: %lu live sessions "
+		     "pool %u SetOutsideVRF %u rejected: %u live sessions "
 		     "(clear sessions first; see osvbng-context#139)",
-		     pool_id, vrf_id, cgnat_session_count_total ());
+		     pool_id, vrf_id, pool_elts (cm->sessions));
       return VNET_API_ERROR_INSTANCE_IN_USE;
     }
 
@@ -705,8 +691,8 @@ show_osvbng_cgnat_command_fn (vlib_main_t *vm, unformat_input_t *input,
 		       pool_elts (cm->mappings));
     }
 
-  vlib_cli_output (vm, "\nMappings: %u  Sessions: %lu  Bypasses: %u",
-		   pool_elts (cm->mappings), cgnat_session_count_total (),
+  vlib_cli_output (vm, "\nMappings: %u  Sessions: %u  Bypasses: %u",
+		   pool_elts (cm->mappings), pool_elts (cm->sessions),
 		   cm->bypass_entry_count);
 
   return 0;

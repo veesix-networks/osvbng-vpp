@@ -176,18 +176,15 @@ typedef struct
    * line keeps the read-mostly flow records out of the dirty-line write set.
    * frag_rewrite_index is an O(1) back-pointer into cm->frag_rewrite_pool so
    * session_delete can refcount-down without re-keying the aux bihash.
-   * thread_index identifies which worker owns this session — required for
-   * the multi-worker per-thread-pool model (per AMENDMENT-MULTI-WORKER).
-   * 8 + 8 + 8 + 8 + 4 + 4 + 2 + 22 = 64. */
+   * 8 + 8 + 8 + 8 + 4 + 2 + 26 = 64. */
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline2);
   f64 last_active;
   u64 total_pkts;
   u64 total_bytes;
   f64 timeout;
   u32 frag_rewrite_index;
-  u32 thread_index;
   u8 tcp_flags[2];
-  u8 _pad2[22];
+  u8 _pad2[26];
 } cgnat_session_t;
 
 STATIC_ASSERT_SIZEOF (cgnat_session_t, 192);
@@ -395,17 +392,6 @@ typedef enum
   CGNAT_OUT2IN_N_NEXT,
 } cgnat_out2in_next_t;
 
-/* Per-worker state (AMENDMENT-MULTI-WORKER). Each VPP worker thread owns its
- * own session pool so the hot path mutates only thread-local cache lines —
- * no cross-thread MESI ping-pong on s->last_active / s->total_pkts etc.
- * Aux fragment rewrite pool stays SHARED (rare, slow-path only, atomic
- * refcount avoids the per-thread split). */
-typedef struct
-{
-  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
-  cgnat_session_t *sessions;
-} cgnat_per_thread_data_t;
-
 typedef struct
 {
   cgnat_pool_t *pools;
@@ -414,28 +400,15 @@ typedef struct
   cgnat_mapping_t *mappings;
   clib_bihash_8_8_t inside_lookup;
 
-  /* Per-thread state, sized to vlib_num_workers() + 1 at
-   * VLIB_MAIN_LOOP_ENTER_FUNCTION time. Indexed by vm->thread_index. */
-  cgnat_per_thread_data_t *per_thread_data;
-
-  /* Session bihashes are shared. Value packs (thread_index << 32) |
-   * session_index so workers can find the owning thread's pool entry.
-   * bihash_16_8 is multi-writer safe (per-bucket RW lock). */
+  cgnat_session_t *sessions;
   clib_bihash_16_8_t session_table_in2out;
   clib_bihash_16_8_t session_table_out2in;
 
-  /* Fragment rewrite pool stays shared across workers — rare slow-path
-   * allocation, atomic refcount mutation. Avoids needing handoff or
-   * per-thread splits for the corner case where two sessions on
-   * different workers share an aux key. */
-  cgnat_frag_rewrite_t *frag_rewrite_pool;
-  clib_spinlock_t frag_rewrite_lock;
-
-  /* Fragment rewrite aux bihash (D14). bihash_16_8 keyed on
+  /* Fragment rewrite pool + aux lookup (D14). bihash_16_8 keyed on
    * (saddr, daddr, proto, fib_index) — same shape as the session tables so
    * collisions only occur on the true (saddr,daddr,proto,fib) equivalence
-   * class, NOT cross-VRF subscribers happening to share an inside IP.
-   * Value is the shared cgnat_frag_rewrite_pool index (no thread packing). */
+   * class, NOT cross-VRF subscribers happening to share an inside IP. */
+  cgnat_frag_rewrite_t *frag_rewrite_pool;
   clib_bihash_16_8_t frag_aux;
 
   cgnat_bypass_entry_t *bypass_entries;
@@ -453,38 +426,6 @@ typedef struct
 } cgnat_main_t;
 
 extern cgnat_main_t cgnat_main;
-
-/* bihash value packing for per-thread session/aux pools. The high 32 bits
- * are thread_index (which worker owns this session), low 32 are the
- * session_index within that worker's pool. Lifted from nat44-ed
- * (init_ed_kv / ed_value_get_*). */
-always_inline u64
-cgnat_pack_value (u32 thread_index, u32 entry_index)
-{
-  return ((u64) thread_index << 32) | entry_index;
-}
-always_inline u32
-cgnat_value_thread_index (u64 value)
-{
-  return (u32) (value >> 32);
-}
-always_inline u32
-cgnat_value_entry_index (u64 value)
-{
-  return (u32) value;
-}
-
-/* Sum of live sessions across all per-thread pools. O(num_workers), called
- * only from operator-facing show paths and the #151 session_count API. */
-always_inline u64
-cgnat_session_count_total (void)
-{
-  cgnat_main_t *cm = &cgnat_main;
-  u64 total = 0;
-  for (u32 ti = 0; ti < vec_len (cm->per_thread_data); ti++)
-    total += pool_elts (vec_elt_at_index (cm->per_thread_data, ti)->sessions);
-  return total;
-}
 
 int cgnat_pool_add_del (cgnat_pool_t *cfg, u8 is_add);
 int cgnat_set_outside_fib (u32 pool_id, u32 vrf_id);
@@ -512,7 +453,7 @@ cgnat_session_t *cgnat_session_create (cgnat_mapping_t *mapping,
 				       ip4_address_t *remote_ip,
 				       u16 remote_port, u8 proto,
 				       u16 outside_port, u16 inside_port,
-				       f64 now, u32 thread_index);
+				       f64 now);
 cgnat_session_t *cgnat_session_lookup_in2out (ip4_address_t *src_ip,
 					      ip4_address_t *dst_ip,
 					      u16 src_port, u16 dst_port,
