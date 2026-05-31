@@ -298,11 +298,6 @@ typedef struct
    * reinterpret-cast as f64 on read/write — same width on 64-bit, but
    * strict-aliasing fragile; phase 10 fixes the type. */
   f64 *port_reuse_timestamps;
-
-  /* Serialises port_alloc / port_free / session_count++ / session_count--
-   * across workers. Slow-path only (session create/delete), so contention
-   * is microscopic. */
-  clib_spinlock_t lock;
 } cgnat_mapping_t;
 
 typedef struct
