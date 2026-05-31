@@ -95,6 +95,7 @@ cgnat_out2in_translate (vlib_main_t *vm, vlib_buffer_t *b0, ip4_header_t *ip0,
 			cgnat_session_t *s0, u8 proto0, f64 now)
 {
   cgnat_flow_t *f = &s0->o2i;
+  cgnat_main_t *cm = &cgnat_main;
 
   s0->last_active = now;
   s0->total_pkts++;
@@ -111,6 +112,9 @@ cgnat_out2in_translate (vlib_main_t *vm, vlib_buffer_t *b0, ip4_header_t *ip0,
       tcp0->dst_port = f->rewrite_dport;
       tcp0->checksum =
 	ip_csum_fold (ip_csum_add_even (tcp0->checksum, f->l4_csum_delta));
+      cgnat_pool_t *pool0 = pool_elt_at_index (cm->pools, s0->pool_index);
+      cgnat_set_tcp_session_state (s0, pool0, tcp0->flags, CGNAT_TCP_DIR_O2I,
+				   now);
     }
   else if (proto0 == IP_PROTOCOL_UDP)
     {

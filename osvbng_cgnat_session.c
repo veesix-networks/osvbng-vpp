@@ -335,7 +335,15 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
   s->pool_index = mapping->pool_index;
   s->mapping_index = mapping - cm->mappings;
   s->last_active = now;
-  s->timeout = cgnat_session_timeout (pool, cgnat_proto_from_ip (proto));
+  /* New TCP sessions start in CLOSED state — wait for SYN+ACK from both
+   * sides before promoting to ESTABLISHED. Until then they use the short
+   * transitory timeout so a half-open SYN flood is reaped in minutes
+   * rather than hours. */
+  s->tcp_state = CGNAT_TCP_STATE_CLOSED;
+  if (proto == IP_PROTOCOL_TCP)
+    s->timeout = cgnat_session_timeout_for_tcp (pool, s->tcp_state);
+  else
+    s->timeout = cgnat_session_timeout (pool, cgnat_proto_from_ip (proto));
 
   /* Refcount-acquire the aux fragment rewrite record. Non-first fragments
    * (which have no L4 header) fall back to this record for IP-only rewrite. */

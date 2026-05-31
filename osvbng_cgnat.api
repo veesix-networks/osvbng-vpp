@@ -28,13 +28,26 @@ enum osvbng_cgnat_filtering : u8
   OSVBNG_CGNAT_FILTERING_ENDPOINT_DEPENDENT = 1,
 };
 
-/** \brief Session timeout configuration */
+/** \brief Session timeout configuration (v1 — pre-#153, no `other` slot;
+    plugin back-fills "other" from `udp` for backward compatibility). */
 typedef osvbng_cgnat_timeouts
 {
   u32 tcp_established;
   u32 tcp_transitory;
   u32 udp;
   u32 icmp;
+};
+
+/** \brief Session timeout configuration v2 (#153 — adds `other` slot for
+    non-port L4 protocols like GRE/ESP/SCTP). Used by pool_add_del_v2 /
+    pool_update_v2. */
+typedef osvbng_cgnat_timeouts_v2
+{
+  u32 tcp_established;
+  u32 tcp_transitory;
+  u32 udp;
+  u32 icmp;
+  u32 other;
 };
 
 /** \brief Per-pool inside prefix */
@@ -251,6 +264,42 @@ autoreply define osvbng_cgnat_pool_update
   u32 max_sessions_per_sub;
   u8 alg_bitmask;
   vl_api_osvbng_cgnat_timeouts_t timeouts;
+};
+
+/** \brief Add or delete a CGNAT pool (v2)
+    Same shape as v1 but carries timeouts_v2 with the `other` field for
+    non-port L4 protocols (GRE / ESP / SCTP / etc.). v1 stays accepted for
+    backward compat; old clients fall back to udp's value for `other`.
+    @param timeouts - five-slot protocol-specific session timeouts
+*/
+autoreply define osvbng_cgnat_pool_add_del_v2
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  u32 pool_id;
+  vl_api_osvbng_cgnat_pool_mode_t mode;
+  vl_api_osvbng_cgnat_address_pooling_t address_pooling;
+  vl_api_osvbng_cgnat_filtering_t filtering;
+  u16 block_size;
+  u8 max_blocks_per_sub;
+  u32 max_sessions_per_sub;
+  u16 port_range_start;
+  u16 port_range_end;
+  u16 port_reuse_timeout;
+  u8 alg_bitmask;
+  vl_api_osvbng_cgnat_timeouts_v2_t timeouts;
+};
+
+/** \brief Update pool parameters at runtime (v2 — carries `other` timeout) */
+autoreply define osvbng_cgnat_pool_update_v2
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+  u32 max_sessions_per_sub;
+  u8 alg_bitmask;
+  vl_api_osvbng_cgnat_timeouts_v2_t timeouts;
 };
 
 /** \brief Dump subscriber mappings

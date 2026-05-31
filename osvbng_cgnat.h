@@ -35,11 +35,38 @@
 #define CGNAT_ALG_RTSP (1 << 4)
 #define CGNAT_ALG_DNS  (1 << 5)
 
-#define CGNAT_PROTO_TCP  0
-#define CGNAT_PROTO_UDP  1
-#define CGNAT_PROTO_ICMP 2
-#define CGNAT_PROTO_OTHER 3
-#define CGNAT_N_PROTOS 4
+/* Slot indices into cgnat_pool_t::timeouts[CGNAT_N_PROTOS]. TCP gets two
+ * slots so the state machine can pick a short transitory timeout for
+ * half-open / closing flows (RFC 5382 §5: 4 min minimum) and a long
+ * established timeout for steady-state (2h 4m minimum). Phase 7 introduces
+ * the TCP_TRANS slot — pre-#153 the array was [4] and tcp_transitory was
+ * silently dropped by the plugin; v1 binapi back-fills it from defaults. */
+#define CGNAT_PROTO_TCP_ESTAB 0
+#define CGNAT_PROTO_TCP_TRANS 1
+#define CGNAT_PROTO_UDP	      2
+#define CGNAT_PROTO_ICMP      3
+#define CGNAT_PROTO_OTHER     4
+#define CGNAT_N_PROTOS	      5
+
+/* Kept as an alias for the existing CGNAT_PROTO_TCP callers that don't yet
+ * distinguish established vs transitory. Resolves to the established slot
+ * so default-timeout reads of "TCP" continue to return the long timeout. */
+#define CGNAT_PROTO_TCP CGNAT_PROTO_TCP_ESTAB
+
+/* TCP state machine — mirrors nat44-ed's 3-state design (CLOSED → ESTABLISHED
+ * → CLOSING). Implemented in cgnat_set_tcp_session_state. State transitions
+ * also rewrite s->timeout so the expire walker sees the right value. */
+typedef enum
+{
+  CGNAT_TCP_STATE_CLOSED = 0,
+  CGNAT_TCP_STATE_ESTABLISHED,
+  CGNAT_TCP_STATE_CLOSING,
+  CGNAT_TCP_N_STATE,
+} cgnat_tcp_state_e;
+
+#define CGNAT_TCP_DIR_I2O 0
+#define CGNAT_TCP_DIR_O2I 1
+#define CGNAT_TCP_N_DIR	  2
 
 #define CGNAT_SESSION_DUMP_DEFAULT_LIMIT 1024
 
@@ -517,6 +544,61 @@ cgnat_session_timeout (cgnat_pool_t *pool, u8 proto)
   if (proto < CGNAT_N_PROTOS)
     return pool->timeouts[proto];
   return pool->timeouts[CGNAT_PROTO_UDP];
+}
+
+/* TCP state-aware timeout. Established uses the long bucket, every other
+ * state (CLOSED/CLOSING — half-open and post-FIN/RST) uses the short
+ * transitory bucket. Called from cgnat_set_tcp_session_state on every state
+ * change so s->timeout is kept fresh for the expire walker. */
+always_inline u32
+cgnat_session_timeout_for_tcp (cgnat_pool_t *pool, u8 tcp_state)
+{
+  if (tcp_state == CGNAT_TCP_STATE_ESTABLISHED)
+    return pool->timeouts[CGNAT_PROTO_TCP_ESTAB];
+  return pool->timeouts[CGNAT_PROTO_TCP_TRANS];
+}
+
+/* Drive the TCP state machine on every TCP packet. Mirrors nat44-ed's
+ * nat44_set_tcp_session_state shape — CLOSED becomes ESTABLISHED on a
+ * SYN+ACK seen from both sides; ESTABLISHED becomes CLOSING on a FIN or
+ * RST from either side; CLOSING reopens on a fresh SYN+ACK pair. State
+ * change rewrites s->timeout so the expire walker uses the right bucket. */
+always_inline void
+cgnat_set_tcp_session_state (cgnat_session_t *s, cgnat_pool_t *pool,
+			     u8 tcp_flags, u8 dir, f64 now)
+{
+  u8 mask = TCP_FLAG_FIN | TCP_FLAG_SYN | TCP_FLAG_RST | TCP_FLAG_ACK;
+  u8 old = s->tcp_flags[dir];
+  s->tcp_flags[dir] |= tcp_flags & mask;
+  if (old == s->tcp_flags[dir])
+    return;
+
+  u8 old_state = s->tcp_state;
+  switch (old_state)
+    {
+    case CGNAT_TCP_STATE_CLOSED:
+      if ((s->tcp_flags[CGNAT_TCP_DIR_I2O] & s->tcp_flags[CGNAT_TCP_DIR_O2I]) ==
+	  (TCP_FLAG_SYN | TCP_FLAG_ACK))
+	s->tcp_state = CGNAT_TCP_STATE_ESTABLISHED;
+      break;
+    case CGNAT_TCP_STATE_ESTABLISHED:
+      if (s->tcp_flags[dir] & (TCP_FLAG_FIN | TCP_FLAG_RST))
+	{
+	  s->tcp_state = CGNAT_TCP_STATE_CLOSING;
+	  s->tcp_flags[CGNAT_TCP_DIR_I2O] = 0;
+	  s->tcp_flags[CGNAT_TCP_DIR_O2I] = 0;
+	  s->last_active = now;
+	}
+      break;
+    case CGNAT_TCP_STATE_CLOSING:
+      if ((s->tcp_flags[CGNAT_TCP_DIR_I2O] & s->tcp_flags[CGNAT_TCP_DIR_O2I]) ==
+	  (TCP_FLAG_SYN | TCP_FLAG_ACK))
+	s->tcp_state = CGNAT_TCP_STATE_ESTABLISHED;
+      break;
+    }
+  if (old_state == s->tcp_state)
+    return;
+  s->timeout = cgnat_session_timeout_for_tcp (pool, s->tcp_state);
 }
 
 always_inline int

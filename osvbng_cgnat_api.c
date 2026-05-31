@@ -43,9 +43,13 @@ vl_api_osvbng_cgnat_pool_add_del_t_handler (
   cfg.port_reuse_timeout = ntohs (mp->port_reuse_timeout);
   cfg.alg_bitmask = mp->alg_bitmask;
 
-  cfg.timeouts[CGNAT_PROTO_TCP] = ntohl (mp->timeouts.tcp_established);
+  cfg.timeouts[CGNAT_PROTO_TCP_ESTAB] = ntohl (mp->timeouts.tcp_established);
+  cfg.timeouts[CGNAT_PROTO_TCP_TRANS] = ntohl (mp->timeouts.tcp_transitory);
   cfg.timeouts[CGNAT_PROTO_UDP] = ntohl (mp->timeouts.udp);
   cfg.timeouts[CGNAT_PROTO_ICMP] = ntohl (mp->timeouts.icmp);
+  /* v1 doesn't carry an "other" (GRE/ESP/SCTP/...) timeout — back-fill
+   * from UDP default. v2 senders override via the dedicated field. */
+  cfg.timeouts[CGNAT_PROTO_OTHER] = cfg.timeouts[CGNAT_PROTO_UDP];
 
   if (cfg.port_range_start == 0)
     cfg.port_range_start = 1024;
@@ -53,12 +57,16 @@ vl_api_osvbng_cgnat_pool_add_del_t_handler (
     cfg.port_range_end = 65535;
   if (cfg.max_sessions_per_sub == 0)
     cfg.max_sessions_per_sub = 2000;
-  if (cfg.timeouts[CGNAT_PROTO_TCP] == 0)
-    cfg.timeouts[CGNAT_PROTO_TCP] = 7200;
+  if (cfg.timeouts[CGNAT_PROTO_TCP_ESTAB] == 0)
+    cfg.timeouts[CGNAT_PROTO_TCP_ESTAB] = 7440;
+  if (cfg.timeouts[CGNAT_PROTO_TCP_TRANS] == 0)
+    cfg.timeouts[CGNAT_PROTO_TCP_TRANS] = 240;
   if (cfg.timeouts[CGNAT_PROTO_UDP] == 0)
     cfg.timeouts[CGNAT_PROTO_UDP] = 300;
   if (cfg.timeouts[CGNAT_PROTO_ICMP] == 0)
     cfg.timeouts[CGNAT_PROTO_ICMP] = 60;
+  if (cfg.timeouts[CGNAT_PROTO_OTHER] == 0)
+    cfg.timeouts[CGNAT_PROTO_OTHER] = 240;
 
   rv = cgnat_pool_add_del (&cfg, mp->is_add);
 
@@ -288,9 +296,11 @@ vl_api_osvbng_cgnat_pool_update_t_handler (
   int rv = 0;
 
   u32 timeouts[CGNAT_N_PROTOS];
-  timeouts[CGNAT_PROTO_TCP] = ntohl (mp->timeouts.tcp_established);
+  timeouts[CGNAT_PROTO_TCP_ESTAB] = ntohl (mp->timeouts.tcp_established);
+  timeouts[CGNAT_PROTO_TCP_TRANS] = ntohl (mp->timeouts.tcp_transitory);
   timeouts[CGNAT_PROTO_UDP] = ntohl (mp->timeouts.udp);
   timeouts[CGNAT_PROTO_ICMP] = ntohl (mp->timeouts.icmp);
+  /* v1 has no `other` field — back-fill from udp default. */
   timeouts[CGNAT_PROTO_OTHER] = ntohl (mp->timeouts.udp);
 
   rv = cgnat_pool_update (ntohl (mp->pool_id),
@@ -298,6 +308,79 @@ vl_api_osvbng_cgnat_pool_update_t_handler (
 			  timeouts);
 
   REPLY_MACRO (VL_API_OSVBNG_CGNAT_POOL_UPDATE_REPLY);
+}
+
+static void
+vl_api_osvbng_cgnat_pool_add_del_v2_t_handler (
+  vl_api_osvbng_cgnat_pool_add_del_v2_t *mp)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  vl_api_osvbng_cgnat_pool_add_del_v2_reply_t *rmp;
+  int rv = 0;
+
+  cgnat_pool_t cfg;
+  clib_memset (&cfg, 0, sizeof (cfg));
+
+  cfg.pool_id = ntohl (mp->pool_id);
+  cfg.mode = (cgnat_pool_mode_t) mp->mode;
+  cfg.address_pooling = (cgnat_address_pooling_t) mp->address_pooling;
+  cfg.filtering = (cgnat_filtering_t) mp->filtering;
+  cfg.block_size = ntohs (mp->block_size);
+  cfg.max_blocks_per_sub = mp->max_blocks_per_sub;
+  cfg.max_sessions_per_sub = ntohl (mp->max_sessions_per_sub);
+  cfg.port_range_start = ntohs (mp->port_range_start);
+  cfg.port_range_end = ntohs (mp->port_range_end);
+  cfg.port_reuse_timeout = ntohs (mp->port_reuse_timeout);
+  cfg.alg_bitmask = mp->alg_bitmask;
+
+  cfg.timeouts[CGNAT_PROTO_TCP_ESTAB] = ntohl (mp->timeouts.tcp_established);
+  cfg.timeouts[CGNAT_PROTO_TCP_TRANS] = ntohl (mp->timeouts.tcp_transitory);
+  cfg.timeouts[CGNAT_PROTO_UDP] = ntohl (mp->timeouts.udp);
+  cfg.timeouts[CGNAT_PROTO_ICMP] = ntohl (mp->timeouts.icmp);
+  cfg.timeouts[CGNAT_PROTO_OTHER] = ntohl (mp->timeouts.other);
+
+  if (cfg.port_range_start == 0)
+    cfg.port_range_start = 1024;
+  if (cfg.port_range_end == 0)
+    cfg.port_range_end = 65535;
+  if (cfg.max_sessions_per_sub == 0)
+    cfg.max_sessions_per_sub = 2000;
+  if (cfg.timeouts[CGNAT_PROTO_TCP_ESTAB] == 0)
+    cfg.timeouts[CGNAT_PROTO_TCP_ESTAB] = 7440;
+  if (cfg.timeouts[CGNAT_PROTO_TCP_TRANS] == 0)
+    cfg.timeouts[CGNAT_PROTO_TCP_TRANS] = 240;
+  if (cfg.timeouts[CGNAT_PROTO_UDP] == 0)
+    cfg.timeouts[CGNAT_PROTO_UDP] = 300;
+  if (cfg.timeouts[CGNAT_PROTO_ICMP] == 0)
+    cfg.timeouts[CGNAT_PROTO_ICMP] = 60;
+  if (cfg.timeouts[CGNAT_PROTO_OTHER] == 0)
+    cfg.timeouts[CGNAT_PROTO_OTHER] = 240;
+
+  rv = cgnat_pool_add_del (&cfg, mp->is_add);
+
+  REPLY_MACRO (VL_API_OSVBNG_CGNAT_POOL_ADD_DEL_V2_REPLY);
+}
+
+static void
+vl_api_osvbng_cgnat_pool_update_v2_t_handler (
+  vl_api_osvbng_cgnat_pool_update_v2_t *mp)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  vl_api_osvbng_cgnat_pool_update_v2_reply_t *rmp;
+  int rv = 0;
+
+  u32 timeouts[CGNAT_N_PROTOS];
+  timeouts[CGNAT_PROTO_TCP_ESTAB] = ntohl (mp->timeouts.tcp_established);
+  timeouts[CGNAT_PROTO_TCP_TRANS] = ntohl (mp->timeouts.tcp_transitory);
+  timeouts[CGNAT_PROTO_UDP] = ntohl (mp->timeouts.udp);
+  timeouts[CGNAT_PROTO_ICMP] = ntohl (mp->timeouts.icmp);
+  timeouts[CGNAT_PROTO_OTHER] = ntohl (mp->timeouts.other);
+
+  rv = cgnat_pool_update (ntohl (mp->pool_id),
+			  ntohl (mp->max_sessions_per_sub), mp->alg_bitmask,
+			  timeouts);
+
+  REPLY_MACRO (VL_API_OSVBNG_CGNAT_POOL_UPDATE_V2_REPLY);
 }
 
 static void
@@ -382,10 +465,14 @@ send_pool_details (cgnat_pool_t *pool, u32 pool_index,
   rmp->port_range_end = htons (pool->port_range_end);
   rmp->port_reuse_timeout = htons (pool->port_reuse_timeout);
   rmp->alg_bitmask = pool->alg_bitmask;
-  rmp->timeouts.tcp_established = htonl (pool->timeouts[CGNAT_PROTO_TCP]);
-  rmp->timeouts.tcp_transitory = htonl (pool->timeouts[CGNAT_PROTO_TCP]);
+  rmp->timeouts.tcp_established =
+    htonl (pool->timeouts[CGNAT_PROTO_TCP_ESTAB]);
+  rmp->timeouts.tcp_transitory =
+    htonl (pool->timeouts[CGNAT_PROTO_TCP_TRANS]);
   rmp->timeouts.udp = htonl (pool->timeouts[CGNAT_PROTO_UDP]);
   rmp->timeouts.icmp = htonl (pool->timeouts[CGNAT_PROTO_ICMP]);
+  /* v1 details wire format has no `other` field — operators using the new
+   * setting see it via the v2 dump (not yet wired) or via show CLI. */
   rmp->outside_vrf_table_id = htonl (pool->outside_vrf_table_id);
   rmp->active_mappings = htonl (count_mappings_for_pool (pool_index));
 
