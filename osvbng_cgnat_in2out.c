@@ -661,7 +661,6 @@ VLIB_REGISTER_NODE (cgnat_in2out_node) = {
   .next_nodes = {
     [CGNAT_IN2OUT_NEXT_DROP] = "error-drop",
     [CGNAT_IN2OUT_NEXT_LOOKUP] = "ip4-lookup",
-    [CGNAT_IN2OUT_NEXT_HAIRPIN] = "error-drop",
     [CGNAT_IN2OUT_NEXT_SLOWPATH] = "cgnat-in2out-slowpath",
   },
 };
@@ -673,12 +672,14 @@ VLIB_REGISTER_NODE (cgnat_in2out_slowpath_node) = {
   .type = VLIB_NODE_TYPE_INTERNAL,
   .n_errors = CGNAT_N_ERROR,
   .error_strings = cgnat_error_strings,
-  .n_next_nodes = CGNAT_IN2OUT_N_NEXT,
+  /* Slowpath only ever dispatches to DROP or LOOKUP — it never re-enqueues
+   * to itself. Cap n_next_nodes to 2 so VPP doesn't try to wire SLOWPATH
+   * slot to a duplicate "error-drop", which VPP's vlib_node_add_next dedup
+   * leaves as ~0 in the next_nodes table → segfault at vlib_node_main_init. */
+  .n_next_nodes = 2,
   .next_nodes = {
     [CGNAT_IN2OUT_NEXT_DROP] = "error-drop",
     [CGNAT_IN2OUT_NEXT_LOOKUP] = "ip4-lookup",
-    [CGNAT_IN2OUT_NEXT_HAIRPIN] = "error-drop",
-    [CGNAT_IN2OUT_NEXT_SLOWPATH] = "error-drop",
   },
 };
 
