@@ -241,11 +241,71 @@ have no session. No double-counting found. ✓
 
 ## Fix commit log
 
-Updated as fixes ship.
+Audit findings #1, #3, #4 shipped. Findings #2 and #7 are obsolete after the
+architectural revert below (no handoff exists to fix). #5 and #6 still apply
+in principle but are deferred.
 
-| commit | finding | what |
+| finding | what | status |
 |---|---|---|
-| TBD | #1 | fix(csum): flip fragment csum delta polarity to match flow convention |
-| TBD | #2 | fix(handoff): port nat44-ed inner-tuple lookup for out2in ICMP error |
-| TBD | #3 | fix(icmp): update inner ICMP checksum when rewriting inner echo identifier |
-| TBD | #4 | fix(icmp): drop unhandled ICMP types instead of translating with zero ports |
+| #1 | flip fragment csum delta polarity to match flow convention | shipped |
+| #2 | port nat44-ed inner-tuple lookup for out2in ICMP error | obsolete (no handoff) |
+| #3 | update inner ICMP checksum when rewriting inner echo identifier | shipped |
+| #4 | drop unhandled ICMP types with BAD_ICMP_TYPE | shipped |
+| #5 | handoff cached_session_index optimisation | obsolete (no handoff) |
+| #6 | tuple-equality defensive check after bihash hit | deferred |
+| #7 | owner_check in in2out slowpath ICMP error | obsolete (no owner check) |
+
+---
+
+## Finding #8 (architectural): handoff cold-worker latency
+
+**Severity: BUG-HIGH (caused 30ms RTT outliers in production).**
+
+Discovered after audit findings #1-7 shipped. With the per-worker session
+pool + frame-queue handoff model (the D15 multi-worker amendment to
+osvbng-context #153), every packet on a session goes through a handoff to
+the session-owning worker. In a low-PPS workload (single subscriber pinging,
+~1 packet/sec) on a multi-worker box (12 workers pinned to dedicated cores
+in the production QEMU deployment), the session-owning worker is descheduled
+by KVM between packets. When the handoff enqueues a packet to that worker's
+frame queue, the packet sits there until KVM brings the vCPU back online —
+typically 30ms — producing the bimodal RTT pattern (`~1ms` when the worker
+happens to be alive, `~35ms` when it has to be woken).
+
+Confirmed by reducing workers to 1: bimodal pattern disappears, RTT
+consistent at ~1ms. With 12 workers the handoff routinely lands on a cold
+worker.
+
+This is the inherent cost of nat44-ed's per-worker-pool architecture in any
+workload where per-worker session activity is bursty. nat44-ed itself shows
+the same behaviour at low PPS; its published benchmarks are at line rate
+where every worker stays hot. osvbng's actual workload mix is closer to
+"thousands of subscribers, each generating modest PPS" than "single flow at
+line rate," so the trade-off doesn't earn its complexity.
+
+**Resolution: revert the multi-worker amendment.** Plugin is now back to:
+
+- Single shared `cgnat_session_t *sessions` pool on `cgnat_main_t`
+- No `cgnat-in2out-worker-handoff` / `cgnat-out2in-worker-handoff` nodes
+- No frame queue init
+- `cgnat-in2out` registered as the ip4-unicast feature directly
+- `cgnat-outside` DPO targets `cgnat-out2in` directly
+- Per-mapping spinlock retained — port allocation still needs serialising
+  across workers when they all share the session pool
+- Cherry-picked audit fixes that survive the architectural change (#1, #3,
+  #4 above, plus the L4-from-header read in out2in for the DPO-after-
+  ip4-lookup case)
+
+Plugin remains multi-worker — every worker still runs `cgnat-in2out` and
+`cgnat-out2in` independently against the shared pool — just without the
+handoff that was forcing packets onto specific workers.
+
+**Cost**: gives up per-session cache locality. Counter writes to
+`s->total_pkts` / `s->total_bytes` / `s->last_active` are now best-effort
+under cross-worker contention (no atomics, no lock); workloads where two
+workers concurrently translate packets for the same session will see some
+counter under-counting but no crash. If counter accuracy under contention
+becomes a requirement we can switch to `__atomic_fetch_add(RELAXED)`.
+
+**Gain**: predictable low-latency translation at any PPS, no cold-worker
+wakeup tax, plugin is meaningfully smaller and simpler.
