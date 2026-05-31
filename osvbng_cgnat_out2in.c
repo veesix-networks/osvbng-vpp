@@ -44,19 +44,18 @@ format_cgnat_out2in_trace (u8 *s, va_list *args)
   return s;
 }
 
-/* Pull L4 ports from the sv-reass-populated buffer metadata.
- * Mirror of cgnat_in2out_ports_from_reass; the only difference is that for
- * out2in the ICMP echo identifier is the *destination* identifier from our
- * point of view (it's the outside-port we allocated). */
+/* Pull L4 ports from the packet. Out2in is reached via the cgnat-outside DPO
+ * AFTER ip4-lookup, which writes vnet_buffer(b)->ip.flow_hash — and that
+ * union aliases reass.l4_src_port / reass.l4_dst_port / reass.ip_proto in
+ * vnet/buffer.h's ip struct. Read L4 ports directly from the header instead.
+ * Fragment / truncation / icmp_type live at non-overlapping offsets in the
+ * union, so those checks still come from reass. */
 always_inline int
 cgnat_out2in_ports_from_reass (vlib_buffer_t *b0, ip4_header_t *ip0,
 			       u8 proto0, u16 *src_port, u16 *dst_port)
 {
   *src_port = 0;
   *dst_port = 0;
-
-  if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.ip_proto != proto0))
-    return CGNAT_ERROR_NO_REASS_METADATA;
 
   if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.l4_hdr_truncated))
     return CGNAT_ERROR_NO_REASS_METADATA;
@@ -66,14 +65,28 @@ cgnat_out2in_ports_from_reass (vlib_buffer_t *b0, ip4_header_t *ip0,
 
   if (proto0 == IP_PROTOCOL_TCP || proto0 == IP_PROTOCOL_UDP)
     {
-      *src_port = vnet_buffer (b0)->ip.reass.l4_src_port;
-      *dst_port = vnet_buffer (b0)->ip.reass.l4_dst_port;
+      udp_header_t *udp =
+	(udp_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
+      *src_port = udp->src_port;
+      *dst_port = udp->dst_port;
     }
   else if (proto0 == IP_PROTOCOL_ICMP)
     {
-      u8 icmp_type = vnet_buffer (b0)->ip.reass.icmp_type_or_tcp_flags;
-      if (icmp_type == ICMP4_echo_request || icmp_type == ICMP4_echo_reply)
-	*dst_port = vnet_buffer (b0)->ip.reass.l4_src_port;
+      icmp46_header_t *icmp =
+	(icmp46_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
+      if (icmp->type == ICMP4_echo_request || icmp->type == ICMP4_echo_reply)
+	{
+	  u16 *echo_id = (u16 *) (icmp + 1);
+	  *dst_port = *echo_id;
+	}
+      else if (!icmp_type_is_error_message (icmp->type))
+	{
+	  /* Unhandled ICMP type — drop explicitly. Mirrors nat44-ed's
+	   * BAD_ICMP_TYPE early drop. Without this the session lookup
+	   * misses and the slow path drops with NO_SESSION (misleading)
+	   * after a wasted slow-path round-trip. */
+	  return CGNAT_ERROR_BAD_ICMP_TYPE;
+	}
     }
   return 0;
 }

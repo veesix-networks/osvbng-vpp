@@ -87,11 +87,17 @@ cgnat_in2out_ports_from_reass (vlib_buffer_t *b0, ip4_header_t *ip0, u8 proto0,
   else if (proto0 == IP_PROTOCOL_ICMP)
     {
       /* sv-reass stashes the ICMP echo identifier in l4_src_port for echo
-       * request/reply; other ICMP types (errors, query types we don't
-       * translate) are handled by phase 5's slowpath inner-rewrite. */
+       * request/reply; ICMP errors are handled by the slowpath inner-tuple
+       * rewrite (leave ports zero here — the lookup will miss and route to
+       * the slow node). Other ICMP types (timestamp, info request, address
+       * mask, etc.) we don't translate — drop explicitly rather than fall
+       * through and allocate a degenerate (saddr, daddr, 0, 0, ICMP, fib)
+       * session. Mirrors nat44-ed's BAD_ICMP_TYPE early drop. */
       u8 icmp_type = vnet_buffer (b0)->ip.reass.icmp_type_or_tcp_flags;
       if (icmp_type == ICMP4_echo_request || icmp_type == ICMP4_echo_reply)
 	*src_port = vnet_buffer (b0)->ip.reass.l4_src_port;
+      else if (!icmp_type_is_error_message (icmp_type))
+	return CGNAT_ERROR_BAD_ICMP_TYPE;
     }
   return 0;
 }
