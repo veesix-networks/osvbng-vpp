@@ -432,7 +432,10 @@ cgnat_session_delete (cgnat_session_t *s)
     clib_bihash_add_del_16_8 (&cm->session_table_out2in, &kv, 0);
   }
 
-  cgnat_port_free (m, clib_net_to_host_u16 (s->i2o.rewrite_sport));
+  /* Non-port protos (GRE/ESP/SCTP/...) didn't reserve a port at session
+   * create, so don't free one at delete. */
+  if (!cgnat_is_unk_proto (s->i2o.proto))
+    cgnat_port_free (m, clib_net_to_host_u16 (s->i2o.rewrite_sport));
 
   /* Refcount-release the aux fragment rewrite record; evict if last. */
   cgnat_frag_rewrite_release (s->frag_rewrite_index, s->i2o.daddr,

@@ -596,14 +596,19 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 
 	  if (!s0)
 	    {
-	      u16 outside_port0 = cgnat_port_alloc (m0, now);
-	      if (PREDICT_FALSE (outside_port0 == 0))
+	      u16 outside_port0 = 0;
+	      int needs_port = !cgnat_is_unk_proto (proto0);
+	      if (needs_port)
 		{
-		  trace_action = CGNAT_TRACE_DROPPED;
-		  next0 = CGNAT_IN2OUT_NEXT_DROP;
-		  pkts_dropped++;
-		  b0->error = node->errors[CGNAT_ERROR_PORT_EXHAUSTED];
-		  goto trace;
+		  outside_port0 = cgnat_port_alloc (m0, now);
+		  if (PREDICT_FALSE (outside_port0 == 0))
+		    {
+		      trace_action = CGNAT_TRACE_DROPPED;
+		      next0 = CGNAT_IN2OUT_NEXT_DROP;
+		      pkts_dropped++;
+		      b0->error = node->errors[CGNAT_ERROR_PORT_EXHAUSTED];
+		      goto trace;
+		    }
 		}
 
 	      s0 = cgnat_session_create (m0, &ip0->dst_address, dst_port0,
@@ -611,7 +616,8 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 					 now);
 	      if (PREDICT_FALSE (!s0))
 		{
-		  cgnat_port_free (m0, outside_port0);
+		  if (needs_port)
+		    cgnat_port_free (m0, outside_port0);
 		  trace_action = CGNAT_TRACE_DROPPED;
 		  next0 = CGNAT_IN2OUT_NEXT_DROP;
 		  pkts_dropped++;

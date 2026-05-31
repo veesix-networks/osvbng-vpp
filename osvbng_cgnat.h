@@ -592,6 +592,26 @@ cgnat_pool_for_outside_ip (ip4_address_t *outside_ip)
   return NULL;
 }
 
+/* True for protocols where outside_port allocation is meaningless (no L4
+ * demux: GRE, ESP, AH, SCTP, IP-in-IP, OSPF, UDP-Lite, etc.). Sessions for
+ * unknown protos are keyed on (saddr, daddr, 0, 0, proto, fib) — one shared
+ * session per (subscriber, remote, proto) tuple regardless of how many
+ * simultaneous flows the subscriber opens. RFC 4787 permits this for
+ * non-port-bearing protocols. */
+always_inline int
+cgnat_is_unk_proto (u8 proto)
+{
+  switch (proto)
+    {
+    case IP_PROTOCOL_TCP:
+    case IP_PROTOCOL_UDP:
+    case IP_PROTOCOL_ICMP:
+      return 0;
+    default:
+      return 1;
+    }
+}
+
 /* RFC 792 ICMP types we treat as errors. Errors carry the inner IP+L4 header
  * in their payload — the NAT slowpath uses that inner header to find the
  * original session and rewrite both the outer dst and the inner src/sport so
