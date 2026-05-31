@@ -102,14 +102,22 @@ cgnat_frag_rewrite_acquire (ip4_address_t inside_ip, ip4_address_t outside_ip,
   r->inside_fib_index = inside_fib;
   r->outside_fib_index = outside_fib;
 
+  /* Polarity matches cgnat_flow_csum_calc: delta = old - new, applied at
+   * translate via ip_csum_add_even. For i2o the rewrite is inside→outside, so
+   * old=inside, new=outside, delta=inside-outside. For o2i the rewrite is
+   * outside→inside (daddr only — non-first fragments have no L4), so
+   * old=outside, new=inside, delta=outside-inside. Pre-amendment these were
+   * computed in the opposite (nat44-ed) convention while translate used
+   * add_even — every fragmented packet's IP checksum was off by 2*delta and
+   * dropped at the next hop. */
   ip_csum_t l3_i2o = 0;
-  l3_i2o = ip_csum_sub_even (l3_i2o, inside_ip.as_u32);
-  l3_i2o = ip_csum_add_even (l3_i2o, outside_ip.as_u32);
+  l3_i2o = ip_csum_sub_even (l3_i2o, outside_ip.as_u32);
+  l3_i2o = ip_csum_add_even (l3_i2o, inside_ip.as_u32);
   r->l3_csum_delta_i2o = l3_i2o;
 
   ip_csum_t l3_o2i = 0;
-  l3_o2i = ip_csum_sub_even (l3_o2i, outside_ip.as_u32);
-  l3_o2i = ip_csum_add_even (l3_o2i, inside_ip.as_u32);
+  l3_o2i = ip_csum_sub_even (l3_o2i, inside_ip.as_u32);
+  l3_o2i = ip_csum_add_even (l3_o2i, outside_ip.as_u32);
   r->l3_csum_delta_o2i = l3_o2i;
 
   r->refcount = 1;
