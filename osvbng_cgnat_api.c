@@ -500,15 +500,23 @@ send_session_details (cgnat_session_t *s, u32 session_index, u32 pool_id,
   rmp->context = context;
   rmp->session_index = htonl (session_index);
   rmp->pool_id = htonl (pool_id);
-  ip4_address_encode (&s->inside_ip, rmp->inside_ip);
-  ip4_address_encode (&s->outside_ip, rmp->outside_ip);
-  ip4_address_encode (&s->remote_ip, rmp->remote_ip);
-  rmp->inside_port = htons (clib_net_to_host_u16 (s->inside_port));
-  rmp->outside_port = htons (clib_net_to_host_u16 (s->outside_port));
-  rmp->remote_port = htons (clib_net_to_host_u16 (s->remote_port));
-  rmp->proto = s->proto;
+  {
+    ip4_address_t inside_ip = cgnat_session_inside_ip (s);
+    ip4_address_t outside_ip = cgnat_session_outside_ip (s);
+    ip4_address_t remote_ip = cgnat_session_remote_ip (s);
+    ip4_address_encode (&inside_ip, rmp->inside_ip);
+    ip4_address_encode (&outside_ip, rmp->outside_ip);
+    ip4_address_encode (&remote_ip, rmp->remote_ip);
+  }
+  rmp->inside_port =
+    htons (clib_net_to_host_u16 (cgnat_session_inside_port (s)));
+  rmp->outside_port =
+    htons (clib_net_to_host_u16 (cgnat_session_outside_port (s)));
+  rmp->remote_port =
+    htons (clib_net_to_host_u16 (cgnat_session_remote_port (s)));
+  rmp->proto = cgnat_session_proto (s);
   rmp->alg_flags = s->alg_flags;
-  rmp->inside_fib_index = htonl (s->inside_fib_index);
+  rmp->inside_fib_index = htonl (cgnat_session_inside_fib (s));
   rmp->mapping_index = htonl (s->mapping_index);
   rmp->age = clib_host_to_net_f64 (age);
   rmp->timeout = htonl ((u32) s->timeout);
@@ -557,22 +565,26 @@ vl_api_osvbng_cgnat_session_dump_t_handler (
 
       cgnat_session_t *s = pool_elt_at_index (cm->sessions, si);
 
-      if (f_inside.as_u32 && s->inside_ip.as_u32 != f_inside.as_u32)
+      if (f_inside.as_u32 &&
+	  cgnat_session_inside_ip (s).as_u32 != f_inside.as_u32)
 	continue;
-      if (f_outside.as_u32 && s->outside_ip.as_u32 != f_outside.as_u32)
+      if (f_outside.as_u32 &&
+	  cgnat_session_outside_ip (s).as_u32 != f_outside.as_u32)
 	continue;
-      if (f_remote.as_u32 && s->remote_ip.as_u32 != f_remote.as_u32)
+      if (f_remote.as_u32 &&
+	  cgnat_session_remote_ip (s).as_u32 != f_remote.as_u32)
 	continue;
       if (f_inside_port &&
-	  clib_net_to_host_u16 (s->inside_port) != f_inside_port)
+	  clib_net_to_host_u16 (cgnat_session_inside_port (s)) != f_inside_port)
 	continue;
       if (f_outside_port &&
-	  clib_net_to_host_u16 (s->outside_port) != f_outside_port)
+	  clib_net_to_host_u16 (cgnat_session_outside_port (s)) !=
+	    f_outside_port)
 	continue;
       if (f_remote_port &&
-	  clib_net_to_host_u16 (s->remote_port) != f_remote_port)
+	  clib_net_to_host_u16 (cgnat_session_remote_port (s)) != f_remote_port)
 	continue;
-      if (f_proto && s->proto != f_proto)
+      if (f_proto && cgnat_session_proto (s) != f_proto)
 	continue;
 
       if (pool_is_free_index (cm->pools, s->pool_index))

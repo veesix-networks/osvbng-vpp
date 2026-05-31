@@ -136,60 +136,57 @@ cgnat_in2out_ports_from_reass (vlib_buffer_t *b0, ip4_header_t *ip0, u8 proto0,
   return 0;
 }
 
-/* Rewrite src_ip and src_port (or ICMP echo id) on a matched in2out session.
- * Shared by both fast and slow nodes — slow uses it on the first packet
- * after session_create, fast uses it on every subsequent packet. */
+/* Apply the i2o flow's rewrite: replace ip0->src + L4 sport using the flow's
+ * precomputed L3/L4 checksum deltas (one ip_csum_add_even + fold per
+ * checksum). Shared by fast and slow paths — slow calls it on the first
+ * packet after session_create, fast on every subsequent packet. */
 always_inline void
 cgnat_in2out_translate (vlib_main_t *vm, vlib_buffer_t *b0, ip4_header_t *ip0,
-			cgnat_session_t *s0, u8 proto0, u16 src_port0, f64 now)
+			cgnat_session_t *s0, u8 proto0, f64 now)
 {
+  cgnat_flow_t *f = &s0->i2o;
+
   s0->last_active = now;
   s0->total_pkts++;
   s0->total_bytes += vlib_buffer_length_in_chain (vm, b0);
 
-  ip4_address_t old_src = ip0->src_address;
-  u16 old_port = src_port0;
-
-  ip0->src_address.as_u32 = s0->outside_ip.as_u32;
-  cgnat_ip4_checksum_update (ip0, old_src, ip0->src_address);
+  ip0->src_address = f->rewrite_saddr;
+  ip0->checksum =
+    ip_csum_fold (ip_csum_add_even (ip0->checksum, f->l3_csum_delta));
 
   if (proto0 == IP_PROTOCOL_TCP)
     {
       tcp_header_t *tcp0 =
 	(tcp_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
-      ip_csum_t sum = tcp0->checksum;
-      cgnat_l4_checksum_update_ip (&sum, old_src, ip0->src_address);
-      cgnat_l4_checksum_update_port (&sum, old_port, s0->outside_port);
-      tcp0->src_port = s0->outside_port;
-      tcp0->checksum = ip_csum_fold (sum);
+      tcp0->src_port = f->rewrite_sport;
+      tcp0->checksum =
+	ip_csum_fold (ip_csum_add_even (tcp0->checksum, f->l4_csum_delta));
     }
   else if (proto0 == IP_PROTOCOL_UDP)
     {
       udp_header_t *udp0 =
 	(udp_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
-      if (udp0->checksum != 0)
+      udp_header_t old_udp = *udp0;
+      udp0->src_port = f->rewrite_sport;
+      if (old_udp.checksum != 0)
 	{
-	  ip_csum_t sum = udp0->checksum;
-	  cgnat_l4_checksum_update_ip (&sum, old_src, ip0->src_address);
-	  cgnat_l4_checksum_update_port (&sum, old_port, s0->outside_port);
-	  udp0->checksum = ip_csum_fold (sum);
+	  udp0->checksum = ip_csum_fold (
+	    ip_csum_add_even (old_udp.checksum, f->l4_csum_delta));
 	  if (udp0->checksum == 0)
 	    udp0->checksum = 0xFFFF;
 	}
-      udp0->src_port = s0->outside_port;
     }
   else if (proto0 == IP_PROTOCOL_ICMP)
     {
       icmp46_header_t *icmp0 =
 	(icmp46_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
       u16 *id0 = (u16 *) (icmp0 + 1);
-      if (icmp0->type == ICMP4_echo_request ||
-	  icmp0->type == ICMP4_echo_reply)
+      u8 itype = icmp0->type;
+      if (itype == ICMP4_echo_request || itype == ICMP4_echo_reply)
 	{
-	  ip_csum_t sum = icmp0->checksum;
-	  cgnat_l4_checksum_update_port (&sum, old_port, s0->outside_port);
-	  *id0 = s0->outside_port;
-	  icmp0->checksum = ip_csum_fold (sum);
+	  *id0 = f->rewrite_sport;
+	  icmp0->checksum = ip_csum_fold (
+	    ip_csum_add_even (icmp0->checksum, f->l4_csum_delta));
 	}
     }
 }
@@ -318,7 +315,7 @@ VLIB_NODE_FN (cgnat_in2out_node)
 	      goto trace;
 	    }
 
-	  cgnat_in2out_translate (vm, b0, ip0, s0, proto0, src_port0, now);
+	  cgnat_in2out_translate (vm, b0, ip0, s0, proto0, now);
 
 	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = pool0->outside_fib_index;
 
@@ -507,7 +504,7 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 	      trace_action = CGNAT_TRACE_TRANSLATED;
 	    }
 
-	  cgnat_in2out_translate (vm, b0, ip0, s0, proto0, src_port0, now);
+	  cgnat_in2out_translate (vm, b0, ip0, s0, proto0, now);
 
 	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = pool0->outside_fib_index;
 

@@ -85,29 +85,118 @@ extern char *cgnat_error_strings[];
 #define VNET_API_ERROR_ENTRY_NEEDS_REFRESH (-500)
 #endif
 
+/* Per-direction flow record. One cgnat_session_t carries two: i2o (the
+ * subscriber-originated lookup + the outside rewrite to apply) and o2i (the
+ * outside-originated lookup + the inside rewrite to apply). Each carries its
+ * own match key + rewrite targets + precomputed L3/L4 checksum delta, so the
+ * fast path picks ONE flow record per packet based on which bihash matched
+ * and applies one ip_csum_add_even + fold per checksum. Direction-specific is
+ * required for correctness (applying an i2o delta on an o2i packet produces
+ * wrong checksums). Mirrors nat44-ed's nat_6t_flow_t pattern. */
+/* Layout: u64-aligned ip_csum_t fields first so the natural alignment of the
+ * struct (8 bytes) matches and no internal padding is wasted. Total is 56
+ * bytes (8+8+4+4+4+4+4+4+2+2+2+2+1 + 7 trailing pad to round to 8-byte align).
+ * Two of these fit comfortably in one cache line with room for small per-
+ * direction fields. */
 typedef struct
 {
-  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+  ip_csum_t l3_csum_delta;
+  ip_csum_t l4_csum_delta;
 
-  ip4_address_t inside_ip;
-  ip4_address_t outside_ip;
-  ip4_address_t remote_ip;
-  u16 inside_port;
-  u16 outside_port;
-  u16 remote_port;
+  ip4_address_t saddr;
+  ip4_address_t daddr;
+  ip4_address_t rewrite_saddr;
+  ip4_address_t rewrite_daddr;
+
+  u32 fib_index;
+  u32 rewrite_fib_index;
+
+  u16 sport;
+  u16 dport;
+  u16 rewrite_sport;
+  u16 rewrite_dport;
+
   u8 proto;
+  u8 _pad[7];
+} cgnat_flow_t;
+
+STATIC_ASSERT_SIZEOF (cgnat_flow_t, 56);
+
+typedef struct
+{
+  /* Line 0: in2out flow record + per-direction small fields read on the i2o
+   * fast path. tcp_state read for state-aware timeout once TCP state lands
+   * in phase 7. alg_flags kept for #151 wire compat (always 0 after phase 10
+   * removes the set code). 56 + 1 + 1 + 6 = 64. */
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+  cgnat_flow_t i2o;
+  u8 tcp_state;
   u8 alg_flags;
+  u8 _pad0[6];
 
-  u32 inside_fib_index;
-  u32 pool_index;
+  /* Line 1: out2in flow record + back-references resolved on the o2i fast
+   * path. mapping_index used by session_delete for cleanup; pool_index used
+   * by the session dump handler to resolve operator-facing pool_id.
+   * 56 + 4 + 4 = 64. */
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline1);
+  cgnat_flow_t o2i;
   u32 mapping_index;
+  u32 pool_index;
 
+  /* Line 2: written on every translated packet (bookkeeping). Separate cache
+   * line keeps the read-mostly flow records out of the dirty-line write set.
+   * 8 + 8 + 8 + 8 + 2 + 30 = 64. */
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline2);
   f64 last_active;
-  f64 timeout;
-
   u64 total_pkts;
   u64 total_bytes;
+  f64 timeout;
+  u8 tcp_flags[2];
+  u8 _pad2[30];
 } cgnat_session_t;
+
+STATIC_ASSERT_SIZEOF (cgnat_session_t, 192);
+
+/* Inline read accessors derive #151 wire-compatible field names from the new
+ * two-flow-record layout. Writers (cgnat_session_create) touch flow fields
+ * directly; readers go through these so the dump handler doesn't need to know
+ * the new shape. */
+always_inline ip4_address_t cgnat_session_inside_ip (cgnat_session_t *s)
+{
+  return s->i2o.saddr;
+}
+always_inline ip4_address_t cgnat_session_outside_ip (cgnat_session_t *s)
+{
+  return s->i2o.rewrite_saddr;
+}
+always_inline ip4_address_t cgnat_session_remote_ip (cgnat_session_t *s)
+{
+  return s->i2o.daddr;
+}
+always_inline u16 cgnat_session_inside_port (cgnat_session_t *s)
+{
+  return s->i2o.sport;
+}
+always_inline u16 cgnat_session_outside_port (cgnat_session_t *s)
+{
+  return s->i2o.rewrite_sport;
+}
+always_inline u16 cgnat_session_remote_port (cgnat_session_t *s)
+{
+  return s->i2o.dport;
+}
+always_inline u8 cgnat_session_proto (cgnat_session_t *s)
+{
+  return s->i2o.proto;
+}
+always_inline u32 cgnat_session_inside_fib (cgnat_session_t *s)
+{
+  return s->i2o.fib_index;
+}
+always_inline u32 cgnat_session_outside_fib (cgnat_session_t *s)
+{
+  return s->i2o.rewrite_fib_index;
+}
 
 typedef struct
 {
