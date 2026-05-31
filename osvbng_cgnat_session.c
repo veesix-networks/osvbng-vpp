@@ -266,14 +266,19 @@ static inline void
 cgnat_flow_csum_calc (cgnat_flow_t *f, u32 old_addr, u32 new_addr, u16 old_port,
 		      u16 new_port, int is_l4_pseudohdr)
 {
+  /* Incremental IP-checksum delta = old - new (one's complement). Applied
+   * at translate via ip_csum_add_even: new_csum = old_csum + (old - new),
+   * which is the standard 16-bit-word-replace incremental update. nat44-ed
+   * stores +(new - old) and applies via ip_csum_sub_even; we store the
+   * opposite sign and apply with ip_csum_add_even — same end result. */
   ip_csum_t l3 = 0;
-  l3 = ip_csum_sub_even (l3, old_addr);
-  l3 = ip_csum_add_even (l3, new_addr);
+  l3 = ip_csum_sub_even (l3, new_addr);
+  l3 = ip_csum_add_even (l3, old_addr);
   f->l3_csum_delta = l3;
 
   ip_csum_t l4 = is_l4_pseudohdr ? l3 : 0;
-  l4 = ip_csum_sub_even (l4, old_port);
-  l4 = ip_csum_add_even (l4, new_port);
+  l4 = ip_csum_sub_even (l4, new_port);
+  l4 = ip_csum_add_even (l4, old_port);
   f->l4_csum_delta = l4;
 }
 
