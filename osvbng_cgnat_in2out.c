@@ -158,10 +158,6 @@ cgnat_in2out_translate (vlib_main_t *vm, vlib_buffer_t *b0, ip4_header_t *ip0,
 VLIB_NODE_FN (cgnat_in2out_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
-  /* Single-worker invariant (D15) — cm->sessions / mapping->session_count /
-   * cgnat_port_alloc are not thread-safe. ASSERT no-ops in production
-   * builds; CI catches misconfigured multi-worker deployments. */
-  ASSERT (vm->thread_index == 0);
   cgnat_main_t *cm = &cgnat_main;
   u32 n_left_from, *from, *to_next;
   cgnat_in2out_next_t next_index;
@@ -288,6 +284,15 @@ VLIB_NODE_FN (cgnat_in2out_node)
 	      goto trace;
 	    }
 
+	  if (cgnat_session_owner_check (vm, s0))
+	    {
+	      trace_action = CGNAT_TRACE_DROPPED;
+	      next0 = CGNAT_IN2OUT_NEXT_DROP;
+	      pkts_dropped++;
+	      b0->error = node->errors[CGNAT_ERROR_WRONG_WORKER];
+	      goto trace;
+	    }
+
 	  cgnat_in2out_translate (vm, b0, ip0, s0, proto0, now);
 
 	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = pool0->outside_fib_index;
@@ -336,7 +341,6 @@ VLIB_NODE_FN (cgnat_in2out_node)
 VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
-  ASSERT (vm->thread_index == 0);
   cgnat_main_t *cm = &cgnat_main;
   u32 n_left_from, *from, *to_next;
   cgnat_in2out_next_t next_index;
@@ -588,6 +592,15 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 	      trace_action = CGNAT_TRACE_TRANSLATED;
 	    }
 
+	  if (cgnat_session_owner_check (vm, s0))
+	    {
+	      trace_action = CGNAT_TRACE_DROPPED;
+	      next0 = CGNAT_IN2OUT_NEXT_DROP;
+	      pkts_dropped++;
+	      b0->error = node->errors[CGNAT_ERROR_WRONG_WORKER];
+	      goto trace;
+	    }
+
 	  cgnat_in2out_translate (vm, b0, ip0, s0, proto0, now);
 
 	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = pool0->outside_fib_index;
@@ -662,12 +675,10 @@ VLIB_REGISTER_NODE (cgnat_in2out_slowpath_node) = {
   },
 };
 
-VNET_FEATURE_INIT (cgnat_in2out_feat, static) = {
-  .arc_name = "ip4-unicast",
-  .node_name = "cgnat-in2out",
-  .runs_after = VNET_FEATURES ("ip4-sv-reassembly-feature"),
-  .runs_before = VNET_FEATURES ("ip4-lookup"),
-};
+/* cgnat-in2out is no longer registered as a feature itself; the
+ * cgnat-in2out-worker-handoff node (in osvbng_cgnat_handoff.c) is the
+ * feature, and after the handoff dispatches to the owning worker, that
+ * worker's cgnat-in2out picks up from the frame queue. */
 
 /*
  * Local Variables:

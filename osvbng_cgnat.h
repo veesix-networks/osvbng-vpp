@@ -176,8 +176,9 @@ typedef struct
    * line keeps the read-mostly flow records out of the dirty-line write set.
    * frag_rewrite_index is an O(1) back-pointer into cm->frag_rewrite_pool so
    * session_delete can refcount-down without re-keying the aux bihash.
-   * thread_index identifies which worker owns this session — required for
-   * the multi-worker per-thread-pool model (per AMENDMENT-MULTI-WORKER).
+   * thread_index identifies which worker owns this session — required so
+   * the bihash value packing can route the lookup back to the owning
+   * worker's per-thread session pool.
    * 8 + 8 + 8 + 8 + 4 + 4 + 2 + 22 = 64. */
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline2);
   f64 last_active;
@@ -395,11 +396,10 @@ typedef enum
   CGNAT_OUT2IN_N_NEXT,
 } cgnat_out2in_next_t;
 
-/* Per-worker state (AMENDMENT-MULTI-WORKER). Each VPP worker thread owns its
- * own session pool so the hot path mutates only thread-local cache lines —
- * no cross-thread MESI ping-pong on s->last_active / s->total_pkts etc.
- * Aux fragment rewrite pool stays SHARED (rare, slow-path only, atomic
- * refcount avoids the per-thread split). */
+/* Per-worker state. Each VPP worker thread owns its own session pool so the
+ * hot path mutates only thread-local cache lines — no cross-thread MESI
+ * ping-pong on s->last_active / s->total_pkts etc. Aux fragment rewrite
+ * pool stays SHARED on cgnat_main_t (rare, slow-path only, refcounted). */
 typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
@@ -430,6 +430,13 @@ typedef struct
    * different workers share an aux key. */
   cgnat_frag_rewrite_t *frag_rewrite_pool;
   clib_spinlock_t frag_rewrite_lock;
+
+  /* Worker-handoff frame queue indices. Registered at plugin init time
+   * for the cgnat-in2out / cgnat-out2in nodes; the handoff nodes use
+   * vlib_buffer_enqueue_to_thread (vm, node, fq_index, ...) to dispatch
+   * to the owning worker. */
+  u32 fq_in2out_index;
+  u32 fq_out2in_index;
 
   /* Fragment rewrite aux bihash (D14). bihash_16_8 keyed on
    * (saddr, daddr, proto, fib_index) — same shape as the session tables so
@@ -485,6 +492,55 @@ cgnat_session_count_total (void)
     total += pool_elts (vec_elt_at_index (cm->per_thread_data, ti)->sessions);
   return total;
 }
+
+/* Worker-index hash for the handoff nodes. Pin a flow to a worker by
+ * hashing the tuple that's stable across both directions of the flow:
+ * in2out direction = (inside_ip, inside_fib_index); out2in direction =
+ * (outside_ip, outside_port). The same flow always hashes to the same
+ * worker, so the session struct lives on one worker's cache and stays hot.
+ * Returns absolute VPP thread index (workers are at thread_index >= 1; main
+ * thread is 0). Empty `workers` vec → always thread 0 (single-worker
+ * deployment). */
+always_inline u32
+cgnat_hash_to_worker (u32 hash)
+{
+  vlib_thread_main_t *tm = vlib_get_thread_main ();
+  u32 n_workers = tm->n_vlib_mains - 1;
+  if (n_workers <= 1)
+    return tm->n_vlib_mains > 1 ? 1 : 0;
+  /* Pick a worker (1..n_workers) by hash; main thread (0) doesn't run
+   * the datapath in multi-worker mode. */
+  return 1 + (hash % n_workers);
+}
+
+always_inline u32
+cgnat_get_in2out_worker_index (ip4_header_t *ip, u32 rx_fib_index)
+{
+  u32 ip_h = ip->src_address.as_u32;
+  u32 hash = ip_h + (ip_h >> 8) + (ip_h >> 16) + (ip_h >> 24) + rx_fib_index;
+  return cgnat_hash_to_worker (hash);
+}
+
+always_inline u32
+cgnat_get_out2in_worker_index (ip4_header_t *ip, u16 dst_port)
+{
+  u32 ip_h = ip->dst_address.as_u32;
+  u32 hash = ip_h + (ip_h >> 8) + (ip_h >> 16) + (ip_h >> 24) +
+	     ((u32) dst_port << 4);
+  return cgnat_hash_to_worker (hash);
+}
+
+/* Returns 1 if the caller must drop because the session belongs to another
+ * worker. Handoff should make this unreachable, but a counter beats a crash
+ * if a hash mismatch ever lands a packet on the wrong worker. */
+always_inline int
+cgnat_session_owner_check (vlib_main_t *vm, cgnat_session_t *s0)
+{
+  return PREDICT_FALSE (s0->thread_index != vm->thread_index);
+}
+
+extern vlib_node_registration_t cgnat_in2out_worker_handoff_node;
+extern vlib_node_registration_t cgnat_out2in_worker_handoff_node;
 
 int cgnat_pool_add_del (cgnat_pool_t *cfg, u8 is_add);
 int cgnat_set_outside_fib (u32 pool_id, u32 vrf_id);

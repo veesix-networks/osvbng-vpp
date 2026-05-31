@@ -773,7 +773,11 @@ const static dpo_vft_t cgnat_dpo_vft = {
 };
 
 const static char *const cgnat_dpo_ip4_nodes[] = {
-  "cgnat-out2in",
+  /* Outside-side packets arrive via this DPO (installed on outside-FIB
+   * entries for each pool's outside CGN addresses). The handoff hashes
+   * on (outside_ip, outside_port) and dispatches to the worker that
+   * owns the session created by the matching in2out flow. */
+  "cgnat-out2in-worker-handoff",
   NULL,
 };
 
@@ -822,6 +826,32 @@ osvbng_cgnat_init (vlib_main_t *vm)
 }
 
 VLIB_INIT_FUNCTION (osvbng_cgnat_init);
+
+/* Frame queue registration + per-thread resize happen at main-loop-enter
+ * because vlib_num_workers() and vlib_thread_main_t->n_vlib_mains return
+ * stable values only after workers exist. */
+static clib_error_t *
+osvbng_cgnat_main_loop_enter (vlib_main_t *vm)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  vlib_thread_main_t *tm = vlib_get_thread_main ();
+  u32 n_threads = tm->n_vlib_mains;
+
+  vec_validate_aligned (cm->per_thread_data, n_threads - 1,
+			CLIB_CACHE_LINE_BYTES);
+
+  cm->fq_in2out_index = vlib_frame_queue_main_init (
+    vlib_get_node_by_name (vm, (u8 *) "cgnat-in2out")->index, 0);
+  cm->fq_out2in_index = vlib_frame_queue_main_init (
+    vlib_get_node_by_name (vm, (u8 *) "cgnat-out2in")->index, 0);
+
+  vlib_log_notice (cm->log_class,
+		   "main loop enter: per_thread_data sized to %u, fq_in2out=%u, fq_out2in=%u",
+		   n_threads, cm->fq_in2out_index, cm->fq_out2in_index);
+  return 0;
+}
+
+VLIB_MAIN_LOOP_ENTER_FUNCTION (osvbng_cgnat_main_loop_enter);
 
 VLIB_PLUGIN_REGISTER () = {
   .version = "1.0.0",
