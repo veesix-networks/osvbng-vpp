@@ -639,10 +639,10 @@ vl_api_osvbng_cgnat_session_dump_t_handler (
 
   f64 now = vlib_time_now (cm->vlib_main);
 
-  /* Walk per-thread session pools by index with per-slot validity rechecks,
-     mirroring cgnat_session_expire_walk. No worker barrier: this read-only walk
-     accepts the same races the expiry walker already does, rather than stalling
-     the dataplane on the shared core for every page. Cursor encodes thread_index
+  /* Walk per-thread session pools by index with per-slot validity rechecks.
+     No worker barrier: this read-only walk accepts the same races the expiry
+     walker already does, rather than stalling the dataplane on the shared
+     core for every page. Cursor encodes thread_index
      in the high bits so #151's pagination resumes correctly across thread
      boundaries. Layout: cursor = (thread_index << 24) | per_thread_index — gives
      us 256 threads and ~16M sessions per thread, comfortably above any sane

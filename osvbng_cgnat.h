@@ -438,6 +438,12 @@ typedef struct
   u32 fq_in2out_index;
   u32 fq_out2in_index;
 
+  /* Per-worker expire walk. The centralised process node ticks every 10s
+   * on the main thread and interrupts the per-worker walk node on each
+   * thread; the per-worker walk reaps only its own per-thread session pool
+   * so no cross-thread pool_put is ever issued. */
+  u32 expire_worker_walk_node_index;
+
   /* Fragment rewrite aux bihash (D14). bihash_16_8 keyed on
    * (saddr, daddr, proto, fib_index) — same shape as the session tables so
    * collisions only occur on the true (saddr,daddr,proto,fib) equivalence
@@ -580,7 +586,6 @@ cgnat_session_t *cgnat_session_lookup_out2in (ip4_address_t *dst_ip,
 void cgnat_session_delete (cgnat_session_t *s);
 u16 cgnat_port_alloc (cgnat_mapping_t *m, f64 now);
 void cgnat_port_free (cgnat_mapping_t *m, u16 port);
-void cgnat_session_expire_walk (vlib_main_t *vm, f64 now);
 void cgnat_session_table_init (void);
 
 /* Aux fragment rewrite record lookup for non-first fragments. Returns NULL

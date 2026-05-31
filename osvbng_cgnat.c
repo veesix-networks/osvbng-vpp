@@ -845,9 +845,13 @@ osvbng_cgnat_main_loop_enter (vlib_main_t *vm)
   cm->fq_out2in_index = vlib_frame_queue_main_init (
     vlib_get_node_by_name (vm, (u8 *) "cgnat-out2in")->index, 0);
 
+  cm->expire_worker_walk_node_index =
+    vlib_get_node_by_name (vm, (u8 *) "cgnat-expire-worker-walk")->index;
+
   vlib_log_notice (cm->log_class,
-		   "main loop enter: per_thread_data sized to %u, fq_in2out=%u, fq_out2in=%u",
-		   n_threads, cm->fq_in2out_index, cm->fq_out2in_index);
+		   "main loop enter: per_thread_data sized to %u, fq_in2out=%u, fq_out2in=%u, expire_walk_node=%u",
+		   n_threads, cm->fq_in2out_index, cm->fq_out2in_index,
+		   cm->expire_worker_walk_node_index);
   return 0;
 }
 
