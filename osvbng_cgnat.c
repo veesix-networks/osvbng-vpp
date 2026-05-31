@@ -10,6 +10,7 @@
 #include <vnet/plugin/plugin.h>
 #include <vnet/feature/feature.h>
 #include <vnet/fib/fib_table.h>
+#include <vnet/ip/reass/ip4_sv_reass.h>
 
 #include <osvbng_cgnat/osvbng_cgnat.h>
 
@@ -162,6 +163,11 @@ cgnat_pool_add_del (cgnat_pool_t *cfg, u8 is_add)
 
       vec_free (pool->inside_prefixes);
       vec_free (pool->det_params);
+
+      for (u32 i = 0; i < vec_len (pool->outside_sw_if_indexes); i++)
+	ip4_sv_reass_enable_disable_with_refcnt (
+	  pool->outside_sw_if_indexes[i], 0);
+      vec_free (pool->outside_sw_if_indexes);
       hash_unset (cm->pool_by_id, pool->pool_id);
       pool_put (cm->pools, pool);
 
@@ -294,12 +300,25 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
       clib_bihash_add_del_8_8 (&cm->inside_lookup, &kv, 1);
 
       if (enable_feature)
-	vnet_feature_enable_disable ("ip4-unicast", "cgnat-in2out",
-				     sw_if_index, 1, 0, 0);
+	{
+	  int rrv = ip4_sv_reass_enable_disable_with_refcnt (sw_if_index, 1);
+	  if (rrv)
+	    {
+	      clib_bihash_add_del_8_8 (&cm->inside_lookup, &kv, 0);
+	      vec_free (m->port_reuse_timestamps);
+	      pool_put (cm->mappings, m);
+	      vlib_log_err (cm->log_class,
+			    "mapping %U sv-reass refcnt-enable failed (sw_if %u rv %d) — rolled back",
+			    format_ip4_address, inside_ip, sw_if_index, rrv);
+	      return rrv;
+	    }
+	  vnet_feature_enable_disable ("ip4-unicast", "cgnat-in2out",
+				       sw_if_index, 1, 0, 0);
+	}
 
       vlib_log_notice (
 	cm->log_class,
-	"mapping added: %U → %U:%u-%u (pool %u, sw_if %u)",
+	"mapping added: %U -> %U:%u-%u (pool %u, sw_if %u)",
 	format_ip4_address, inside_ip, format_ip4_address, outside_ip,
 	port_start, port_end, pool_id, sw_if_index);
     }
@@ -318,8 +337,11 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
       cgnat_mapping_t *m = pool_elt_at_index (cm->mappings, mapping_index);
 
       if (enable_feature || m->sw_if_index != ~0)
-	vnet_feature_enable_disable ("ip4-unicast", "cgnat-in2out",
-				     m->sw_if_index, 0, 0, 0);
+	{
+	  vnet_feature_enable_disable ("ip4-unicast", "cgnat-in2out",
+				       m->sw_if_index, 0, 0, 0);
+	  ip4_sv_reass_enable_disable_with_refcnt (m->sw_if_index, 0);
+	}
 
       /* TODO: walk and delete all sessions for this mapping */
 
@@ -344,12 +366,79 @@ cgnat_enable_on_session (u32 pool_id, u32 sw_if_index, u8 is_enable)
   if (!p)
     return VNET_API_ERROR_NO_SUCH_ENTRY;
 
-  vnet_feature_enable_disable ("ip4-unicast", "cgnat-in2out", sw_if_index,
-			       is_enable, 0, 0);
+  if (is_enable)
+    {
+      int rrv = ip4_sv_reass_enable_disable_with_refcnt (sw_if_index, 1);
+      if (rrv)
+	{
+	  vlib_log_err (
+	    cm->log_class,
+	    "cgnat-in2out sv-reass refcnt-enable failed (sw_if %u rv %d)",
+	    sw_if_index, rrv);
+	  return rrv;
+	}
+      vnet_feature_enable_disable ("ip4-unicast", "cgnat-in2out", sw_if_index,
+				   1, 0, 0);
+    }
+  else
+    {
+      vnet_feature_enable_disable ("ip4-unicast", "cgnat-in2out", sw_if_index,
+				   0, 0, 0);
+      ip4_sv_reass_enable_disable_with_refcnt (sw_if_index, 0);
+    }
 
   vlib_log_notice (cm->log_class, "cgnat-in2out %s on sw_if %u (pool %u)",
 		   is_enable ? "enabled" : "disabled", sw_if_index, pool_id);
   return 0;
+}
+
+int
+cgnat_pool_outside_interface_add_del (u32 pool_id, u32 sw_if_index, u8 is_add)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  uword *p = hash_get (cm->pool_by_id, pool_id);
+
+  if (!p)
+    return VNET_API_ERROR_NO_SUCH_ENTRY;
+
+  cgnat_pool_t *pool = pool_elt_at_index (cm->pools, p[0]);
+  u32 i;
+
+  if (is_add)
+    {
+      for (i = 0; i < vec_len (pool->outside_sw_if_indexes); i++)
+	if (pool->outside_sw_if_indexes[i] == sw_if_index)
+	  return 0;
+
+      int rrv = ip4_sv_reass_enable_disable_with_refcnt (sw_if_index, 1);
+      if (rrv)
+	{
+	  vlib_log_err (cm->log_class,
+			"pool %u outside-iface %u sv-reass refcnt-enable "
+			"failed (rv %d)",
+			pool_id, sw_if_index, rrv);
+	  return rrv;
+	}
+      vec_add1 (pool->outside_sw_if_indexes, sw_if_index);
+      vlib_log_notice (cm->log_class,
+		       "pool %u outside-iface %u sv-reass refcnt-enabled",
+		       pool_id, sw_if_index);
+      return 0;
+    }
+
+  for (i = 0; i < vec_len (pool->outside_sw_if_indexes); i++)
+    {
+      if (pool->outside_sw_if_indexes[i] == sw_if_index)
+	{
+	  ip4_sv_reass_enable_disable_with_refcnt (sw_if_index, 0);
+	  vec_del1 (pool->outside_sw_if_indexes, i);
+	  vlib_log_notice (cm->log_class,
+			   "pool %u outside-iface %u sv-reass refcnt-disabled",
+			   pool_id, sw_if_index);
+	  return 0;
+	}
+    }
+  return VNET_API_ERROR_NO_SUCH_ENTRY;
 }
 
 int

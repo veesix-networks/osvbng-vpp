@@ -201,6 +201,13 @@ typedef struct
   fib_node_index_t *outside_fib_entries;
   dpo_id_t dpo;
 
+  /* Outside sw_if_indexes this pool has refcnt-enabled
+   * `ip4-sv-reassembly-feature` on. Vec so multiple interfaces per pool are
+   * supported; the sv-reass refcnt itself is global per sw_if so multiple
+   * pools sharing an interface compose correctly. Cleaned up by
+   * cgnat_pool_cascade_delete. */
+  u32 *outside_sw_if_indexes;
+
   cgnat_inside_prefix_entry_t *inside_prefixes;
 
   cgnat_det_params_t *det_params;
@@ -277,6 +284,8 @@ int cgnat_enable_on_session (u32 pool_id, u32 sw_if_index, u8 is_enable);
 int cgnat_add_del_bypass (fib_prefix_t *prefix, u32 vrf_id, u8 is_add);
 int cgnat_pool_add_outside_prefix (u32 pool_id, fib_prefix_t *prefix);
 int cgnat_pool_del_outside_prefix (u32 pool_id, fib_prefix_t *prefix);
+int cgnat_pool_outside_interface_add_del (u32 pool_id, u32 sw_if_index,
+					  u8 is_add);
 int cgnat_pool_inside_prefix_add_del (u32 pool_id, fib_prefix_t *prefix,
 				      u32 vrf_id, u8 is_add);
 void cgnat_dpo_module_init (void);

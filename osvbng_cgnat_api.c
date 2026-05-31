@@ -245,6 +245,21 @@ vl_api_osvbng_cgnat_enable_on_session_t_handler (
   REPLY_MACRO (VL_API_OSVBNG_CGNAT_ENABLE_ON_SESSION_REPLY);
 }
 
+static void
+vl_api_osvbng_cgnat_pool_outside_interface_add_del_t_handler (
+  vl_api_osvbng_cgnat_pool_outside_interface_add_del_t *mp)
+{
+  cgnat_main_t *cm = &cgnat_main;
+  vl_api_osvbng_cgnat_pool_outside_interface_add_del_reply_t *rmp;
+  int rv = 0;
+
+  rv = cgnat_pool_outside_interface_add_del (
+    ntohl (mp->pool_id), ntohl (mp->sw_if_index), mp->is_add);
+
+  REPLY_MACRO (
+    VL_API_OSVBNG_CGNAT_POOL_OUTSIDE_INTERFACE_ADD_DEL_REPLY);
+}
+
 
 
 static void

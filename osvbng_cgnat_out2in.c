@@ -54,29 +54,38 @@ cgnat_out2in_ip4_checksum_update (ip4_header_t *ip, ip4_address_t old_addr,
   ip->checksum = ip_csum_fold (sum);
 }
 
-always_inline void
-cgnat_out2in_extract_ports (ip4_header_t *ip0, u8 proto0, u16 *src_port,
-			    u16 *dst_port)
+/* Pull L4 ports from the sv-reass-populated buffer metadata.
+ * Mirror of cgnat_in2out_ports_from_reass; the only difference is that for
+ * out2in the ICMP echo identifier is the *destination* identifier from our
+ * point of view (it's the outside-port we allocated). */
+always_inline int
+cgnat_out2in_ports_from_reass (vlib_buffer_t *b0, ip4_header_t *ip0,
+			       u8 proto0, u16 *src_port, u16 *dst_port)
 {
   *src_port = 0;
   *dst_port = 0;
 
+  if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.ip_proto != proto0))
+    return CGNAT_ERROR_NO_REASS_METADATA;
+
+  if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.l4_hdr_truncated))
+    return CGNAT_ERROR_NO_REASS_METADATA;
+
+  if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.is_non_first_fragment))
+    return CGNAT_ERROR_FRAGMENT_DROP;
+
   if (proto0 == IP_PROTOCOL_TCP || proto0 == IP_PROTOCOL_UDP)
     {
-      udp_header_t *udp0 =
-	(udp_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
-      *src_port = udp0->src_port;
-      *dst_port = udp0->dst_port;
+      *src_port = vnet_buffer (b0)->ip.reass.l4_src_port;
+      *dst_port = vnet_buffer (b0)->ip.reass.l4_dst_port;
     }
   else if (proto0 == IP_PROTOCOL_ICMP)
     {
-      icmp46_header_t *icmp0 =
-	(icmp46_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
-      u16 *id0 = (u16 *) (icmp0 + 1);
-      if (icmp0->type == ICMP4_echo_request ||
-	  icmp0->type == ICMP4_echo_reply)
-	*dst_port = *id0;
+      u8 icmp_type = vnet_buffer (b0)->ip.reass.icmp_type_or_tcp_flags;
+      if (icmp_type == ICMP4_echo_request || icmp_type == ICMP4_echo_reply)
+	*dst_port = vnet_buffer (b0)->ip.reass.l4_src_port;
     }
+  return 0;
 }
 
 /* Rewrite dst_ip and dst_port (or ICMP echo id) on a matched out2in session.
@@ -150,6 +159,9 @@ VLIB_NODE_FN (cgnat_out2in_node)
   cgnat_out2in_next_t next_index;
   u32 pkts_translated = 0;
   u32 pkts_slowpath = 0;
+  u32 pkts_dropped = 0;
+  u32 pkts_no_reass = 0;
+  u32 pkts_frag_drop = 0;
   f64 now = vlib_time_now (vm);
 
   from = vlib_frame_vector_args (frame);
@@ -186,7 +198,21 @@ VLIB_NODE_FN (cgnat_out2in_node)
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 	  proto0 = ip0->protocol;
 
-	  cgnat_out2in_extract_ports (ip0, proto0, &src_port0, &dst_port0);
+	  {
+	    int rerr = cgnat_out2in_ports_from_reass (b0, ip0, proto0,
+						      &src_port0, &dst_port0);
+	    if (PREDICT_FALSE (rerr))
+	      {
+		next0 = CGNAT_OUT2IN_NEXT_DROP;
+		if (rerr == CGNAT_ERROR_FRAGMENT_DROP)
+		  pkts_frag_drop++;
+		else
+		  pkts_no_reass++;
+		pkts_dropped++;
+		b0->error = node->errors[rerr];
+		goto trace;
+	      }
+	  }
 
 	  u32 fib_index0 =
 	    vec_elt (ip4_main.fib_index_by_sw_if_index, sw_if_index0);
@@ -235,6 +261,12 @@ VLIB_NODE_FN (cgnat_out2in_node)
 
   vlib_node_increment_counter (vm, node->node_index,
 			       CGNAT_ERROR_TRANSLATED, pkts_translated);
+  vlib_node_increment_counter (vm, node->node_index, CGNAT_ERROR_DROP,
+			       pkts_dropped);
+  vlib_node_increment_counter (vm, node->node_index,
+			       CGNAT_ERROR_NO_REASS_METADATA, pkts_no_reass);
+  vlib_node_increment_counter (vm, node->node_index,
+			       CGNAT_ERROR_FRAGMENT_DROP, pkts_frag_drop);
   (void) pkts_slowpath;
 
   return frame->n_vectors;
@@ -246,6 +278,8 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
   u32 n_left_from, *from, *to_next;
   cgnat_out2in_next_t next_index;
   u32 pkts_dropped = 0;
+  u32 pkts_no_reass = 0;
+  u32 pkts_frag_drop = 0;
 
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
@@ -279,11 +313,25 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 	  proto0 = ip0->protocol;
 
-	  cgnat_out2in_extract_ports (ip0, proto0, &src_port0, &dst_port0);
+	  {
+	    int rerr = cgnat_out2in_ports_from_reass (b0, ip0, proto0,
+						      &src_port0, &dst_port0);
+	    if (PREDICT_FALSE (rerr))
+	      {
+		if (rerr == CGNAT_ERROR_FRAGMENT_DROP)
+		  pkts_frag_drop++;
+		else
+		  pkts_no_reass++;
+		pkts_dropped++;
+		b0->error = node->errors[rerr];
+		goto enqueue;
+	      }
+	  }
 
 	  b0->error = node->errors[CGNAT_ERROR_NO_SESSION];
 	  pkts_dropped++;
 
+	enqueue:
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
 			     (b0->flags & VLIB_BUFFER_IS_TRACED)))
 	    {
@@ -307,6 +355,10 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 
   vlib_node_increment_counter (vm, node->node_index, CGNAT_ERROR_DROP,
 			       pkts_dropped);
+  vlib_node_increment_counter (vm, node->node_index,
+			       CGNAT_ERROR_NO_REASS_METADATA, pkts_no_reass);
+  vlib_node_increment_counter (vm, node->node_index,
+			       CGNAT_ERROR_FRAGMENT_DROP, pkts_frag_drop);
 
   return frame->n_vectors;
 }

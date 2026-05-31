@@ -198,6 +198,27 @@ autoreply define osvbng_cgnat_enable_on_session
   vl_api_interface_index_t sw_if_index;
 };
 
+/** \brief Refcnt-enable/disable ip4-sv-reassembly on an outside interface
+    Required because the cgnat-in2out fast path reads L4 ports out of
+    vnet_buffer(b)->ip.reass.* (populated by ip4-sv-reassembly upstream).
+    Each outside interface must be refcnt-enabled once per pool that
+    references it; the refcount is global per sw_if so multiple pools
+    sharing an outside interface compose correctly.
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param pool_id - pool that owns this outside interface entry
+    @param sw_if_index - outside interface
+    @param is_add - add (refcnt up) if true, delete (refcnt down) if false
+*/
+autoreply define osvbng_cgnat_pool_outside_interface_add_del
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+  vl_api_interface_index_t sw_if_index;
+  bool is_add;
+};
+
 /** \brief Add or delete a bypass prefix (static IP subscribers skip NAT)
     @param client_index - opaque cookie to identify the sender
     @param context - sender context, to match reply w/ request
