@@ -12,7 +12,6 @@ add_vpp_plugin(osvbng_cgnat
   osvbng_cgnat_session.c
   osvbng_cgnat_in2out.c
   osvbng_cgnat_out2in.c
-  osvbng_cgnat_handoff.c
 
   API_FILES
   osvbng_cgnat.api

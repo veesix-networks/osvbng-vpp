@@ -138,6 +138,7 @@ cgnat_out2in_translate (vlib_main_t *vm, vlib_buffer_t *b0, ip4_header_t *ip0,
 VLIB_NODE_FN (cgnat_out2in_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
+  ASSERT (vm->thread_index == 0);
   u32 n_left_from, *from, *to_next;
   cgnat_out2in_next_t next_index;
   u32 pkts_translated = 0;
@@ -216,14 +217,6 @@ VLIB_NODE_FN (cgnat_out2in_node)
 	      goto trace;
 	    }
 
-	  if (cgnat_session_owner_check (vm, s0))
-	    {
-	      next0 = CGNAT_OUT2IN_NEXT_DROP;
-	      pkts_dropped++;
-	      b0->error = node->errors[CGNAT_ERROR_WRONG_WORKER];
-	      goto trace;
-	    }
-
 	  found = 1;
 	  cgnat_out2in_translate (vm, b0, ip0, s0, proto0, now);
 
@@ -269,6 +262,7 @@ VLIB_NODE_FN (cgnat_out2in_node)
 VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
+  ASSERT (vm->thread_index == 0);
   u32 n_left_from, *from, *to_next;
   cgnat_out2in_next_t next_index;
   u32 pkts_dropped = 0;
@@ -390,14 +384,6 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 		  next0 = CGNAT_OUT2IN_NEXT_DROP;
 		  pkts_dropped++;
 		  b0->error = node->errors[CGNAT_ERROR_NO_SESSION];
-		  goto enqueue;
-		}
-
-	      if (cgnat_session_owner_check (vm, s0))
-		{
-		  next0 = CGNAT_OUT2IN_NEXT_DROP;
-		  pkts_dropped++;
-		  b0->error = node->errors[CGNAT_ERROR_WRONG_WORKER];
 		  goto enqueue;
 		}
 
