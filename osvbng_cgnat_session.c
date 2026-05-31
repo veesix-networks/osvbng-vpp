@@ -486,69 +486,49 @@ cgnat_session_delete (cgnat_session_t *s)
   pool_put (tsm->sessions, s);
 }
 
-/* Per-worker walk: each worker reaps only its own per-thread session pool.
- * Wakes on interrupt sent by the centralised process below; pool_put on a
- * worker-local pool is safe and never crosses threads. */
-static uword
-cgnat_expire_worker_walk_fn (vlib_main_t *vm, vlib_node_runtime_t *rt,
-			     vlib_frame_t *f)
+void
+cgnat_session_expire_walk (vlib_main_t *vm, f64 now)
 {
   cgnat_main_t *cm = &cgnat_main;
-  u32 thread_index = vm->thread_index;
-  f64 now = vlib_time_now (vm);
 
-  if (thread_index >= vec_len (cm->per_thread_data))
-    return 0;
-
-  cgnat_per_thread_data_t *tsm =
-    vec_elt_at_index (cm->per_thread_data, thread_index);
-  u32 *expired = NULL;
-  cgnat_session_t *s;
-
-  pool_foreach (s, tsm->sessions)
+  /* Walk each per-thread session pool. Commit 1 keeps this as a
+   * main-thread sweep that touches per-thread pools directly — safe under
+   * the kept single-worker ASSERT (only thread 0 has any sessions). Commit
+   * 3 of the amendment replaces this with per-thread expire processes so
+   * each worker reaps its own pool without cross-thread access. */
+  for (u32 ti = 0; ti < vec_len (cm->per_thread_data); ti++)
     {
-      if ((now - s->last_active) > s->timeout)
-	vec_add1 (expired, s - tsm->sessions);
-    }
+      cgnat_per_thread_data_t *tsm = vec_elt_at_index (cm->per_thread_data, ti);
+      u32 *expired = NULL;
+      cgnat_session_t *s;
 
-  for (u32 i = 0; i < vec_len (expired); i++)
-    {
-      u32 si = expired[i];
-      if (!pool_is_free_index (tsm->sessions, si))
-	cgnat_session_delete (pool_elt_at_index (tsm->sessions, si));
+      pool_foreach (s, tsm->sessions)
+	{
+	  if ((now - s->last_active) > s->timeout)
+	    vec_add1 (expired, s - tsm->sessions);
+	}
+
+      for (u32 i = 0; i < vec_len (expired); i++)
+	{
+	  u32 si = expired[i];
+	  if (!pool_is_free_index (tsm->sessions, si))
+	    cgnat_session_delete (pool_elt_at_index (tsm->sessions, si));
+	}
+      vec_free (expired);
     }
-  vec_free (expired);
-  return 0;
 }
 
-VLIB_REGISTER_NODE (cgnat_expire_worker_walk_node) = {
-  .function = cgnat_expire_worker_walk_fn,
-  .type = VLIB_NODE_TYPE_INPUT,
-  .state = VLIB_NODE_STATE_INTERRUPT,
-  .name = "cgnat-expire-worker-walk",
-};
-
-/* Centralised process: ticks every 10s on the main thread and fires an
- * interrupt at each worker's expire-walk input node. The main thread never
- * touches any per-thread session pool itself. */
 static uword
 cgnat_expire_process (vlib_main_t *vm, vlib_node_runtime_t *rt,
 		      vlib_frame_t *f)
 {
-  cgnat_main_t *cm = &cgnat_main;
-
   while (1)
     {
       vlib_process_wait_for_event_or_clock (vm, 10.0);
       vlib_process_get_events (vm, NULL);
 
-      for (u32 ti = 0; ti < vlib_get_n_threads (); ti++)
-	{
-	  vlib_main_t *worker_vm = vlib_get_main_by_index (ti);
-	  if (worker_vm)
-	    vlib_node_set_interrupt_pending (
-	      worker_vm, cm->expire_worker_walk_node_index);
-	}
+      f64 now = vlib_time_now (vm);
+      cgnat_session_expire_walk (vm, now);
     }
 
   return 0;
