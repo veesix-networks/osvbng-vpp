@@ -497,6 +497,13 @@ cgnat_session_expire_walk (vlib_main_t *vm, f64 now)
   cgnat_main_t *cm = &cgnat_main;
   cgnat_expire_ctx_t ctx = { .now = now, .expired = NULL };
 
+  /* Reap with the workers stopped. The fast path creates sessions
+   * (pool_get + bihash add) on worker threads; iterating the bihash and
+   * pool_put-ing sessions here on the main thread at the same time corrupts
+   * both (neither is safe for concurrent iterate/alloc/free) and wedges or
+   * crashes the dataplane. */
+  vlib_worker_thread_barrier_sync (vm);
+
   clib_bihash_foreach_key_value_pair_16_8 (&cm->session_table_in2out,
 					   cgnat_expire_walk_cb, &ctx);
 
@@ -509,6 +516,8 @@ cgnat_session_expire_walk (vlib_main_t *vm, f64 now)
 	  cgnat_session_delete (s);
 	}
     }
+
+  vlib_worker_thread_barrier_release (vm);
 
   vec_free (ctx.expired);
 }

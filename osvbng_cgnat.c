@@ -323,6 +323,8 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
 	  return VNET_API_ERROR_ENTRY_NEEDS_REFRESH;
 	}
 
+      vlib_worker_thread_barrier_sync (cm->vlib_main);
+
       cgnat_mapping_t *m;
       pool_get_zero (cm->mappings, m);
       u32 mapping_index = m - cm->mappings;
@@ -355,6 +357,7 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
 	      vec_free (m->port_reuse_timestamps);
 	      clib_spinlock_free (&m->lock);
 	      pool_put (cm->mappings, m);
+	      vlib_worker_thread_barrier_release (cm->vlib_main);
 	      vlib_log_err (cm->log_class,
 			    "mapping %U sv-reass refcnt-enable failed (sw_if %u rv %d) — rolled back",
 			    format_ip4_address, inside_ip, sw_if_index, rrv);
@@ -363,6 +366,8 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
 	  vnet_feature_enable_disable ("ip4-unicast", "cgnat-in2out",
 				       sw_if_index, 1, 0, 0);
 	}
+
+      vlib_worker_thread_barrier_release (cm->vlib_main);
 
       vlib_log_notice (
 	cm->log_class,
@@ -391,12 +396,30 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
 	  ip4_sv_reass_enable_disable_with_refcnt (m->sw_if_index, 0);
 	}
 
-      /* TODO: walk and delete all sessions for this mapping */
+      /* Stop the workers, then delete every session bound to this mapping
+       * before freeing it. Skipping the sweep orphans those sessions in
+       * cm->sessions and the session bihashes (still pointing at
+       * s->mapping_index); the expire reaper later dereferences this freed
+       * mapping's NULL spinlock and crashes. */
+      vlib_worker_thread_barrier_sync (cm->vlib_main);
+
+      u32 *kill = NULL;
+      cgnat_session_t *s;
+      pool_foreach (s, cm->sessions)
+	{
+	  if (s->mapping_index == mapping_index)
+	    vec_add1 (kill, s - cm->sessions);
+	}
+      for (u32 i = 0; i < vec_len (kill); i++)
+	cgnat_session_delete (pool_elt_at_index (cm->sessions, kill[i]));
+      vec_free (kill);
 
       vec_free (m->port_reuse_timestamps);
       clib_spinlock_free (&m->lock);
       clib_bihash_add_del_8_8 (&cm->inside_lookup, &kv, 0);
       pool_put (cm->mappings, m);
+
+      vlib_worker_thread_barrier_release (cm->vlib_main);
 
       vlib_log_notice (cm->log_class,
 		       "mapping removed: %U (pool %u)", format_ip4_address,
