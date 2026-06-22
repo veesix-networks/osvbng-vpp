@@ -67,6 +67,16 @@ typedef struct
   u32 sw_if_index;
   u32 hw_if_index;
 
+  /* IPv6 WAN address (DHCPv6 IA_NA) and delegated prefix (IA_PD),
+   * programmed after the session is established once DHCPv6 binds. The
+   * IPv6 decap FIB is resolved at session add alongside the v4 one. */
+  u32 decap_fib_index_ip6;
+  ip6_address_t client_ipv6;
+  u8 ipv6_bound;
+  ip6_address_t delegated_prefix;
+  u8 delegated_prefix_len;
+  ip6_address_t pd_next_hop;
+
   /* LAC bridge state. When set, this PPPoE session is bridged to an
    * L2TPv2 session (no local PPP termination). The punt and decap
    * paths forward full PPP frames to `l2tpv2-encap-raw` with
@@ -230,6 +240,17 @@ int vnet_osvbng_pppoe_add_del_session
  * on success or -1 if the sw_if_index does not resolve to a session. */
 int osvbng_pppoe_set_lac_tunnel
   (u32 sw_if_index, u8 is_lac_tunneled, u32 lac_l2tp_session_index);
+
+/* Set/clear the IPv6 WAN address (DHCPv6 IA_NA) on an established PPPoE
+ * session, installing or removing a /128 reverse route. */
+int vnet_pppoe_set_session_ipv6 (u32 sw_if_index, ip6_address_t *addr,
+                                 u8 is_add);
+
+/* Set/clear the delegated prefix (DHCPv6 IA_PD) on an established PPPoE
+ * session, installing or removing the prefix route. */
+int vnet_pppoe_set_delegated_prefix (u32 sw_if_index, ip6_address_t *prefix,
+                                     u8 prefix_len, ip6_address_t *next_hop,
+                                     u8 is_add);
 
 always_inline u64
 pppoe_make_key (u8 * mac_address, u16 session_id)

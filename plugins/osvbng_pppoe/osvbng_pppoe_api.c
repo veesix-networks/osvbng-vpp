@@ -78,6 +78,41 @@ static void vl_api_osvbng_pppoe_set_lac_tunnel_t_handler
   REPLY_MACRO (VL_API_OSVBNG_PPPOE_SET_LAC_TUNNEL_REPLY);
 }
 
+static void vl_api_osvbng_pppoe_set_session_ipv6_t_handler
+  (vl_api_osvbng_pppoe_set_session_ipv6_t * mp)
+{
+  vl_api_osvbng_pppoe_set_session_ipv6_reply_t *rmp;
+  osvbng_pppoe_main_t *pem = &osvbng_pppoe_main;
+  int rv = 0;
+
+  ip6_address_t addr;
+  clib_memcpy (&addr, mp->client_ip, sizeof (addr));
+
+  rv = vnet_pppoe_set_session_ipv6 (ntohl (mp->sw_if_index), &addr,
+                                    mp->is_add);
+
+  REPLY_MACRO (VL_API_OSVBNG_PPPOE_SET_SESSION_IPV6_REPLY);
+}
+
+static void vl_api_osvbng_pppoe_set_delegated_prefix_t_handler
+  (vl_api_osvbng_pppoe_set_delegated_prefix_t * mp)
+{
+  vl_api_osvbng_pppoe_set_delegated_prefix_reply_t *rmp;
+  osvbng_pppoe_main_t *pem = &osvbng_pppoe_main;
+  int rv = 0;
+
+  ip6_address_t next_hop;
+  fib_prefix_t fib_pfx;
+  ip_prefix_decode (&mp->prefix, &fib_pfx);
+  clib_memcpy (&next_hop, mp->next_hop, sizeof (next_hop));
+
+  rv = vnet_pppoe_set_delegated_prefix (ntohl (mp->sw_if_index),
+                                        &fib_pfx.fp_addr.ip6, fib_pfx.fp_len,
+                                        &next_hop, mp->is_add);
+
+  REPLY_MACRO (VL_API_OSVBNG_PPPOE_SET_DELEGATED_PREFIX_REPLY);
+}
+
 static void send_osvbng_pppoe_session_details
   (osvbng_pppoe_session_t * t, vl_api_registration_t * reg, u32 context)
 {
@@ -107,6 +142,18 @@ static void send_osvbng_pppoe_session_details
   clib_memcpy (rmp->client_mac, t->client_mac, 6);
   rmp->outer_vlan = htons (t->outer_vlan);
   rmp->inner_vlan = htons (t->inner_vlan);
+  rmp->ipv6_bound = t->ipv6_bound;
+  if (t->ipv6_bound)
+    clib_memcpy (rmp->client_ipv6, &t->client_ipv6, sizeof (t->client_ipv6));
+  if (t->delegated_prefix_len)
+    {
+      fib_prefix_t pd = {
+        .fp_proto = FIB_PROTOCOL_IP6,
+        .fp_len = t->delegated_prefix_len,
+        .fp_addr.ip6 = t->delegated_prefix,
+      };
+      ip_prefix_encode (&pd, &rmp->delegated_prefix);
+    }
   rmp->sw_if_index = htonl (t->sw_if_index);
   rmp->context = context;
 
