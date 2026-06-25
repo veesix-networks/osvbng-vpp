@@ -396,6 +396,14 @@ typedef enum
   CGNAT_OUT2IN_N_NEXT,
 } cgnat_out2in_next_t;
 
+/* Fixed capacity of the shared session and fragment-rewrite pools. Both are
+ * pre-reserved with pool_init_fixed so they never realloc at runtime: a moving
+ * pool base would race the lock-free fast-path pool_elt_at_index reads on other
+ * workers. Static ceilings for now; a future system scale profile will derive
+ * them from the configured subscriber count. */
+#define CGNAT_MAX_SESSIONS	(1u << 19)
+#define CGNAT_MAX_FRAG_REWRITES (1u << 16)
+
 typedef struct
 {
   cgnat_pool_t *pools;
@@ -414,6 +422,12 @@ typedef struct
    * class, NOT cross-VRF subscribers happening to share an inside IP. */
   cgnat_frag_rewrite_t *frag_rewrite_pool;
   clib_bihash_16_8_t frag_aux;
+
+  /* Serialises pool_get on cm->sessions / cm->frag_rewrite_pool across workers.
+   * The shared-pool model lets any worker create a session on the slowpath, and
+   * VPP pools are not multi-writer safe. Delete and reap run under the worker
+   * barrier, so only create-vs-create contends here. */
+  clib_spinlock_t session_pool_lock;
 
   cgnat_bypass_entry_t *bypass_entries;
   u32 bypass_entry_count;

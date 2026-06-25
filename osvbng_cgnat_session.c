@@ -30,6 +30,10 @@ cgnat_session_table_init (void)
 {
   cgnat_main_t *cm = &cgnat_main;
 
+  pool_init_fixed (cm->sessions, CGNAT_MAX_SESSIONS);
+  pool_init_fixed (cm->frag_rewrite_pool, CGNAT_MAX_FRAG_REWRITES);
+  clib_spinlock_init (&cm->session_pool_lock);
+
   clib_bihash_init_16_8 (&cm->session_table_in2out, "cgnat sessions in2out",
 			  64 * 1024, 64 << 20);
 
@@ -77,6 +81,9 @@ cgnat_frag_rewrite_lookup (ip4_address_t saddr, ip4_address_t daddr, u8 proto,
 /* Refcount-install an aux rewrite record for (saddr, daddr, proto, fib).
  * Returns the pool index — caller (cgnat_session_create) stashes it on the
  * session for O(1) decrement at delete. */
+/* Caller holds cm->session_pool_lock — invoked only from cgnat_session_create.
+ * The frag pool_get and the refcount RMW below rely on it; there is no separate
+ * frag lock. The matching release runs under the worker barrier. */
 static u32
 cgnat_frag_rewrite_acquire (ip4_address_t inside_ip, ip4_address_t outside_ip,
 			    ip4_address_t remote_ip, u8 proto, u32 inside_fib,
@@ -315,6 +322,16 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
   clib_spinlock_unlock (&mapping->lock);
 
   cgnat_session_t *s;
+  clib_spinlock_lock (&cm->session_pool_lock);
+  if (pool_elts (cm->sessions) >= CGNAT_MAX_SESSIONS)
+    {
+      clib_spinlock_unlock (&cm->session_pool_lock);
+      clib_spinlock_lock (&mapping->lock);
+      if (mapping->session_count > 0)
+        mapping->session_count--;
+      clib_spinlock_unlock (&mapping->lock);
+      return NULL;
+    }
   pool_get_zero (cm->sessions, s);
   u32 session_index = s - cm->sessions;
 
@@ -419,6 +436,7 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
     clib_bihash_add_del_16_8 (&cm->session_table_out2in, &kv, 1);
   }
 
+  clib_spinlock_unlock (&cm->session_pool_lock);
   return s;
 }
 
