@@ -60,14 +60,20 @@ send_cake_sched_details (cake_sched_t *cs, vl_api_registration_t *reg,
   rmp->context = context;
   rmp->sw_if_index = ntohl (cs->sw_if_index);
   rmp->rate_bytes_per_sec = clib_host_to_net_u64 (cs->rate_bytes_per_sec);
-  rmp->tin_mode = 0;
-  rmp->tin_cnt = 1;
+  rmp->tin_mode = cs->tin_mode;
+  rmp->tin_cnt = cs->n_tins;
   rmp->buffer_usage = ntohl (cs->buffer_usage);
   rmp->buffer_limit = ntohl (cs->buffer_limit);
 
-  rmp->tin_packets[0] = clib_host_to_net_u64 (cs->dequeued_pkts);
-  rmp->tin_bytes[0] = clib_host_to_net_u64 (cs->dequeued_bytes);
-  rmp->tin_drops[0] = clib_host_to_net_u64 (cs->dropped_pkts);
+  for (u8 t = 0; t < cs->n_tins; t++)
+    {
+      rmp->tin_packets[t] = clib_host_to_net_u64 (cs->tins[t].packets);
+      rmp->tin_bytes[t] = clib_host_to_net_u64 (cs->tins[t].bytes);
+      rmp->tin_drops[t] = clib_host_to_net_u64 (cs->tins[t].drops);
+      rmp->tin_ecn_marks[t] = clib_host_to_net_u64 (cs->tins[t].ecn_marks);
+      rmp->tin_sparse_flows[t] = ntohl (cs->tins[t].sparse_flow_count);
+      rmp->tin_bulk_flows[t] = ntohl (cs->tins[t].bulk_flow_count);
+    }
 
   vl_api_send_msg (reg, (u8 *) rmp);
 }
