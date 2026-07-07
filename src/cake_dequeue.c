@@ -83,11 +83,6 @@ cake_select_flow (cake_tin_t *tin)
   return ~0;
 }
 
-/*
- * Dequeue one packet from a flow, apply COBALT AQM, and either
- * re-inject or drop. Returns 1 if a packet was re-injected, 0 if
- * dropped or queue empty.
- */
 static_always_inline u8
 cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
 		  cake_main_t *cm, cake_sched_t *cs, cake_tin_t *tin,
@@ -136,6 +131,7 @@ cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
       cs->dropped_pkts++;
       tin->drops++;
       (*n_aqm_drops)++;
+      cake_agg_discharge (cm, cs, pkt_len);
       vlib_buffer_free_one (vm, bi);
       return 0;
     }
@@ -148,6 +144,13 @@ cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
     }
 
   u32 adj_len = cake_overhead_adjust (cs, pkt_len);
+
+  if (!cake_agg_dequeue_gate (cm, cs, adj_len, now_ns))
+    {
+      flow->head--;
+      return 0;
+    }
+
   cs->global_shaper_time_ns += (u64) adj_len * cs->rate_ns_per_byte;
   u64 max_shaper = now_ns + (u64) 150000000;
   if (cs->global_shaper_time_ns > max_shaper)
@@ -159,6 +162,7 @@ cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
   cs->queued_buffers--;
   cs->dequeued_pkts++;
   cs->dequeued_bytes += pkt_len;
+  cake_agg_discharge (cm, cs, pkt_len);
 
   b->flags |= CAKE_BUFFER_F_SCHEDULED;
   u32 sw_if_index = vnet_buffer (b)->sw_if_index[VLIB_TX];

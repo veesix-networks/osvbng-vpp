@@ -39,6 +39,7 @@ The BNG is the single most impactful place to deploy this in an ISP network. It'
 | Overhead compensation (ATM/PTM/GPON) | Skeleton |
 | Dual-stack (IPv4 + IPv6) | Skeleton |
 | Triple isolation (per-host fairness) | Not started |
+| HQoS aggregate shaping (QinQ S-VLAN) | Spec draft |
 | ACK filtering | Not started |
 | GSO segment splitting | Not started |
 | **Per-subscriber operational metrics** | **Day 1 priority** |
@@ -131,12 +132,34 @@ osvbng_cake_sched_reset_stats     — reset per-subscriber counters
 
 The osvbng Go control plane calls these APIs during subscriber session activation/release.
 
+## Hierarchical QoS (HQoS) for QinQ Deployments
+
+In QinQ (802.1ad) access networks, the S-VLAN (outer VLAN) represents an aggregate link to downstream equipment (OLT, DSLAM, aggregation switch) with a finite physical capacity, while C-VLANs (inner VLANs) represent individual subscribers. Per-subscriber CAKE shaping alone is not sufficient in these deployments: without an aggregate shaper on the S-VLAN, multiple subscribers can collectively exceed the aggregate link capacity, causing uncontrolled tail-drop at the downstream equipment and negating the AQM benefits of per-subscriber scheduling.
+
+This plugin supports two-level hierarchical scheduling:
+
+1. **Leaf level:** per-subscriber CAKE scheduler (C-VLAN shaping, per-flow fairness, COBALT AQM)
+2. **Parent level:** per-S-VLAN aggregate shaper with DRR across child schedulers for fair bandwidth distribution
+
+When the aggregate link is not congested, per-subscriber shaping works as normal with minimal overhead. When the aggregate is saturated, DRR ensures each subscriber gets a fair share of the available capacity rather than relying on random tail-drop at the downstream device.
+
+See [`context/specs/hqos-qinq/`](context/specs/hqos-qinq/) for the full technical specification.
+
+### Deployment Considerations
+
+**Multiple S-VLANs on a single physical interface:** Each S-VLAN gets its own independent aggregate shaper. If a 10G physical port carries S-VLAN 100 (aggregate 2G) and S-VLAN 200 (aggregate 2G), these are two separate aggregates with independent token buckets and DRR child lists. The operator is responsible for ensuring the sum of S-VLAN aggregate rates does not exceed the physical port capacity. The plugin does not enforce port-level aggregate shaping -- this is a deliberate design choice to keep the hierarchy at two levels. In practice, S-VLAN aggregate rates are derived from the known capacity of the downstream equipment (e.g. a 1G GPON OLT port, a 10G XGS-PON port) and the operator provisions them accordingly.
+
+**Bond/LAG interfaces:** When S-VLANs sit on a bond interface (e.g. 2x10G LACP), VPP's bond driver presents a single `sw_if_index` and handles member selection internally. The aggregate rate for S-VLANs on a bond should reflect the bond's total capacity (20G for 2x10G), not a single member. Note that LACP hashing distributes flows across member links, so individual flow throughput may be bounded by a single member's capacity even when the bond has spare aggregate bandwidth. This is a property of the bond, not the scheduler.
+
+**Single-VLAN and non-QinQ deployments:** HQoS is entirely optional. Subscribers without an aggregate parent behave identically to the flat per-subscriber scheduling model. There is zero overhead for deployments that do not use aggregates -- the aggregate dequeue loop does not execute when no aggregates are configured.
+
 ## Specification
 
 The full technical specification lives in this repo's `context/` directory:
 
 - [`context/specs/full-qos/`](context/specs/full-qos/) — Full QoS pipeline spec (policers, DSCP marking, dynamic rates, scheduling)
 - [`context/specs/cake-scheduler/`](context/specs/cake-scheduler/) — CAKE algorithm deep dive (VPP plugin architecture, data structures, implementation phases)
+- [`context/specs/hqos-qinq/`](context/specs/hqos-qinq/) — Hierarchical QoS for QinQ deployments (per-S-VLAN aggregate shaping)
 
 ## Status
 

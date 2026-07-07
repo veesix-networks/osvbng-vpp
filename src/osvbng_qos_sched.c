@@ -234,6 +234,26 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 	  cs->tins[t].tin_quantum = 65535 / cs->n_tins;
 	}
 
+      cs->aggregate_index = ~0;
+      {
+	u32 walk = sw_if_index;
+	while (1)
+	  {
+	    vnet_sw_interface_t *wi =
+	      vnet_get_sw_interface (vnet_get_main (), walk);
+	    u32 parent = wi->sup_sw_if_index;
+	    if (parent == walk)
+	      break;
+	    if (parent < vec_len (cm->agg_index_by_sw_if_index) &&
+		cm->agg_index_by_sw_if_index[parent] != ~0)
+	      {
+		cs->aggregate_index = cm->agg_index_by_sw_if_index[parent];
+		break;
+	      }
+	    walk = parent;
+	  }
+      }
+
       cm->sched_index_by_sw_if_index[sw_if_index] = pool_index;
 
       vnet_feature_enable_disable ("ip4-output", "ip4-cake-enqueue",
@@ -334,6 +354,189 @@ cake_sched_reset_stats (u32 sw_if_index)
       cs->tins[t].ecn_marks = 0;
     }
 }
+
+int
+cake_aggregate_create (vlib_main_t *vm, u32 sw_if_index,
+		        u64 rate_bytes_per_sec, u32 buffer_limit)
+{
+  cake_main_t *cm = &cake_main;
+
+  if (!vnet_sw_interface_is_api_valid (vnet_get_main (), sw_if_index))
+    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
+
+  vlib_worker_thread_barrier_sync (vm);
+
+  vec_validate_init_empty (cm->agg_index_by_sw_if_index, sw_if_index, ~0);
+  if (cm->agg_index_by_sw_if_index[sw_if_index] != ~0)
+    {
+      vlib_worker_thread_barrier_release (vm);
+      return VNET_API_ERROR_ENTRY_ALREADY_EXISTS;
+    }
+
+  cake_aggregate_t *agg;
+  pool_get_zero (cm->aggregates, agg);
+  u32 agg_idx = agg - cm->aggregates;
+
+  agg->sw_if_index = sw_if_index;
+  agg->agg_index = agg_idx;
+  agg->rate_bytes_per_sec = rate_bytes_per_sec;
+  agg->rate_ns_per_byte =
+    rate_bytes_per_sec > 0 ? (u64) 1e9 / rate_bytes_per_sec : 0;
+  agg->global_shaper_time_ns = (u64) (vlib_time_now (vm) * 1e9);
+
+  if (buffer_limit == 0)
+    {
+      agg->buffer_limit =
+	(u32) ((rate_bytes_per_sec * 100000 * 3) / (1000000 * 2));
+      if (agg->buffer_limit < 1048576)
+	agg->buffer_limit = 1048576;
+    }
+  else
+    agg->buffer_limit = buffer_limit;
+
+  agg->buffer_usage = 0;
+
+  cm->agg_index_by_sw_if_index[sw_if_index] = agg_idx;
+
+  vlib_worker_thread_barrier_release (vm);
+
+  vlib_log_notice (cm->log_class,
+		   "aggregate created on sw_if_index %u (rate %llu B/s)",
+		   sw_if_index, rate_bytes_per_sec);
+
+  return 0;
+}
+
+int
+cake_aggregate_delete (vlib_main_t *vm, u32 sw_if_index)
+{
+  cake_main_t *cm = &cake_main;
+
+  vlib_worker_thread_barrier_sync (vm);
+
+  vec_validate_init_empty (cm->agg_index_by_sw_if_index, sw_if_index, ~0);
+  u32 agg_idx = cm->agg_index_by_sw_if_index[sw_if_index];
+  if (agg_idx == ~0)
+    {
+      vlib_worker_thread_barrier_release (vm);
+      return VNET_API_ERROR_NO_SUCH_ENTRY;
+    }
+
+  cake_sched_t *cs;
+  pool_foreach (cs, cm->schedulers)
+    {
+      if (cs->aggregate_index == agg_idx)
+	cs->aggregate_index = ~0;
+    }
+
+  cm->agg_index_by_sw_if_index[sw_if_index] = ~0;
+  pool_put_index (cm->aggregates, agg_idx);
+
+  vlib_worker_thread_barrier_release (vm);
+
+  vlib_log_notice (cm->log_class, "aggregate deleted on sw_if_index %u",
+		   sw_if_index);
+
+  return 0;
+}
+
+static clib_error_t *
+cake_aggregate_set_command_fn (vlib_main_t *vm, unformat_input_t *input,
+				vlib_cli_command_t *cmd)
+{
+  u32 sw_if_index = ~0;
+  u64 rate_kbps = 0;
+  u8 is_disable = 0;
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "%U", unformat_vnet_sw_interface,
+		    vnet_get_main (), &sw_if_index))
+	;
+      else if (unformat (input, "rate %llu", &rate_kbps))
+	;
+      else if (unformat (input, "disable"))
+	is_disable = 1;
+      else
+	return clib_error_return (0, "unknown input `%U'",
+				  format_unformat_error, input);
+    }
+
+  if (sw_if_index == ~0)
+    return clib_error_return (0, "interface required");
+
+  int rv;
+  if (is_disable)
+    rv = cake_aggregate_delete (vm, sw_if_index);
+  else
+    {
+      if (rate_kbps == 0)
+	return clib_error_return (0, "rate required (kbps)");
+      rv = cake_aggregate_create (vm, sw_if_index, rate_kbps * 1000 / 8, 0);
+    }
+
+  if (rv)
+    return clib_error_return (0, "cake_aggregate returned %d", rv);
+
+  return 0;
+}
+
+VLIB_CLI_COMMAND (cake_aggregate_set_command, static) = {
+  .path = "set cake aggregate",
+  .short_help = "set cake aggregate <interface> rate <kbps> [disable]",
+  .function = cake_aggregate_set_command_fn,
+};
+
+static clib_error_t *
+cake_aggregate_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
+				 vlib_cli_command_t *cmd)
+{
+  cake_main_t *cm = &cake_main;
+  u32 sw_if_index = ~0;
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "%U", unformat_vnet_sw_interface,
+		    vnet_get_main (), &sw_if_index))
+	;
+      else
+	return clib_error_return (0, "unknown input `%U'",
+				  format_unformat_error, input);
+    }
+
+  u32 found = 0;
+  cake_aggregate_t *agg;
+  pool_foreach (agg, cm->aggregates)
+    {
+      if (sw_if_index != ~0 && agg->sw_if_index != sw_if_index)
+	continue;
+
+      vlib_cli_output (
+	vm,
+	"  %U: rate %llu B/s (%llu kbps)",
+	format_vnet_sw_if_index_name, vnet_get_main (), agg->sw_if_index,
+	agg->rate_bytes_per_sec, agg->rate_bytes_per_sec * 8 / 1000);
+
+      vlib_cli_output (vm,
+		       "    buffer %u/%u bytes, shaped %llu pkts %llu bytes, "
+		       "backpressure %llu",
+		       agg->buffer_usage, agg->buffer_limit, agg->shaped_pkts,
+		       agg->shaped_bytes, agg->backpressure_events);
+
+      found++;
+    }
+
+  if (found == 0)
+    vlib_cli_output (vm, "  no aggregates configured");
+
+  return 0;
+}
+
+VLIB_CLI_COMMAND (cake_aggregate_show_command, static) = {
+  .path = "show cake aggregate",
+  .short_help = "show cake aggregate [<interface>]",
+  .function = cake_aggregate_show_command_fn,
+};
 
 static const char *cake_tin_mode_names[] = {
   [CAKE_TIN_MODE_BESTEFFORT] = "besteffort",

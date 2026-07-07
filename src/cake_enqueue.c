@@ -242,6 +242,28 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  continue;
 	}
 
+      if (cs->aggregate_index != ~0)
+	{
+	  cake_aggregate_t *agg =
+	    pool_elt_at_index (cm->aggregates, cs->aggregate_index);
+	  u32 usage =
+	    __atomic_load_n (&agg->buffer_usage, __ATOMIC_RELAXED);
+	  if (PREDICT_FALSE (usage + pkt_len > agg->buffer_limit))
+	    {
+	      cobalt_queue_full (flow, cs->target_us, cs->p_inc,
+				 (u32) (vlib_time_now (vm) * 1e6));
+	      vlib_buffer_free_one (vm, bi0);
+	      cs->dropped_pkts++;
+	      tin->drops++;
+	      n_dropped++;
+	      __atomic_fetch_add (&agg->backpressure_events, 1,
+				  __ATOMIC_RELAXED);
+	      continue;
+	    }
+	  __atomic_fetch_add (&agg->buffer_usage, pkt_len,
+			      __ATOMIC_RELAXED);
+	}
+
       if (PREDICT_FALSE (flow->flow_state == CAKE_FLOW_NONE))
 	{
 	  cake_flow_ring_alloc (flow);

@@ -148,6 +148,25 @@ typedef struct
   u64 global_shaper_time_ns;
 
   u32 sw_if_index;
+  u32 agg_index;
+
+  u32 buffer_limit;
+  u32 buffer_usage;
+
+  u64 shaped_pkts;
+  u64 shaped_bytes;
+  u64 backpressure_events;
+} cake_aggregate_t;
+
+typedef struct
+{
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+
+  u64 rate_bytes_per_sec;
+  u64 rate_ns_per_byte;
+  u64 global_shaper_time_ns;
+
+  u32 sw_if_index;
   u32 sched_index;
   u32 owner_thread;
 
@@ -176,6 +195,8 @@ typedef struct
   u64 dequeued_pkts;
   u64 dequeued_bytes;
   u64 dropped_pkts;
+
+  u32 aggregate_index;
 } cake_sched_t;
 
 typedef struct
@@ -190,6 +211,9 @@ typedef struct
   cake_per_thread_t *per_thread;
   u32 *sched_index_by_sw_if_index;
   u32 n_schedulers;
+
+  cake_aggregate_t *aggregates;
+  u32 *agg_index_by_sw_if_index;
 
   u16 msg_id_base;
 
@@ -218,6 +242,10 @@ int cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
 
 void cake_sched_reset_stats (u32 sw_if_index);
 void cake_cobalt_cache_init (void);
+
+int cake_aggregate_create (vlib_main_t *vm, u32 sw_if_index,
+			    u64 rate_bytes_per_sec, u32 buffer_limit);
+int cake_aggregate_delete (vlib_main_t *vm, u32 sw_if_index);
 
 static_always_inline u32
 cake_overhead_adjust (cake_sched_t *cs, u32 pkt_len)
@@ -644,6 +672,52 @@ cake_ecn_mark (vlib_buffer_t *b)
 	clib_host_to_net_u32 (vtcfl);
       return 1;
     }
+}
+
+static_always_inline void
+cake_agg_discharge (cake_main_t *cm, cake_sched_t *cs, u32 pkt_len)
+{
+  if (cs->aggregate_index != ~0)
+    {
+      cake_aggregate_t *agg =
+	pool_elt_at_index (cm->aggregates, cs->aggregate_index);
+      __atomic_fetch_sub (&agg->buffer_usage, pkt_len, __ATOMIC_RELAXED);
+    }
+}
+
+static_always_inline u8
+cake_agg_dequeue_gate (cake_main_t *cm, cake_sched_t *cs, u32 adj_len,
+			u64 now_ns)
+{
+  if (cs->aggregate_index == ~0)
+    return 1;
+
+  cake_aggregate_t *agg =
+    pool_elt_at_index (cm->aggregates, cs->aggregate_index);
+  u64 cost_ns = (u64) adj_len * agg->rate_ns_per_byte;
+  u64 old_time, new_time;
+
+  do
+    {
+      old_time =
+	__atomic_load_n (&agg->global_shaper_time_ns, __ATOMIC_ACQUIRE);
+
+      if (old_time < now_ns)
+	old_time = now_ns;
+
+      if (old_time > now_ns)
+	return 0;
+
+      new_time = old_time + cost_ns;
+    }
+  while (!__atomic_compare_exchange_n (&agg->global_shaper_time_ns, &old_time,
+					new_time, 1, __ATOMIC_ACQ_REL,
+					__ATOMIC_ACQUIRE));
+
+  __atomic_fetch_add (&agg->shaped_pkts, 1, __ATOMIC_RELAXED);
+  __atomic_fetch_add (&agg->shaped_bytes, adj_len, __ATOMIC_RELAXED);
+
+  return 1;
 }
 
 extern vlib_node_registration_t ip4_cake_enqueue_node;
