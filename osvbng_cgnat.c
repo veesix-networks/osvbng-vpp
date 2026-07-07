@@ -339,6 +339,7 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
       m->sw_if_index = sw_if_index;
       m->next_port = port_start;
       m->session_count = 0;
+      m->sessions_head = ~0;
       clib_spinlock_init (&m->lock);
 
       u32 block_size = port_end - port_start + 1;
@@ -403,16 +404,14 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
        * mapping's NULL spinlock and crashes. */
       vlib_worker_thread_barrier_sync (cm->vlib_main);
 
-      u32 *kill = NULL;
-      cgnat_session_t *s;
-      pool_foreach (s, cm->sessions)
-	{
-	  if (s->mapping_index == mapping_index)
-	    vec_add1 (kill, s - cm->sessions);
-	}
-      for (u32 i = 0; i < vec_len (kill); i++)
-	cgnat_session_delete (pool_elt_at_index (cm->sessions, kill[i]));
-      vec_free (kill);
+      /* Reap only this mapping's sessions through its intrusive list
+       * (O(sessions-on-subscriber), not an O(CGNAT_MAX_SESSIONS) pool scan).
+       * The full pool scan under this barrier is what stalled all subscriber
+       * traffic during bulk reconcile. cgnat_session_delete unlinks each
+       * session as it goes, advancing the head, so the loop terminates. */
+      while (m->sessions_head != ~0)
+	cgnat_session_delete (
+	  pool_elt_at_index (cm->sessions, m->sessions_head));
 
       vec_free (m->port_reuse_timestamps);
       clib_spinlock_free (&m->lock);

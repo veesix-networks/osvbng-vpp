@@ -436,6 +436,17 @@ cgnat_session_create (cgnat_mapping_t *mapping, ip4_address_t *remote_ip,
     clib_bihash_add_del_16_8 (&cm->session_table_out2in, &kv, 1);
   }
 
+  /* Link into the mapping's intrusive session list (head insert). Held under
+   * session_pool_lock so concurrent worker creates serialise; removal runs
+   * under the worker barrier (reaper / mapping delete) or during quiescent
+   * pool teardown, never concurrently with an insert. */
+  s->mapping_prev = ~0;
+  s->mapping_next = mapping->sessions_head;
+  if (mapping->sessions_head != ~0)
+    pool_elt_at_index (cm->sessions, mapping->sessions_head)->mapping_prev =
+      session_index;
+  mapping->sessions_head = session_index;
+
   clib_spinlock_unlock (&cm->session_pool_lock);
   return s;
 }
@@ -481,6 +492,19 @@ cgnat_session_delete (cgnat_session_t *s)
   if (m->session_count > 0)
     m->session_count--;
   clib_spinlock_unlock (&m->lock);
+
+  /* Unlink from the mapping's session list before returning the slot. Runs
+   * under the worker barrier for the reaper and mapping-delete paths, and
+   * during quiescent pool teardown for the cascade path (same assumption the
+   * pool_put below already relies on). */
+  if (s->mapping_prev != ~0)
+    pool_elt_at_index (cm->sessions, s->mapping_prev)->mapping_next =
+      s->mapping_next;
+  else
+    m->sessions_head = s->mapping_next;
+  if (s->mapping_next != ~0)
+    pool_elt_at_index (cm->sessions, s->mapping_next)->mapping_prev =
+      s->mapping_prev;
 
   pool_put (cm->sessions, s);
 }

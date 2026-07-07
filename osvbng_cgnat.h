@@ -176,7 +176,11 @@ typedef struct
    * line keeps the read-mostly flow records out of the dirty-line write set.
    * frag_rewrite_index is an O(1) back-pointer into cm->frag_rewrite_pool so
    * session_delete can refcount-down without re-keying the aux bihash.
-   * 8 + 8 + 8 + 8 + 4 + 2 + 26 = 64. */
+   * mapping_next/mapping_prev thread the intrusive per-mapping session list
+   * (indices into cm->sessions, ~0 = end) so a mapping delete reaps only its
+   * own sessions instead of scanning the whole pool; read-mostly (written on
+   * session create/delete, never per packet).
+   * 8 + 8 + 8 + 8 + 4 + 2 + 4 + 4 + 18 = 64. */
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline2);
   f64 last_active;
   u64 total_pkts;
@@ -184,7 +188,9 @@ typedef struct
   f64 timeout;
   u32 frag_rewrite_index;
   u8 tcp_flags[2];
-  u8 _pad2[26];
+  u32 mapping_next;
+  u32 mapping_prev;
+  u8 _pad2[18];
 } cgnat_session_t;
 
 STATIC_ASSERT_SIZEOF (cgnat_session_t, 192);
@@ -288,6 +294,11 @@ typedef struct
 
   u16 next_port;
   u32 session_count;
+
+  /* Head of the intrusive per-mapping session list (index into cm->sessions,
+   * ~0 = empty). Lets a mapping delete reap this subscriber's sessions in
+   * O(sessions-on-mapping) instead of an O(CGNAT_MAX_SESSIONS) pool scan. */
+  u32 sessions_head;
 
   /* Per-port f64 timestamp of last release; cgnat_port_alloc skips ports
    * still in the RFC 6056 reuse cooldown. Was declared u64* historically and
