@@ -179,17 +179,19 @@ typedef struct
    * mapping_next/mapping_prev thread the intrusive per-mapping session list
    * (indices into cm->sessions, ~0 = end) so a mapping delete reaps only its
    * own sessions instead of scanning the whole pool; read-mostly (written on
-   * session create/delete, never per packet).
-   * 8 + 8 + 8 + 8 + 4 + 2 + 4 + 4 + 18 = 64. */
+   * session create/delete, never per packet). Kept adjacent to
+   * frag_rewrite_index so the three u32s stay naturally aligned with no hole
+   * before tcp_flags.
+   * 8 + 8 + 8 + 8 + 4 + 4 + 4 + 2 + 18 = 64. */
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline2);
   f64 last_active;
   u64 total_pkts;
   u64 total_bytes;
   f64 timeout;
   u32 frag_rewrite_index;
-  u8 tcp_flags[2];
   u32 mapping_next;
   u32 mapping_prev;
+  u8 tcp_flags[2];
   u8 _pad2[18];
 } cgnat_session_t;
 
