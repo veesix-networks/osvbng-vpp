@@ -44,6 +44,34 @@ static u8 * format_pppoe_rx_trace (u8 * s, va_list * args)
   return s;
 }
 
+/* Mirrors the VLAN walk below to build the lookahead packet's key and warm
+ * its session-table bucket. vlib_buffer_reset leaves the ethernet header at
+ * b->data, so this reads the same bytes without touching the buffer. */
+static_always_inline void
+pppoe_prefetch_bucket (osvbng_pppoe_main_t * pem, vlib_buffer_t * b)
+{
+  ethernet_header_t *h = (ethernet_header_t *) b->data;
+  u16 type = clib_net_to_host_u16 (h->type);
+  pppoe_header_t *pppoe;
+
+  if (type == ETHERNET_TYPE_VLAN || type == ETHERNET_TYPE_DOT1AD)
+    {
+      ethernet_vlan_header_t *vlan = (ethernet_vlan_header_t *) (h + 1);
+      if (clib_net_to_host_u16 (vlan->type) == ETHERNET_TYPE_VLAN)
+        pppoe = (pppoe_header_t *) ((ethernet_vlan_header_t *) (vlan + 1) + 1);
+      else
+        pppoe = (pppoe_header_t *) (vlan + 1);
+    }
+  else
+    pppoe = (pppoe_header_t *) (h + 1);
+
+  BVT (clib_bihash_kv) kv;
+  kv.key = pppoe_make_key (h->src_address, pppoe->session_id);
+
+  BV (clib_bihash_prefetch_bucket) (&pem->session_table,
+                                    BV (clib_bihash_hash) (&kv));
+}
+
 VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
              vlib_node_runtime_t * node,
              vlib_frame_t * from_frame)
@@ -68,6 +96,9 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
   next_index = node->cached_next_index;
   stats_sw_if_index = node->runtime_data[0];
   stats_n_packets = stats_n_bytes = 0;
+
+  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
+  vlib_get_buffers (vm, from, bufs, n_left_from);
 
   while (n_left_from > 0)
     {
@@ -94,13 +125,20 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
           u32 type0;
 
           bi0 = from[0];
+          b0 = b[0];
+
+          if (PREDICT_TRUE (n_left_from >= 5))
+            vlib_prefetch_buffer_header (b[4], LOAD);
+
+          if (PREDICT_TRUE (n_left_from >= 3))
+            pppoe_prefetch_bucket (pem, b[2]);
+
           to_next[0] = bi0;
           from += 1;
+          b += 1;
           to_next += 1;
           n_left_from -= 1;
           n_left_to_next -= 1;
-
-          b0 = vlib_get_buffer (vm, bi0);
           error0 = 0;
 
           /* Reset buffer to ethernet header to get client MAC */

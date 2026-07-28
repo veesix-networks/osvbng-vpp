@@ -72,6 +72,24 @@ typedef enum
   OSVBNG_PPPOE_LAC_TX_N_NEXT,
 } osvbng_pppoe_lac_tx_next_t;
 
+/* The session pool element is the cold load; its index is reachable from
+ * buffer opaque via one vector lookup, so warm it a couple ahead. */
+static_always_inline void
+pppoe_lac_prefetch_session (osvbng_pppoe_main_t *pem, vlib_buffer_t *b)
+{
+  u32 sw_if_index = vnet_buffer_l2tpv2_opaque (b);
+
+  if (sw_if_index >= vec_len (pem->session_index_by_sw_if_index))
+    return;
+
+  u32 si = pem->session_index_by_sw_if_index[sw_if_index];
+  if (si == ~0u || pool_is_free_index (pem->sessions, si))
+    return;
+
+  CLIB_PREFETCH (pool_elt_at_index (pem->sessions, si), CLIB_CACHE_LINE_BYTES,
+		 LOAD);
+}
+
 VLIB_NODE_FN (osvbng_pppoe_lac_tx_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *from_frame)
 {
@@ -83,6 +101,9 @@ VLIB_NODE_FN (osvbng_pppoe_lac_tx_node)
   from = vlib_frame_vector_args (from_frame);
   n_left_from = from_frame->n_vectors;
   next_index = node->cached_next_index;
+
+  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
+  vlib_get_buffers (vm, from, bufs, n_left_from);
 
   while (n_left_from > 0)
     {
@@ -101,13 +122,20 @@ VLIB_NODE_FN (osvbng_pppoe_lac_tx_node)
 	  u32 error0 = 0;
 
 	  bi0 = from[0];
+	  b0 = b[0];
+
+	  if (PREDICT_TRUE (n_left_from >= 5))
+	    vlib_prefetch_buffer_header (b[4], LOAD);
+
+	  if (PREDICT_TRUE (n_left_from >= 3))
+	    pppoe_lac_prefetch_session (pem, b[2]);
+
 	  to_next[0] = bi0;
 	  from += 1;
+	  b += 1;
 	  to_next += 1;
 	  n_left_from -= 1;
 	  n_left_to_next -= 1;
-
-	  b0 = vlib_get_buffer (vm, bi0);
 
 	  pppoe_sw_if_index = vnet_buffer_l2tpv2_opaque (b0);
 	  if (PREDICT_FALSE (
