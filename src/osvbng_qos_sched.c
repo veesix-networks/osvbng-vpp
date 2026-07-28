@@ -374,8 +374,11 @@ cake_aggregate_create (vlib_main_t *vm, u32 sw_if_index,
     }
 
   cake_aggregate_t *agg;
-  pool_get_zero (cm->aggregates, agg);
+  pool_get_aligned_zero (cm->aggregates, agg, CLIB_CACHE_LINE_BYTES);
   u32 agg_idx = agg - cm->aggregates;
+
+  vec_validate_aligned (agg->stats, vlib_get_n_threads () - 1,
+			CLIB_CACHE_LINE_BYTES);
 
   agg->sw_if_index = sw_if_index;
   agg->agg_index = agg_idx;
@@ -428,6 +431,9 @@ cake_aggregate_delete (vlib_main_t *vm, u32 sw_if_index)
       if (cs->aggregate_index == agg_idx)
 	cs->aggregate_index = ~0;
     }
+
+  cake_aggregate_t *agg = pool_elt_at_index (cm->aggregates, agg_idx);
+  vec_free (agg->stats);
 
   cm->agg_index_by_sw_if_index[sw_if_index] = ~0;
   pool_put_index (cm->aggregates, agg_idx);
@@ -517,11 +523,15 @@ cake_aggregate_show_command_fn (vlib_main_t *vm, unformat_input_t *input,
 	format_vnet_sw_if_index_name, vnet_get_main (), agg->sw_if_index,
 	agg->rate_bytes_per_sec, agg->rate_bytes_per_sec * 8 / 1000);
 
+      u64 shaped_pkts, shaped_bytes, backpressure_events;
+      cake_agg_stats_sum (agg, &shaped_pkts, &shaped_bytes,
+			  &backpressure_events);
+
       vlib_cli_output (vm,
 		       "    buffer %u/%u bytes, shaped %llu pkts %llu bytes, "
 		       "backpressure %llu",
-		       agg->buffer_usage, agg->buffer_limit, agg->shaped_pkts,
-		       agg->shaped_bytes, agg->backpressure_events);
+		       agg->buffer_usage, agg->buffer_limit, shaped_pkts,
+		       shaped_bytes, backpressure_events);
 
       found++;
     }

@@ -159,10 +159,12 @@ send_cake_aggregate_details (cake_aggregate_t *agg,
   rmp->rate_bytes_per_sec = clib_host_to_net_u64 (agg->rate_bytes_per_sec);
   rmp->buffer_usage = ntohl (agg->buffer_usage);
   rmp->buffer_limit = ntohl (agg->buffer_limit);
-  rmp->shaped_pkts = clib_host_to_net_u64 (agg->shaped_pkts);
-  rmp->shaped_bytes = clib_host_to_net_u64 (agg->shaped_bytes);
-  rmp->backpressure_events =
-    clib_host_to_net_u64 (agg->backpressure_events);
+  u64 shaped_pkts, shaped_bytes, backpressure_events;
+  cake_agg_stats_sum (agg, &shaped_pkts, &shaped_bytes, &backpressure_events);
+
+  rmp->shaped_pkts = clib_host_to_net_u64 (shaped_pkts);
+  rmp->shaped_bytes = clib_host_to_net_u64 (shaped_bytes);
+  rmp->backpressure_events = clib_host_to_net_u64 (backpressure_events);
 
   vl_api_send_msg (reg, (u8 *) rmp);
 }

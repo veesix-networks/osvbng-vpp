@@ -96,6 +96,16 @@ cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
   u32 bi = flow->ring[flow->head & CAKE_FLOW_RING_MASK];
   flow->head++;
 
+  /* Queued packets have long since fallen out of cache and we touch the L3
+   * header below, so warm the next one in this flow while we work on this. */
+  if (cake_flow_queue_len (flow) > 0)
+    {
+      vlib_buffer_t *nb = vlib_get_buffer (
+	vm, flow->ring[flow->head & CAKE_FLOW_RING_MASK]);
+      vlib_prefetch_buffer_header (nb, LOAD);
+      CLIB_PREFETCH (nb->data, CLIB_CACHE_LINE_BYTES, LOAD);
+    }
+
   vlib_buffer_t *b = vlib_get_buffer (vm, bi);
   u32 pkt_len = vlib_buffer_length_in_chain (vm, b);
 
@@ -145,7 +155,7 @@ cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
 
   u32 adj_len = cake_overhead_adjust (cs, pkt_len);
 
-  if (!cake_agg_dequeue_gate (cm, cs, adj_len, now_ns))
+  if (!cake_agg_dequeue_gate (cm, cs, adj_len, now_ns, vm->thread_index))
     {
       flow->head--;
       return 0;

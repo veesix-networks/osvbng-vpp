@@ -143,19 +143,33 @@ typedef struct
 {
   CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
 
-  u64 rate_bytes_per_sec;
-  u64 rate_ns_per_byte;
-  u64 global_shaper_time_ns;
-
-  u32 sw_if_index;
-  u32 agg_index;
-
-  u32 buffer_limit;
-  u32 buffer_usage;
-
   u64 shaped_pkts;
   u64 shaped_bytes;
   u64 backpressure_events;
+} cake_agg_stats_t;
+
+/* Every worker shaping into an aggregate touches this struct per packet, so
+ * the two genuinely-shared atomics each get their own line and the counters
+ * move to per-thread slots. Packing them together cost a cache line bounce
+ * per packet per core. */
+typedef struct
+{
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+
+  u64 rate_bytes_per_sec;
+  u64 rate_ns_per_byte;
+
+  u32 sw_if_index;
+  u32 agg_index;
+  u32 buffer_limit;
+
+  cake_agg_stats_t *stats;
+
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline1);
+  u64 global_shaper_time_ns;
+
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline2);
+  u32 buffer_usage;
 } cake_aggregate_t;
 
 typedef struct
@@ -687,7 +701,7 @@ cake_agg_discharge (cake_main_t *cm, cake_sched_t *cs, u32 pkt_len)
 
 static_always_inline u8
 cake_agg_dequeue_gate (cake_main_t *cm, cake_sched_t *cs, u32 adj_len,
-			u64 now_ns)
+			u64 now_ns, u32 thread_index)
 {
   if (cs->aggregate_index == ~0)
     return 1;
@@ -714,10 +728,26 @@ cake_agg_dequeue_gate (cake_main_t *cm, cake_sched_t *cs, u32 adj_len,
 					new_time, 1, __ATOMIC_ACQ_REL,
 					__ATOMIC_ACQUIRE));
 
-  __atomic_fetch_add (&agg->shaped_pkts, 1, __ATOMIC_RELAXED);
-  __atomic_fetch_add (&agg->shaped_bytes, adj_len, __ATOMIC_RELAXED);
+  cake_agg_stats_t *st = vec_elt_at_index (agg->stats, thread_index);
+  st->shaped_pkts++;
+  st->shaped_bytes += adj_len;
 
   return 1;
+}
+
+static_always_inline void
+cake_agg_stats_sum (cake_aggregate_t *agg, u64 *shaped_pkts, u64 *shaped_bytes,
+		    u64 *backpressure_events)
+{
+  *shaped_pkts = *shaped_bytes = *backpressure_events = 0;
+
+  cake_agg_stats_t *st;
+  vec_foreach (st, agg->stats)
+    {
+      *shaped_pkts += st->shaped_pkts;
+      *shaped_bytes += st->shaped_bytes;
+      *backpressure_events += st->backpressure_events;
+    }
 }
 
 extern vlib_node_registration_t ip4_cake_enqueue_node;

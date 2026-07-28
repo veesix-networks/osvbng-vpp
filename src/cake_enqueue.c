@@ -105,13 +105,23 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
   u32 n_enqueued = 0;
   u32 n_dropped = 0;
 
+  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
+  vlib_get_buffers (vm, from, bufs, n_left);
+
   while (n_left > 0)
     {
       u32 bi0 = from[0];
-      from++;
-      n_left--;
+      vlib_buffer_t *b0 = b[0];
 
-      vlib_buffer_t *b0 = vlib_get_buffer (vm, bi0);
+      if (PREDICT_TRUE (n_left >= 5))
+	{
+	  vlib_prefetch_buffer_header (b[4], LOAD);
+	  CLIB_PREFETCH (b[4]->data, CLIB_CACHE_LINE_BYTES, LOAD);
+	}
+
+      from++;
+      b++;
+      n_left--;
 
       if (PREDICT_FALSE (b0->flags & CAKE_BUFFER_F_SCHEDULED))
 	{
@@ -141,7 +151,9 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
       if (sw_if_index0 < vec_len (cm->sched_index_by_sw_if_index))
 	si = cm->sched_index_by_sw_if_index[sw_if_index0];
 
-      if (PREDICT_TRUE (si == ~0))
+      /* No hint: which way this goes is a deployment property, not a
+       * property of the code. Shaped interfaces take the other branch. */
+      if (si == ~0)
 	{
 	  u32 next0;
 	  vnet_feature_next (&next0, b0);
@@ -256,8 +268,7 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	      cs->dropped_pkts++;
 	      tin->drops++;
 	      n_dropped++;
-	      __atomic_fetch_add (&agg->backpressure_events, 1,
-				  __ATOMIC_RELAXED);
+	      vec_elt_at_index (agg->stats, thread_index)->backpressure_events++;
 	      continue;
 	    }
 	  __atomic_fetch_add (&agg->buffer_usage, pkt_len,
