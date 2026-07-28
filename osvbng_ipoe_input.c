@@ -76,6 +76,30 @@ ipoe_recover_inner_vlan (ethernet_header_t *eth)
   return 0;
 }
 
+/* The bihash bucket is the only genuinely cold load on this path, so build
+ * the lookahead packet's key and warm its bucket while we work on the
+ * current one. Pass-through interfaces never reach the table. */
+static_always_inline void
+ipoe_prefetch_bucket (ipoe_main_t *im, vlib_buffer_t *b)
+{
+  u32 sw_if_index = vnet_buffer (b)->sw_if_index[VLIB_RX];
+
+  if (!clib_bitmap_get (im->enabled_by_sw_if_index, sw_if_index))
+    return;
+
+  ethernet_header_t *eth = ethernet_buffer_get_header (b);
+  ipoe_entry_key_t key;
+  ipoe_make_key (&key, sw_if_index, ipoe_recover_inner_vlan (eth),
+		 eth->src_address);
+
+  clib_bihash_kv_16_8_t kv;
+  kv.key[0] = key.as_u64[0];
+  kv.key[1] = key.as_u64[1];
+
+  clib_bihash_prefetch_bucket_16_8 (&im->session_table,
+				    clib_bihash_hash_16_8 (&kv));
+}
+
 VLIB_NODE_FN (ipoe_input_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
@@ -85,6 +109,11 @@ VLIB_NODE_FN (ipoe_input_node)
   u32 next_index;
   u32 pkts_processed = 0;
   u32 pkts_no_session = 0;
+  u32 thread_index = vm->thread_index;
+
+  u32 stats_sw_if_index = ~0;
+  u32 stats_n_packets = 0;
+  u32 stats_n_bytes = 0;
 
   ipoe_entry_key_t cached_key;
   ipoe_entry_result_t cached_result;
@@ -95,6 +124,9 @@ VLIB_NODE_FN (ipoe_input_node)
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
   next_index = node->cached_next_index;
+
+  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
+  vlib_get_buffers (vm, from, bufs, n_left_from);
 
   while (n_left_from > 0)
     {
@@ -115,13 +147,21 @@ VLIB_NODE_FN (ipoe_input_node)
 	  u8 src_mac0[6] = { 0 };
 
 	  bi0 = from[0];
+	  b0 = b[0];
+
+	  if (PREDICT_TRUE (n_left_from >= 5))
+	    vlib_prefetch_buffer_header (b[4], LOAD);
+
+	  if (PREDICT_TRUE (n_left_from >= 3))
+	    ipoe_prefetch_bucket (im, b[2]);
+
 	  to_next[0] = bi0;
 	  from += 1;
+	  b += 1;
 	  to_next += 1;
 	  n_left_from -= 1;
 	  n_left_to_next -= 1;
 
-	  b0 = vlib_get_buffer (vm, bi0);
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
 	  ip0 = vlib_buffer_get_current (b0);
@@ -169,11 +209,25 @@ VLIB_NODE_FN (ipoe_input_node)
 
 		vnet_buffer (b0)->sw_if_index[VLIB_RX] = s0->sw_if_index;
 
-		vlib_increment_combined_counter (
-		  &vnm->interface_main
-		     .combined_sw_if_counters[VNET_INTERFACE_COUNTER_RX],
-		  vm->thread_index, s0->sw_if_index, 1,
-		  vlib_buffer_length_in_chain (vm, b0));
+		u32 len0 = vlib_buffer_length_in_chain (vm, b0);
+
+		if (PREDICT_TRUE (s0->sw_if_index == stats_sw_if_index))
+		  {
+		    stats_n_packets += 1;
+		    stats_n_bytes += len0;
+		  }
+		else
+		  {
+		    if (stats_n_packets)
+		      vlib_increment_combined_counter (
+			&vnm->interface_main
+			   .combined_sw_if_counters[VNET_INTERFACE_COUNTER_RX],
+			thread_index, stats_sw_if_index, stats_n_packets,
+			stats_n_bytes);
+		    stats_sw_if_index = s0->sw_if_index;
+		    stats_n_packets = 1;
+		    stats_n_bytes = len0;
+		  }
 
 		pkts_processed++;
 	      }
@@ -203,6 +257,11 @@ VLIB_NODE_FN (ipoe_input_node)
 
       vlib_put_next_frame (vm, node, next_index, n_left_to_next);
     }
+
+  if (stats_n_packets)
+    vlib_increment_combined_counter (
+      &vnm->interface_main.combined_sw_if_counters[VNET_INTERFACE_COUNTER_RX],
+      thread_index, stats_sw_if_index, stats_n_packets, stats_n_bytes);
 
   vlib_node_increment_counter (vm, ipoe_input_node.index,
 			       IPOE_ERROR_DECAPSULATED, pkts_processed);
