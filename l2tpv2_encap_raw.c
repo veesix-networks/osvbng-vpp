@@ -75,6 +75,20 @@ typedef enum
     L2TPV2_ENCAP_RAW_N_NEXT,
 } l2tpv2_encap_raw_next_t;
 
+/* The session pool element is the cold load here; the index is already in
+ * buffer opaque, so it can be warmed a couple of packets ahead. */
+static_always_inline void
+l2tpv2_prefetch_session (l2tpv2_main_t *l2m, vlib_buffer_t *b)
+{
+  u32 si = vnet_buffer_l2tpv2_opaque (b);
+
+  if (si == ~0u || pool_is_free_index (l2m->sessions, si))
+    return;
+
+  CLIB_PREFETCH (pool_elt_at_index (l2m->sessions, si), CLIB_CACHE_LINE_BYTES,
+		 LOAD);
+}
+
 VLIB_NODE_FN (l2tpv2_encap_raw_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *from_frame)
 {
@@ -87,6 +101,9 @@ VLIB_NODE_FN (l2tpv2_encap_raw_node)
   from = vlib_frame_vector_args (from_frame);
   n_left_from = from_frame->n_vectors;
   next_index = node->cached_next_index;
+
+  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
+  vlib_get_buffers (vm, from, bufs, n_left_from);
 
   while (n_left_from > 0)
     {
@@ -103,13 +120,20 @@ VLIB_NODE_FN (l2tpv2_encap_raw_node)
 	  u32 session_index;
 
 	  bi0 = from[0];
+	  b0 = b[0];
+
+	  if (PREDICT_TRUE (n_left_from >= 5))
+	    vlib_prefetch_buffer_header (b[4], LOAD);
+
+	  if (PREDICT_TRUE (n_left_from >= 3))
+	    l2tpv2_prefetch_session (l2m, b[2]);
+
 	  to_next[0] = bi0;
 	  from += 1;
+	  b += 1;
 	  to_next += 1;
 	  n_left_from -= 1;
 	  n_left_to_next -= 1;
-
-	  b0 = vlib_get_buffer (vm, bi0);
 
 	  session_index = vnet_buffer_l2tpv2_opaque (b0);
 	  if (PREDICT_FALSE (session_index == ~0u

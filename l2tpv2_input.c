@@ -92,6 +92,37 @@ l2tpv2_header_len (const u8 *p)
   return len;
 }
 
+/* Warm the session-table bucket for a lookahead packet. The tunnel/session
+ * IDs sit at a fixed offset that only the L bit moves, so this mirrors the
+ * main path's key exactly without needing the full header-length walk. */
+static_always_inline void
+l2tpv2_prefetch_bucket (l2tpv2_main_t *l2m, vlib_buffer_t *b)
+{
+  if (b->current_length < 12)
+    return;
+
+  u8 *hdr = vlib_buffer_get_current (b);
+
+  if ((hdr[0] & L2TP_FLAG_BYTE_T) || (hdr[1] & 0x0f) != 2)
+    return;
+
+  u32 idoff = 2 + ((hdr[0] & L2TP_FLAG_BYTE_L) ? 2 : 0);
+  ip4_header_t *ip4 =
+    (ip4_header_t *) ((u8 *) hdr -
+		      (sizeof (udp_header_t) + sizeof (ip4_header_t)));
+
+  l2tpv2_session_key_t key;
+  l2tpv2_session_key_set (&key, &ip4->dst_address, &ip4->src_address,
+			  clib_net_to_host_u16 (*(u16 *) (hdr + idoff)),
+			  clib_net_to_host_u16 (*(u16 *) (hdr + idoff + 2)));
+
+  clib_bihash_kv_16_8_t kv = {
+    .key = { key.as_u64[0], key.as_u64[1] },
+  };
+  clib_bihash_prefetch_bucket_16_8 (&l2m->session_table,
+				    clib_bihash_hash_16_8 (&kv));
+}
+
 VLIB_NODE_FN (l2tpv2_input_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *from_frame)
 {
@@ -106,6 +137,9 @@ VLIB_NODE_FN (l2tpv2_input_node)
   from = vlib_frame_vector_args (from_frame);
   n_left_from = from_frame->n_vectors;
   next_index = node->cached_next_index;
+
+  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
+  vlib_get_buffers (vm, from, bufs, n_left_from);
 
   while (n_left_from > 0)
     {
@@ -123,13 +157,20 @@ VLIB_NODE_FN (l2tpv2_input_node)
 	  u16 local_tunnel_id = 0, local_session_id = 0, ppp_proto = 0;
 
 	  bi0 = from[0];
+	  b0 = b[0];
+
+	  if (PREDICT_TRUE (n_left_from >= 5))
+	    vlib_prefetch_buffer_header (b[4], LOAD);
+
+	  if (PREDICT_TRUE (n_left_from >= 3))
+	    l2tpv2_prefetch_bucket (l2m, b[2]);
+
 	  to_next[0] = bi0;
 	  from += 1;
+	  b += 1;
 	  to_next += 1;
 	  n_left_from -= 1;
 	  n_left_to_next -= 1;
-
-	  b0 = vlib_get_buffer (vm, bi0);
 
 	  if (PREDICT_FALSE (b0->current_length < 6))
 	    {
