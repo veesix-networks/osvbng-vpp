@@ -70,13 +70,15 @@ define osvbng_l2gw_add_del_circuit
     @param context - sender context, to match reply w/ request
     @param retval - return code
     @param circuit_id - stable circuit identifier (also the access-side
-           counter index; peer counter index is circuit_id's twin from dump)
+           counter index in the /osvbng/l2gw stats segment)
+    @param handoff_entry_index - handoff-direction counter index
 */
 define osvbng_l2gw_add_del_circuit_reply
 {
   u32 context;
   i32 retval;
   u32 circuit_id;
+  u32 handoff_entry_index;
 };
 
 /** \brief Set forwarding state on a circuit (both directions)

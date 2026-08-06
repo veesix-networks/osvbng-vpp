@@ -58,8 +58,15 @@ vl_api_osvbng_l2gw_add_del_circuit_t_handler (
 
   rv = vnet_l2gw_add_del_circuit (&a, &circuit_id);
 
-  REPLY_MACRO2 (VL_API_OSVBNG_L2GW_ADD_DEL_CIRCUIT_REPLY,
-		({ rmp->circuit_id = htonl (circuit_id); }));
+  u32 handoff_entry_index = ~0;
+  if (circuit_id != ~0 && !pool_is_free_index (lm->entries, circuit_id))
+    handoff_entry_index =
+      pool_elt_at_index (lm->entries, circuit_id)->peer_entry_index;
+
+  REPLY_MACRO2 (VL_API_OSVBNG_L2GW_ADD_DEL_CIRCUIT_REPLY, ({
+		  rmp->circuit_id = htonl (circuit_id);
+		  rmp->handoff_entry_index = htonl (handoff_entry_index);
+		}));
 }
 
 static void
