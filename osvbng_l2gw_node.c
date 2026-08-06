@@ -17,8 +17,12 @@
 #include <vlib/vlib.h>
 #include <vnet/vnet.h>
 #include <vnet/ethernet/ethernet.h>
+#include <vnet/ip/ip4_packet.h>
+#include <vnet/ip/ip6_packet.h>
+#include <vnet/udp/udp_packet.h>
 
 #include <osvbng_l2gw/osvbng_l2gw.h>
+#include <osvbng_punt/osvbng_punt.h>
 
 #define L2GW_MAX_TX_OUTPUTS 8
 #define L2GW_INPUT_NEXT_DROP_INDEX 0
@@ -110,6 +114,66 @@ l2gw_parse_tags (ethernet_header_t *eth, u16 *svlan, u16 *cvlan,
   return n_tags;
 }
 
+always_inline int
+l2gw_trigger_armed (l2gw_main_t *lm, u32 sw_if_index, u16 svlan)
+{
+  if (svlan == 0 || sw_if_index >= vec_len (lm->trigger_svlans))
+    return 0;
+  uword *bm = lm->trigger_svlans[sw_if_index];
+  return bm && clib_bitmap_get (bm, svlan);
+}
+
+/* DHCP trigger recognition on the circuit-miss path: fixed-offset
+ * compares only. IPv6 extension headers are deliberately not walked —
+ * a SOLICIT behind an extension chain falls through untouched and the
+ * client retransmits plainly. */
+always_inline int
+l2gw_frame_is_dhcp_trigger (vlib_buffer_t *b, ethernet_header_t *eth,
+			    u8 n_tags, u8 *punt_proto)
+{
+  u8 *p = (u8 *) (eth + 1) + n_tags * sizeof (ethernet_vlan_header_t);
+  u16 type = n_tags ? clib_net_to_host_u16 (((u16 *) p)[-1]) :
+		      clib_net_to_host_u16 (eth->type);
+  u32 l2_len = (u32) (p - (u8 *) eth);
+
+  if (PREDICT_FALSE (b->current_length < l2_len))
+    return 0;
+  u32 avail = b->current_length - l2_len;
+
+  if (type == ETHERNET_TYPE_IP4)
+    {
+      if (avail < sizeof (ip4_header_t) + sizeof (udp_header_t))
+	return 0;
+      ip4_header_t *ip = (ip4_header_t *) p;
+      if (ip->protocol != IP_PROTOCOL_UDP)
+	return 0;
+      u32 ihl = ip4_header_bytes (ip);
+      if (avail < ihl + sizeof (udp_header_t))
+	return 0;
+      udp_header_t *udp = (udp_header_t *) (p + ihl);
+      if (udp->dst_port != clib_host_to_net_u16 (67))
+	return 0;
+      *punt_proto = OSVBNG_PUNT_PROTO_DHCPV4;
+      return 1;
+    }
+
+  if (type == ETHERNET_TYPE_IP6)
+    {
+      if (avail < sizeof (ip6_header_t) + sizeof (udp_header_t))
+	return 0;
+      ip6_header_t *ip6 = (ip6_header_t *) p;
+      if (ip6->protocol != IP_PROTOCOL_UDP)
+	return 0;
+      udp_header_t *udp = (udp_header_t *) (p + sizeof (ip6_header_t));
+      if (udp->dst_port != clib_host_to_net_u16 (547))
+	return 0;
+      *punt_proto = OSVBNG_PUNT_PROTO_DHCPV6;
+      return 1;
+    }
+
+  return 0;
+}
+
 /* Rebuild the tag stack in place to the entry's TX form. The payload
  * (from the final ethertype onward) never moves; only the DA/SA block
  * shifts when the tag count changes. */
@@ -185,7 +249,7 @@ VLIB_NODE_FN (l2gw_input_node)
   u32 next_index;
   u32 thread_index = vm->thread_index;
   u32 pkts_switched = 0, pkts_no_circuit = 0, pkts_disabled = 0;
-  u32 pkts_tx_unresolved = 0;
+  u32 pkts_tx_unresolved = 0, pkts_trigger_punted = 0;
 
   l2gw_tx_pending_t pending[L2GW_MAX_TX_OUTPUTS];
   u32 n_pending = 0;
@@ -274,7 +338,19 @@ VLIB_NODE_FN (l2gw_input_node)
 	  if (!matched0)
 	    {
 	      u32 next0;
-	      vnet_feature_next (&next0, b0);
+	      u8 punt_proto0;
+	      if (PREDICT_FALSE (
+		    lm->punt_shm_tx_next_arc != ~0u &&
+		    l2gw_trigger_armed (lm, sw_if_index0, svlan0) &&
+		    l2gw_frame_is_dhcp_trigger (b0, eth0, n_tags0,
+						&punt_proto0)))
+		{
+		  vnet_buffer_punt_protocol (b0) = punt_proto0;
+		  next0 = lm->punt_shm_tx_next_arc;
+		  pkts_trigger_punted++;
+		}
+	      else
+		vnet_feature_next (&next0, b0);
 	      to_next[0] = bi0;
 	      to_next += 1;
 	      n_left_to_next -= 1;
@@ -364,6 +440,8 @@ VLIB_NODE_FN (l2gw_input_node)
 			       pkts_disabled);
   vlib_node_increment_counter (vm, l2gw_input_node.index,
 			       L2GW_ERROR_TX_UNRESOLVED, pkts_tx_unresolved);
+  vlib_node_increment_counter (vm, l2gw_input_node.index,
+			       L2GW_ERROR_TRIGGER_PUNTED, pkts_trigger_punted);
 
   return frame->n_vectors;
 }

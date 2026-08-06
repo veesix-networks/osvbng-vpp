@@ -115,6 +115,13 @@ typedef struct
   /* ports armed with the device-input feature (bookkeeping) */
   uword *enabled_by_sw_if_index;
 
+  /* per-port S-VLAN bitmaps arming the DHCP trigger snoop on circuit
+   * miss; vector indexed by sw_if_index, NULL = no snoop on port */
+  uword **trigger_svlans;
+
+  /* l2gw-input -> osvbng-punt-shm-tx (~0 = punt plugin not loaded) */
+  u32 punt_shm_tx_next_arc;
+
   vlib_combined_counter_main_t counters;
 
   u16 msg_id_base;
@@ -146,6 +153,8 @@ int vnet_l2gw_add_del_circuit (vnet_l2gw_add_del_circuit_args_t *a,
 			       u32 *circuit_idp);
 int vnet_l2gw_circuit_set_state (u32 circuit_id, u8 enabled);
 int vnet_l2gw_enable_disable (u32 sw_if_index, u8 enable);
+int vnet_l2gw_trigger_svlan_range (u32 sw_if_index, u16 svlan_lo,
+				   u16 svlan_hi, u8 is_add);
 
 always_inline void
 l2gw_make_key (l2gw_key_t *key, u32 sw_if_index, u16 svlan, u16 cvlan)

@@ -47,6 +47,51 @@ VLIB_CLI_COMMAND (l2gw_enable_disable_command, static) = {
 };
 
 static clib_error_t *
+l2gw_trigger_command_fn (vlib_main_t *vm, unformat_input_t *input,
+			 vlib_cli_command_t *cmd)
+{
+  l2gw_main_t *lm = &l2gw_main;
+  u32 sw_if_index = ~0;
+  u32 lo = 0, hi = 0;
+  u8 is_add = 1;
+  int rv;
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "del"))
+	is_add = 0;
+      else if (unformat (input, "svlan %d-%d", &lo, &hi))
+	;
+      else if (unformat (input, "svlan %d", &lo))
+	hi = lo;
+      else if (unformat (input, "%U", unformat_vnet_sw_interface,
+			 lm->vnet_main, &sw_if_index))
+	;
+      else
+	return clib_error_return (0, "unknown input `%U'",
+				  format_unformat_error, input);
+    }
+
+  if (sw_if_index == ~0)
+    return clib_error_return (0, "interface required");
+  if (lo == 0)
+    return clib_error_return (0, "svlan required");
+
+  rv = vnet_l2gw_trigger_svlan_range (sw_if_index, lo, hi, is_add);
+  if (rv)
+    return clib_error_return (0, "l2gw trigger failed (rv %d)", rv);
+
+  return 0;
+}
+
+VLIB_CLI_COMMAND (l2gw_trigger_command, static) = {
+  .path = "osvbng l2gw trigger",
+  .short_help =
+    "osvbng l2gw trigger <interface> svlan <lo>[-<hi>] [del]",
+  .function = l2gw_trigger_command_fn,
+};
+
+static clib_error_t *
 l2gw_circuit_add_del_command_fn (vlib_main_t *vm, unformat_input_t *input,
 				 vlib_cli_command_t *cmd)
 {

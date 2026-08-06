@@ -6,7 +6,7 @@
  * Layer 2 wholesale gateway circuits.
  */
 
-option version = "1.0.0";
+option version = "1.1.0";
 import "vnet/interface_types.api";
 
 /** \brief Enable/disable L2GW processing on an interface (device-input arc)
@@ -27,6 +27,29 @@ define osvbng_l2gw_enable_disable_reply
 {
   u32 context;
   i32 retval;
+};
+
+/** \brief Arm/disarm the DHCP trigger snoop for an S-VLAN range on a port
+    On circuit miss, frames whose outer VLAN is armed and that carry a
+    DHCPv4 (udp dst 67) or DHCPv6 (udp dst 547) payload are punted to the
+    control plane via the punt SHM service instead of continuing down the
+    feature arc. This is the wholesale circuit trigger path; the port must
+    also be armed with osvbng_l2gw_enable_disable.
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - access port
+    @param svlan_lo - first S-VLAN of the range (1-4094)
+    @param svlan_hi - last S-VLAN of the range (inclusive)
+    @param is_add - arm if non-zero, else disarm
+*/
+autoreply define osvbng_l2gw_trigger_svlan_range
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  u16 svlan_lo;
+  u16 svlan_hi;
+  bool is_add;
 };
 
 /** \brief Add or delete a bidirectional L2GW circuit

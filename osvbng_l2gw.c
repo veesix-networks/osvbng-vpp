@@ -316,6 +316,27 @@ vnet_l2gw_enable_disable (u32 sw_if_index, u8 enable)
   return 0;
 }
 
+int
+vnet_l2gw_trigger_svlan_range (u32 sw_if_index, u16 svlan_lo, u16 svlan_hi,
+			       u8 is_add)
+{
+  l2gw_main_t *lm = &l2gw_main;
+
+  if (!vnet_sw_interface_is_api_valid (lm->vnet_main, sw_if_index))
+    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
+
+  if (svlan_lo == 0 || svlan_hi > 4094 || svlan_lo > svlan_hi)
+    return VNET_API_ERROR_INVALID_VALUE;
+
+  vec_validate_init_empty (lm->trigger_svlans, sw_if_index, 0);
+
+  for (u32 v = svlan_lo; v <= svlan_hi; v++)
+    lm->trigger_svlans[sw_if_index] =
+      clib_bitmap_set (lm->trigger_svlans[sw_if_index], v, is_add != 0);
+
+  return 0;
+}
+
 static clib_error_t *
 l2gw_init (vlib_main_t *vm)
 {
@@ -329,6 +350,19 @@ l2gw_init (vlib_main_t *vm)
 
   lm->counters.name = "l2gw";
   lm->counters.stat_segment_name = "/osvbng/l2gw";
+
+  /* Resolve the punt SHM service next-arc now: vlib_node_add_next must
+   * run on the main thread, and the target node (if the punt plugin is
+   * loaded) is registered before any VLIB_INIT_FUNCTION. ~0 leaves the
+   * trigger snoop disarmed. */
+  lm->punt_shm_tx_next_arc = ~0;
+  {
+    vlib_node_t *target =
+      vlib_get_node_by_name (vm, (u8 *) "osvbng-punt-shm-tx");
+    if (target)
+      lm->punt_shm_tx_next_arc =
+	vlib_node_add_next (vm, l2gw_input_node.index, target->index);
+  }
 
   return 0;
 }
