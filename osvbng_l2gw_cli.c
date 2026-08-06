@@ -148,6 +148,52 @@ VLIB_CLI_COMMAND (l2gw_circuit_add_del_command, static) = {
   .function = l2gw_circuit_add_del_command_fn,
 };
 
+static clib_error_t *
+l2gw_circuit_state_command_fn (vlib_main_t *vm, unformat_input_t *input,
+			       vlib_cli_command_t *cmd)
+{
+  u32 circuit_id = ~0;
+  u8 enabled = 1;
+  u8 have_state = 0;
+  int rv;
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "all"))
+	circuit_id = ~0;
+      else if (unformat (input, "%d", &circuit_id))
+	;
+      else if (unformat (input, "enable"))
+	{
+	  enabled = 1;
+	  have_state = 1;
+	}
+      else if (unformat (input, "disable"))
+	{
+	  enabled = 0;
+	  have_state = 1;
+	}
+      else
+	return clib_error_return (0, "unknown input `%U'",
+				  format_unformat_error, input);
+    }
+
+  if (!have_state)
+    return clib_error_return (0, "enable or disable required");
+
+  rv = vnet_l2gw_circuit_set_state (circuit_id, enabled);
+  if (rv)
+    return clib_error_return (0, "l2gw circuit state failed (rv %d)", rv);
+
+  return 0;
+}
+
+VLIB_CLI_COMMAND (l2gw_circuit_state_command, static) = {
+  .path = "osvbng l2gw state",
+  .short_help = "osvbng l2gw state <circuit-id>|all enable|disable",
+  .function = l2gw_circuit_state_command_fn,
+};
+
 static u8 *
 format_l2gw_side (u8 *s, va_list *args)
 {
