@@ -9,11 +9,14 @@
  * ethernet-input, so VLAN subinterfaces on the headend classify as if
  * the frame arrived on a physical port.
  *
- * osvbng-pw-output replaces the headend's hw output node. Subif TX
- * funnels through the sup hw output node, so every frame leaving the
- * headend (or any of its subinterfaces) lands here; VLIB_TX is
- * rewritten to the transport tunnel and the frame is handed to the
- * tunnel's own output node for encap.
+ * Each bound headend gets its own dynamically registered output node
+ * (replacing the loopback's hw output node), with the headend
+ * sw_if_index carried in node runtime data - the same idiom VPP uses
+ * for per-interface tx nodes. Every frame leaving the headend or ANY
+ * interface stacked on it (VLAN subifs, per-session ipoe/pppoe
+ * interfaces, punt injection) lands in that node regardless of what
+ * VLIB_TX says; VLIB_TX is rewritten to the transport tunnel and the
+ * frame is handed to the tunnel's own output node for encap.
  *
  * Both nodes are stateless per packet and lock-free; the binding
  * vectors are written only under the API barrier.
@@ -165,117 +168,114 @@ static char *osvbng_pw_output_error_strings[] = {
 #undef _
 };
 
-#define OSVBNG_PW_OUTPUT_NEXT_DROP 0
+typedef struct
+{
+  u32 headend_sw_if_index;
+} osvbng_pw_output_runtime_t;
 
-VLIB_NODE_FN (osvbng_pw_output_node)
-(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+static uword
+osvbng_pw_output_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
+		     vlib_frame_t *frame)
 {
   osvbng_tunnel_main_t *tm = &osvbng_tunnel_main;
   vnet_main_t *vnm = tm->vnet_main;
+  osvbng_pw_output_runtime_t *rt = (void *) node->runtime_data;
+  u32 headend = rt->headend_sw_if_index;
   u32 n_left_from, *from;
-  u32 pkts_tx = 0, pkts_unbound = 0;
+  u32 tunnel = ~0u;
 
-  u32 cached_out_node = ~0u;
-  vlib_frame_t *out_frame = NULL;
-  u32 *out_to_next = NULL;
-  u32 out_n = 0;
+  if (PREDICT_TRUE (headend < vec_len (tm->pw_tunnel_by_headend)))
+    tunnel = tm->pw_tunnel_by_headend[headend];
 
   from = vlib_frame_vector_args (frame);
   n_left_from = frame->n_vectors;
 
-  while (n_left_from > 0)
+  if (PREDICT_FALSE (tunnel == ~0u))
     {
-      vlib_buffer_t *b0;
-      u32 bi0, tx0, sup0, tunnel0 = ~0u;
-
-      bi0 = from[0];
-      from += 1;
-      n_left_from -= 1;
-
-      b0 = vlib_get_buffer (vm, bi0);
-      tx0 = vnet_buffer (b0)->sw_if_index[VLIB_TX];
-
-      sup0 = vnet_get_sup_sw_interface (vnm, tx0)->sw_if_index;
-      if (PREDICT_TRUE (sup0 < vec_len (tm->pw_tunnel_by_headend)))
-	tunnel0 = tm->pw_tunnel_by_headend[sup0];
-
-      if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
-			 (b0->flags & VLIB_BUFFER_IS_TRACED)))
+      while (n_left_from > 0)
 	{
-	  osvbng_pw_trace_t *t = vlib_add_trace (vm, node, b0, sizeof (*t));
-	  t->tunnel_sw_if_index = tunnel0;
-	  t->headend_sw_if_index = sup0;
-	}
-
-      if (PREDICT_FALSE (tunnel0 == ~0u))
-	{
+	  u32 n = clib_min (n_left_from, VLIB_FRAME_SIZE);
 	  vlib_frame_t *df =
 	    vlib_get_frame_to_node (vm, tm->error_drop_node_index);
 	  u32 *dn = vlib_frame_vector_args (df);
-	  dn[0] = bi0;
-	  df->n_vectors = 1;
+	  clib_memcpy_fast (dn, from, n * sizeof (u32));
+	  df->n_vectors = n;
 	  vlib_put_frame_to_node (vm, tm->error_drop_node_index, df);
-	  pkts_unbound++;
-	  continue;
+	  from += n;
+	  n_left_from -= n;
 	}
-
-      vnet_buffer (b0)->sw_if_index[VLIB_TX] = tunnel0;
-
-      vnet_hw_interface_t *hw = vnet_get_sup_hw_interface (vnm, tunnel0);
-      u32 out_node = hw->output_node_index;
-
-      if (PREDICT_FALSE (out_node != cached_out_node))
-	{
-	  if (out_frame)
-	    {
-	      out_frame->n_vectors = out_n;
-	      vlib_put_frame_to_node (vm, cached_out_node, out_frame);
-	    }
-	  cached_out_node = out_node;
-	  out_frame = vlib_get_frame_to_node (vm, out_node);
-	  out_to_next = vlib_frame_vector_args (out_frame);
-	  out_n = 0;
-	}
-
-      out_to_next[out_n++] = bi0;
-      pkts_tx++;
-
-      if (PREDICT_FALSE (out_n >= VLIB_FRAME_SIZE))
-	{
-	  out_frame->n_vectors = out_n;
-	  vlib_put_frame_to_node (vm, cached_out_node, out_frame);
-	  cached_out_node = ~0u;
-	  out_frame = NULL;
-	  out_n = 0;
-	}
+      vlib_node_increment_counter (vm, node->node_index,
+				   OSVBNG_PW_OUTPUT_ERROR_UNBOUND,
+				   frame->n_vectors);
+      return frame->n_vectors;
     }
 
-  if (out_frame)
+  vnet_hw_interface_t *hw = vnet_get_sup_hw_interface (vnm, tunnel);
+  u32 out_node = hw->output_node_index;
+
+  while (n_left_from > 0)
     {
-      out_frame->n_vectors = out_n;
-      vlib_put_frame_to_node (vm, cached_out_node, out_frame);
+      u32 n = clib_min (n_left_from, VLIB_FRAME_SIZE);
+      vlib_frame_t *f = vlib_get_frame_to_node (vm, out_node);
+      u32 *to_next = vlib_frame_vector_args (f);
+
+      for (u32 i = 0; i < n; i++)
+	{
+	  vlib_buffer_t *b0 = vlib_get_buffer (vm, from[i]);
+	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = tunnel;
+
+	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
+			     (b0->flags & VLIB_BUFFER_IS_TRACED)))
+	    {
+	      osvbng_pw_trace_t *t = vlib_add_trace (vm, node, b0, sizeof (*t));
+	      t->tunnel_sw_if_index = tunnel;
+	      t->headend_sw_if_index = headend;
+	    }
+
+	  to_next[i] = from[i];
+	}
+
+      f->n_vectors = n;
+      vlib_put_frame_to_node (vm, out_node, f);
+      from += n;
+      n_left_from -= n;
     }
 
   vlib_node_increment_counter (vm, node->node_index,
-			       OSVBNG_PW_OUTPUT_ERROR_TX, pkts_tx);
-  vlib_node_increment_counter (vm, node->node_index,
-			       OSVBNG_PW_OUTPUT_ERROR_UNBOUND, pkts_unbound);
+			       OSVBNG_PW_OUTPUT_ERROR_TX, frame->n_vectors);
 
   return frame->n_vectors;
 }
 
-VLIB_REGISTER_NODE (osvbng_pw_output_node) = {
-  .name = "osvbng-pw-output",
-  .vector_size = sizeof (u32),
-  .format_trace = format_osvbng_pw_trace,
-  .type = VLIB_NODE_TYPE_INTERNAL,
-  .n_errors = OSVBNG_PW_OUTPUT_N_ERROR,
-  .error_strings = osvbng_pw_output_error_strings,
-  .n_next_nodes = 1,
-  .next_nodes = {
-    [OSVBNG_PW_OUTPUT_NEXT_DROP] = "error-drop",
-  },
-};
+static u32
+osvbng_pw_output_node_get (vlib_main_t *vm, u32 headend_sw_if_index)
+{
+  osvbng_tunnel_main_t *tm = &osvbng_tunnel_main;
+
+  vec_validate_init_empty (tm->pw_output_node_by_headend,
+			   headend_sw_if_index, ~0u);
+  if (tm->pw_output_node_by_headend[headend_sw_if_index] != ~0u)
+    return tm->pw_output_node_by_headend[headend_sw_if_index];
+
+  osvbng_pw_output_runtime_t rt = {
+    .headend_sw_if_index = headend_sw_if_index,
+  };
+  vlib_node_registration_t r = {
+    .function = osvbng_pw_output_fn,
+    .type = VLIB_NODE_TYPE_INTERNAL,
+    .vector_size = sizeof (u32),
+    .format_trace = format_osvbng_pw_trace,
+    .n_errors = OSVBNG_PW_OUTPUT_N_ERROR,
+    .error_strings = osvbng_pw_output_error_strings,
+    .runtime_data = &rt,
+    .runtime_data_bytes = sizeof (rt),
+  };
+
+  u32 node_index = vlib_register_node (vm, &r, "osvbng-pw-output-%u",
+				       headend_sw_if_index);
+  tm->pw_output_node_by_headend[headend_sw_if_index] = node_index;
+  return node_index;
+}
 
 int
 osvbng_tunnel_pw_bind (u32 tunnel_sw_if_index, u32 headend_sw_if_index,
@@ -308,8 +308,9 @@ osvbng_tunnel_pw_bind (u32 tunnel_sw_if_index, u32 headend_sw_if_index,
 
       tm->pw_saved_output_node[headend_sw_if_index] =
 	headend_hw->output_node_index;
-      vnet_set_interface_output_node (vnm, headend_hw->hw_if_index,
-				      osvbng_pw_output_node.index);
+      vnet_set_interface_output_node (
+	vnm, headend_hw->hw_if_index,
+	osvbng_pw_output_node_get (tm->vlib_main, headend_sw_if_index));
 
       tm->pw_headend_by_tunnel[tunnel_sw_if_index] = headend_sw_if_index;
       tm->pw_tunnel_by_headend[headend_sw_if_index] = tunnel_sw_if_index;

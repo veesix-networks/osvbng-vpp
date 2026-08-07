@@ -46,6 +46,7 @@ typedef struct
   u32 *pw_headend_by_tunnel;
   u32 *pw_tunnel_by_headend;
   u32 *pw_saved_output_node;
+  u32 *pw_output_node_by_headend;
 
   u32 error_drop_node_index;
 
@@ -59,7 +60,6 @@ extern osvbng_tunnel_main_t osvbng_tunnel_main;
 
 extern vlib_node_registration_t osvbng_tunnel_input_node;
 extern vlib_node_registration_t osvbng_pw_input_node;
-extern vlib_node_registration_t osvbng_pw_output_node;
 
 int osvbng_tunnel_pw_bind (u32 tunnel_sw_if_index, u32 headend_sw_if_index,
 			   u8 is_bind);
