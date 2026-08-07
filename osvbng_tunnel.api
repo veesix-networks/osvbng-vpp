@@ -1,0 +1,47 @@
+/* Copyright 2026 The osvbng Authors
+ * Licensed under the GNU General Public License v3.0 or later.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * osvbng Tunnel Plugin API
+ * Generic tunnel RX dispatch onto the device-input feature arc.
+ */
+
+option version = "1.0.0";
+
+/** \brief Get the tunnel decap next indices for osvbng-tunnel-input
+    osvbng-tunnel-input is registered as a next node of vxlan4-input and
+    vxlan6-input at plugin init. Create a vxlan tunnel with the returned
+    value as decap_next_index and every decapsulated frame re-enters the
+    device-input feature arc for the tunnel sw_if_index, so l2gw / ipoe /
+    pppoe features armed on the tunnel behave exactly as on a physical
+    port; with no features armed frames continue into ethernet-input.
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+*/
+define osvbng_tunnel_decap_next_get
+{
+  u32 client_index;
+  u32 context;
+};
+
+/** \brief Reply with the decap next indices
+    @param context - sender context, to match reply w/ request
+    @param retval - return code
+    @param vxlan4_next - next index on vxlan4-input (~0 = vxlan plugin
+           not loaded)
+    @param vxlan6_next - next index on vxlan6-input (~0 = vxlan plugin
+           not loaded)
+*/
+define osvbng_tunnel_decap_next_get_reply
+{
+  u32 context;
+  i32 retval;
+  u32 vxlan4_next;
+  u32 vxlan6_next;
+};
+
+/*
+ * Local Variables:
+ * eval: (c-set-style "gnu")
+ * End:
+ */
