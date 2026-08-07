@@ -21,7 +21,7 @@ import "vnet/interface_types.api";
     @param client_index - opaque cookie to identify the sender
     @param context - sender context, to match reply w/ request
     @param sw_if_index - interface index
-    @param protocol - protocol type (0=DHCPv4, 1=DHCPv6, 2=ARP, 3=PPPoE-Disc, 4=PPPoE-Sess, 5=IPv6-ND, 6=L2TP)
+    @param protocol - protocol type (0=DHCPv4, 1=DHCPv6, 2=ARP, 3=PPPoE-Disc, 4=PPPoE-Sess, 5=IPv6-ND, 6=L2TP, 7=L2GW-Trigger)
     @param enable - true to enable, false to disable
 */
 autoreply define osvbng_punt_enable_disable
@@ -94,7 +94,7 @@ define osvbng_punt_registration_dump
 /** \brief OSVBNG punt registration details
     @param context - sender context, to match reply w/ request
     @param sw_if_index - interface index
-    @param protocol - protocol type (0=DHCPv4, 1=DHCPv6, 2=ARP, 3=PPPoE-Disc, 4=PPPoE-Sess, 5=IPv6-ND, 6=L2TP)
+    @param protocol - protocol type (0=DHCPv4, 1=DHCPv6, 2=ARP, 3=PPPoE-Disc, 4=PPPoE-Sess, 5=IPv6-ND, 6=L2TP, 7=L2GW-Trigger)
 */
 define osvbng_punt_registration_details
 {

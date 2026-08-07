@@ -31,8 +31,8 @@ osvbng_punt_policer_init (void)
   osvbng_punt_main_t *pm = &osvbng_punt_main;
 
   /* Default rates: packets per second, burst size */
-  f64 default_rates[] = { 1000, 1000, 500, 1000, 1000, 500, 500 };
-  u32 default_bursts[] = { 100, 100, 50, 100, 100, 50, 50 };
+  f64 default_rates[] = { 1000, 1000, 500, 1000, 1000, 500, 500, 1000 };
+  u32 default_bursts[] = { 100, 100, 50, 100, 100, 50, 50, 100 };
 
   for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
     {
@@ -258,6 +258,8 @@ osvbng_punt_enable_disable_command_fn (vlib_main_t *vm,
 	protocol = OSVBNG_PUNT_PROTO_IPV6_ND;
       else if (unformat (input, "protocol l2tp"))
 	protocol = OSVBNG_PUNT_PROTO_L2TP;
+      else if (unformat (input, "protocol l2gw-trigger"))
+	protocol = OSVBNG_PUNT_PROTO_L2GW_TRIGGER;
       else if (sw_if_index == ~0 &&
 	       unformat (input, "%U", unformat_vnet_sw_interface,
 			 pm->vnet_main, &sw_if_index))
@@ -294,7 +296,7 @@ osvbng_punt_enable_disable_command_fn (vlib_main_t *vm,
 VLIB_CLI_COMMAND (osvbng_punt_enable_disable_command, static) = {
   .path = "osvbng punt",
   .short_help =
-    "osvbng punt [enable|disable] <interface> protocol <arp|pppoe-disc|pppoe-sess|dhcpv4|dhcpv6|ipv6-nd|l2tp>",
+    "osvbng punt [enable|disable] <interface> protocol <arp|pppoe-disc|pppoe-sess|dhcpv4|dhcpv6|ipv6-nd|l2tp|l2gw-trigger>",
   .function = osvbng_punt_enable_disable_command_fn,
 };
 
@@ -305,7 +307,8 @@ osvbng_punt_show_stats_command_fn (vlib_main_t *vm,
 {
   osvbng_punt_main_t *pm = &osvbng_punt_main;
   char *proto_names[] = {
-    "DHCPv4", "DHCPv6", "ARP", "PPPoE-Disc", "PPPoE-Sess", "IPv6-ND", "L2TP"
+    "DHCPv4", "DHCPv6", "ARP", "PPPoE-Disc", "PPPoE-Sess", "IPv6-ND", "L2TP",
+    "L2GW-Trigger"
   };
 
   vlib_cli_output (vm, "OSVBNG Punt Statistics:\n");
@@ -360,6 +363,8 @@ osvbng_punt_policer_command_fn (vlib_main_t *vm, unformat_input_t *input,
 	protocol = OSVBNG_PUNT_PROTO_IPV6_ND;
       else if (unformat (input, "protocol l2tp"))
 	protocol = OSVBNG_PUNT_PROTO_L2TP;
+      else if (unformat (input, "protocol l2gw-trigger"))
+	protocol = OSVBNG_PUNT_PROTO_L2GW_TRIGGER;
       else if (unformat (input, "rate %f", &rate))
 	;
       else if (unformat (input, "burst %u", &burst))
@@ -400,7 +405,8 @@ osvbng_punt_show_interfaces_command_fn (vlib_main_t *vm,
 {
   osvbng_punt_main_t *pm = &osvbng_punt_main;
   char *proto_names[] = {
-    "DHCPv4", "DHCPv6", "ARP", "PPPoE-Disc", "PPPoE-Sess", "IPv6-ND", "L2TP"
+    "DHCPv4", "DHCPv6", "ARP", "PPPoE-Disc", "PPPoE-Sess", "IPv6-ND", "L2TP",
+    "L2GW-Trigger"
   };
 
   vlib_cli_output (vm, "OSVBNG Punt Enabled Interfaces:\n");
