@@ -32,6 +32,33 @@ vl_api_osvbng_tunnel_decap_next_get_t_handler (
 		}));
 }
 
+static void
+vl_api_osvbng_pw_decap_next_get_t_handler (
+  vl_api_osvbng_pw_decap_next_get_t *mp)
+{
+  osvbng_tunnel_main_t *tm = &osvbng_tunnel_main;
+  vl_api_osvbng_pw_decap_next_get_reply_t *rmp;
+  int rv = 0;
+
+  REPLY_MACRO2 (VL_API_OSVBNG_PW_DECAP_NEXT_GET_REPLY, ({
+		  rmp->vxlan4_next = htonl (tm->pw_vxlan4_decap_next);
+		  rmp->vxlan6_next = htonl (tm->pw_vxlan6_decap_next);
+		}));
+}
+
+static void
+vl_api_osvbng_pw_bind_t_handler (vl_api_osvbng_pw_bind_t *mp)
+{
+  osvbng_tunnel_main_t *tm = &osvbng_tunnel_main;
+  vl_api_osvbng_pw_bind_reply_t *rmp;
+  int rv;
+
+  rv = osvbng_tunnel_pw_bind (ntohl (mp->tunnel_sw_if_index),
+			      ntohl (mp->headend_sw_if_index), mp->is_bind);
+
+  REPLY_MACRO (VL_API_OSVBNG_PW_BIND_REPLY);
+}
+
 #include <osvbng_tunnel/osvbng_tunnel.api.c>
 
 static clib_error_t *

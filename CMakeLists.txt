@@ -12,6 +12,7 @@ add_vpp_plugin(osvbng_tunnel
   osvbng_tunnel_api.c
   osvbng_tunnel_cli.c
   osvbng_tunnel_node.c
+  osvbng_tunnel_pw.c
 
   API_FILES
   osvbng_tunnel.api

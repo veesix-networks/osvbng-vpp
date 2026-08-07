@@ -26,6 +26,23 @@ show_osvbng_tunnel_fn (vlib_main_t *vm, unformat_input_t *input,
   else
     vlib_cli_output (vm, "  vxlan6-input: (vxlan plugin not loaded)");
 
+  vlib_cli_output (vm, "osvbng-pw-input decap next indices:");
+  if (tm->pw_vxlan4_decap_next != ~0u)
+    vlib_cli_output (vm, "  vxlan4-input: %u", tm->pw_vxlan4_decap_next);
+  else
+    vlib_cli_output (vm, "  vxlan4-input: (vxlan plugin not loaded)");
+  if (tm->pw_vxlan6_decap_next != ~0u)
+    vlib_cli_output (vm, "  vxlan6-input: %u", tm->pw_vxlan6_decap_next);
+  else
+    vlib_cli_output (vm, "  vxlan6-input: (vxlan plugin not loaded)");
+
+  vlib_cli_output (vm, "pseudowire bindings:");
+  for (u32 i = 0; i < vec_len (tm->pw_headend_by_tunnel); i++)
+    if (tm->pw_headend_by_tunnel[i] != ~0u)
+      vlib_cli_output (vm, "  %U -> %U", format_vnet_sw_if_index_name,
+		       tm->vnet_main, i, format_vnet_sw_if_index_name,
+		       tm->vnet_main, tm->pw_headend_by_tunnel[i]);
+
   return 0;
 }
 
