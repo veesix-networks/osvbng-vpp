@@ -102,6 +102,24 @@ typedef enum
 
 extern char *pppoe_error_strings[];
 
+/*
+ * Plugin-shared API return code for the duplicate-add idempotency
+ * contract. Returned by vnet_osvbng_pppoe_add_del_session() when a
+ * session already exists for the (client_mac, session_id) lookup key
+ * but one or more mutable inputs (encap_if_index, decap_fib_index,
+ * outer_vlan, inner_vlan, local_mac, client_ip) have drifted from the
+ * stored record. The caller receives the existing sw_if_index in
+ * *sw_if_indexp and must delete-and-recreate the session to converge
+ * on the new inputs.
+ *
+ * Value is chosen outside VPP's vnet_api_error_t range (-1..-171)
+ * to avoid collision. Same numeric value across all osvbng plugins
+ * (ipoe, pppoe, cgnat) so the Go control plane has one constant.
+ */
+#ifndef VNET_API_ERROR_ENTRY_NEEDS_REFRESH
+#define VNET_API_ERROR_ENTRY_NEEDS_REFRESH (-500)
+#endif
+
 #define MTU 1500
 #define MTU_BUFFERS ((MTU + vlib_buffer_get_default_data_size(vm) - 1) / vlib_buffer_get_default_data_size(vm))
 #define NUM_BUFFERS_TO_ALLOC 32

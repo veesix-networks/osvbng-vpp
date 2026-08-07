@@ -336,9 +336,33 @@ int vnet_osvbng_pppoe_add_del_session
 
   if (a->is_add)
     {
-      /* adding a session: session must not already exist */
+      /* Duplicate add for an existing (client_mac, session_id) lookup
+       * key. Compare every mutable input that drives rewrite / FIB /
+       * encap. If all match, the call is an idempotent no-op and we
+       * return success with the existing sw_if_index. If any have
+       * drifted (subscriber-group renumbered, VRF moved, BNG MAC
+       * rolled, client IP rebound), return ENTRY_NEEDS_REFRESH and
+       * let the caller delete-and-recreate to converge. The outgoing
+       * sw_if_indexp is populated on both paths so the caller can
+       * either treat the session as already-set-up or initiate the
+       * refresh. */
       if (result.fields.session_index != ~0)
-        return VNET_API_ERROR_TUNNEL_EXIST;
+        {
+          t = pool_elt_at_index (pem->sessions, result.fields.session_index);
+          if (sw_if_indexp)
+            *sw_if_indexp = t->sw_if_index;
+
+          if (t->encap_if_index == a->encap_if_index &&
+              t->decap_fib_index == a->decap_fib_index &&
+              t->outer_vlan == a->outer_vlan &&
+              t->inner_vlan == a->inner_vlan &&
+              clib_memcmp (t->local_mac, a->local_mac, 6) == 0 &&
+              t->client_ip.as_u64[0] == a->client_ip.as_u64[0] &&
+              t->client_ip.as_u64[1] == a->client_ip.as_u64[1])
+            return 0;
+
+          return VNET_API_ERROR_ENTRY_NEEDS_REFRESH;
+        }
 
       /* Validate encap_if_index - must be valid interface (only for add) */
       if (pool_is_free_index (vnm->interface_main.sw_interfaces, a->encap_if_index))
@@ -769,6 +793,15 @@ osvbng_pppoe_set_lac_tunnel (u32 sw_if_index, u8 is_lac_tunneled,
     return -1;
 
   t = pool_elt_at_index (pem->sessions, idx);
+
+  /* Idempotent no-op when both the flag and the resolved L2TP session
+   * index already match what the caller is asking for. Recovery replay
+   * hits this path on every restored LAC session and we want it free
+   * of side-effects (no counter delta, no notification fanout). */
+  if (t->is_lac_tunneled == (is_lac_tunneled ? 1 : 0) &&
+      t->lac_l2tp_session_index ==
+        (is_lac_tunneled ? lac_l2tp_session_index : 0))
+    return 0;
 
   if (t->is_lac_tunneled && !is_lac_tunneled)
     {
