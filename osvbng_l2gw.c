@@ -318,9 +318,11 @@ vnet_l2gw_enable_disable (u32 sw_if_index, u8 enable)
 
 int
 vnet_l2gw_trigger_svlan_range (u32 sw_if_index, u16 svlan_lo, u16 svlan_hi,
-			       u8 is_add)
+			       u8 any_protocol, u8 is_add)
 {
   l2gw_main_t *lm = &l2gw_main;
+  uword ***bitmaps =
+    any_protocol ? &lm->trigger_any_svlans : &lm->trigger_svlans;
 
   if (!vnet_sw_interface_is_api_valid (lm->vnet_main, sw_if_index))
     return VNET_API_ERROR_INVALID_SW_IF_INDEX;
@@ -328,11 +330,11 @@ vnet_l2gw_trigger_svlan_range (u32 sw_if_index, u16 svlan_lo, u16 svlan_hi,
   if (svlan_lo == 0 || svlan_hi > 4094 || svlan_lo > svlan_hi)
     return VNET_API_ERROR_INVALID_VALUE;
 
-  vec_validate_init_empty (lm->trigger_svlans, sw_if_index, 0);
+  vec_validate_init_empty (*bitmaps, sw_if_index, 0);
 
   for (u32 v = svlan_lo; v <= svlan_hi; v++)
-    lm->trigger_svlans[sw_if_index] =
-      clib_bitmap_set (lm->trigger_svlans[sw_if_index], v, is_add != 0);
+    (*bitmaps)[sw_if_index] =
+      clib_bitmap_set ((*bitmaps)[sw_if_index], v, is_add != 0);
 
   return 0;
 }
@@ -347,6 +349,10 @@ l2gw_init (vlib_main_t *vm)
 
   clib_bihash_init_16_8 (&lm->circuit_table, "l2gw circuit table",
 			 L2GW_NUM_BUCKETS, L2GW_MEMORY_SIZE);
+
+  clib_bihash_init_8_8 (&lm->trigger_dampener, "l2gw trigger dampener",
+			L2GW_DAMPENER_NUM_BUCKETS, L2GW_DAMPENER_MEMORY_SIZE);
+  lm->trigger_dampen_interval = L2GW_DAMPENER_DEFAULT_INTERVAL;
 
   lm->counters.name = "l2gw";
   lm->counters.stat_segment_name = "/osvbng/l2gw";

@@ -123,6 +123,43 @@ l2gw_trigger_armed (l2gw_main_t *lm, u32 sw_if_index, u16 svlan)
   return bm && clib_bitmap_get (bm, svlan);
 }
 
+always_inline int
+l2gw_trigger_any_armed (l2gw_main_t *lm, u32 sw_if_index, u16 svlan)
+{
+  if (svlan == 0 || sw_if_index >= vec_len (lm->trigger_any_svlans))
+    return 0;
+  uword *bm = lm->trigger_any_svlans[sw_if_index];
+  return bm && clib_bitmap_get (bm, svlan);
+}
+
+/* Per-tuple punt suppression for the any-protocol trigger. Unlike the
+ * DHCP snoop, this path is not paced by client retransmit timers: an
+ * unknown line sending line-rate traffic would otherwise punt every
+ * frame. Overwrite-on-punt keeps the table bounded by the armed tuple
+ * count; racing workers may double-punt once, which the control-plane
+ * dedup absorbs. */
+always_inline int
+l2gw_trigger_dampen_allow (l2gw_main_t *lm, vlib_main_t *vm, u32 sw_if_index,
+			   u16 svlan, u16 cvlan)
+{
+  clib_bihash_kv_8_8_t kv, result;
+  f64 now = vlib_time_now (vm);
+  f64 last;
+
+  kv.key = ((u64) sw_if_index << 32) | ((u64) svlan << 16) | (u64) cvlan;
+
+  if (clib_bihash_search_8_8 (&lm->trigger_dampener, &kv, &result) == 0)
+    {
+      clib_memcpy_fast (&last, &result.value, sizeof (last));
+      if (now - last < lm->trigger_dampen_interval)
+	return 0;
+    }
+
+  clib_memcpy_fast (&kv.value, &now, sizeof (kv.value));
+  clib_bihash_add_del_8_8 (&lm->trigger_dampener, &kv, 1);
+  return 1;
+}
+
 /* DHCP trigger recognition on the circuit-miss path: fixed-offset
  * compares only. IPv6 extension headers are deliberately not walked —
  * a SOLICIT behind an extension chain falls through untouched and the
@@ -250,6 +287,7 @@ VLIB_NODE_FN (l2gw_input_node)
   u32 thread_index = vm->thread_index;
   u32 pkts_switched = 0, pkts_no_circuit = 0, pkts_disabled = 0;
   u32 pkts_tx_unresolved = 0, pkts_trigger_punted = 0;
+  u32 pkts_trigger_dampened = 0;
 
   l2gw_tx_pending_t pending[L2GW_MAX_TX_OUTPUTS];
   u32 n_pending = 0;
@@ -338,12 +376,31 @@ VLIB_NODE_FN (l2gw_input_node)
 	  if (!matched0)
 	    {
 	      u32 next0;
-	      u8 punt_proto0;
-	      if (PREDICT_FALSE (
-		    lm->punt_shm_tx_next_arc != ~0u &&
-		    l2gw_trigger_armed (lm, sw_if_index0, svlan0) &&
-		    l2gw_frame_is_dhcp_trigger (b0, eth0, n_tags0,
-						&punt_proto0)))
+	      u8 punt_proto0 = 0;
+	      u8 do_punt0 = 0;
+
+	      if (PREDICT_FALSE (lm->punt_shm_tx_next_arc != ~0u))
+		{
+		  if (PREDICT_FALSE (
+			l2gw_trigger_any_armed (lm, sw_if_index0, svlan0)))
+		    {
+		      if (l2gw_trigger_dampen_allow (lm, vm, sw_if_index0,
+						     svlan0, cvlan0))
+			{
+			  punt_proto0 = OSVBNG_PUNT_PROTO_L2GW_TRIGGER;
+			  do_punt0 = 1;
+			}
+		      else
+			pkts_trigger_dampened++;
+		    }
+		  else if (PREDICT_FALSE (
+			     l2gw_trigger_armed (lm, sw_if_index0, svlan0) &&
+			     l2gw_frame_is_dhcp_trigger (b0, eth0, n_tags0,
+							 &punt_proto0)))
+		    do_punt0 = 1;
+		}
+
+	      if (PREDICT_FALSE (do_punt0))
 		{
 		  vnet_buffer_punt_protocol (b0) = punt_proto0;
 		  next0 = lm->punt_shm_tx_next_arc;
@@ -442,6 +499,9 @@ VLIB_NODE_FN (l2gw_input_node)
 			       L2GW_ERROR_TX_UNRESOLVED, pkts_tx_unresolved);
   vlib_node_increment_counter (vm, l2gw_input_node.index,
 			       L2GW_ERROR_TRIGGER_PUNTED, pkts_trigger_punted);
+  vlib_node_increment_counter (vm, l2gw_input_node.index,
+			       L2GW_ERROR_TRIGGER_DAMPENED,
+			       pkts_trigger_dampened);
 
   return frame->n_vectors;
 }

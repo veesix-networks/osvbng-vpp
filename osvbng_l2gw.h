@@ -21,12 +21,17 @@
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/feature/feature.h>
 #include <vppinfra/bihash_16_8.h>
+#include <vppinfra/bihash_8_8.h>
 #include <vppinfra/error.h>
 
 #define L2GW_CVLAN_ANY 0xFFFF
 
 #define L2GW_NUM_BUCKETS (64 * 1024)
 #define L2GW_MEMORY_SIZE (8 << 20)
+
+#define L2GW_DAMPENER_NUM_BUCKETS (16 * 1024)
+#define L2GW_DAMPENER_MEMORY_SIZE (4 << 20)
+#define L2GW_DAMPENER_DEFAULT_INTERVAL 5.0
 
 /* Shared osvbng plugin idempotency contract: duplicate add whose mutable
  * fields drifted from the stored circuit. Same value across osvbng
@@ -119,6 +124,17 @@ typedef struct
    * miss; vector indexed by sw_if_index, NULL = no snoop on port */
   uword **trigger_svlans;
 
+  /* per-port S-VLAN bitmaps arming the any-protocol trigger snoop:
+   * every ethertype punts on circuit miss, gated by the dampener */
+  uword **trigger_any_svlans;
+
+  /* per-tuple last-punt time for the any-protocol trigger; key
+   * port<<32|svlan<<16|cvlan, value f64 vlib time bits. Entries are
+   * overwritten on punt, so the table is bounded by the armed tuple
+   * count and needs no sweeper. */
+  clib_bihash_8_8_t trigger_dampener;
+  f64 trigger_dampen_interval;
+
   /* l2gw-input -> osvbng-punt-shm-tx (~0 = punt plugin not loaded) */
   u32 punt_shm_tx_next_arc;
 
@@ -154,7 +170,7 @@ int vnet_l2gw_add_del_circuit (vnet_l2gw_add_del_circuit_args_t *a,
 int vnet_l2gw_circuit_set_state (u32 circuit_id, u8 enabled);
 int vnet_l2gw_enable_disable (u32 sw_if_index, u8 enable);
 int vnet_l2gw_trigger_svlan_range (u32 sw_if_index, u16 svlan_lo,
-				   u16 svlan_hi, u8 is_add);
+				   u16 svlan_hi, u8 any_protocol, u8 is_add);
 
 always_inline void
 l2gw_make_key (l2gw_key_t *key, u32 sw_if_index, u16 svlan, u16 cvlan)

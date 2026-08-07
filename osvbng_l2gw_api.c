@@ -41,7 +41,8 @@ vl_api_osvbng_l2gw_trigger_svlan_range_t_handler (
 
   rv = vnet_l2gw_trigger_svlan_range (ntohl (mp->sw_if_index),
 				      ntohs (mp->svlan_lo),
-				      ntohs (mp->svlan_hi), mp->is_add);
+				      ntohs (mp->svlan_hi), mp->any_protocol,
+				      mp->is_add);
 
   REPLY_MACRO (VL_API_OSVBNG_L2GW_TRIGGER_SVLAN_RANGE_REPLY);
 }

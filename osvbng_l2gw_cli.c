@@ -54,12 +54,15 @@ l2gw_trigger_command_fn (vlib_main_t *vm, unformat_input_t *input,
   u32 sw_if_index = ~0;
   u32 lo = 0, hi = 0;
   u8 is_add = 1;
+  u8 any_protocol = 0;
   int rv;
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
     {
       if (unformat (input, "del"))
 	is_add = 0;
+      else if (unformat (input, "any"))
+	any_protocol = 1;
       else if (unformat (input, "svlan %d-%d", &lo, &hi))
 	;
       else if (unformat (input, "svlan %d", &lo))
@@ -77,7 +80,8 @@ l2gw_trigger_command_fn (vlib_main_t *vm, unformat_input_t *input,
   if (lo == 0)
     return clib_error_return (0, "svlan required");
 
-  rv = vnet_l2gw_trigger_svlan_range (sw_if_index, lo, hi, is_add);
+  rv = vnet_l2gw_trigger_svlan_range (sw_if_index, lo, hi, any_protocol,
+				      is_add);
   if (rv)
     return clib_error_return (0, "l2gw trigger failed (rv %d)", rv);
 
@@ -87,7 +91,7 @@ l2gw_trigger_command_fn (vlib_main_t *vm, unformat_input_t *input,
 VLIB_CLI_COMMAND (l2gw_trigger_command, static) = {
   .path = "osvbng l2gw trigger",
   .short_help =
-    "osvbng l2gw trigger <interface> svlan <lo>[-<hi>] [del]",
+    "osvbng l2gw trigger <interface> svlan <lo>[-<hi>] [any] [del]",
   .function = l2gw_trigger_command_fn,
 };
 
