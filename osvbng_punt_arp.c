@@ -109,8 +109,14 @@ osvbng_punt_arp_inline (vlib_main_t * vm,
 
 	  if (p)
 	    {
-	      /* Reset buffer to ethernet header for full L2 frame punt */
-	      vlib_buffer_reset (b0);
+	      /* Rewind to the L2 header of the CURRENT frame; on tunnel
+	       * paths the inner frame sits deep in the buffer, so a reset
+	       * to data start would punt the outer encapsulation. */
+	      if (b0->flags & VNET_BUFFER_F_L2_HDR_OFFSET_VALID)
+		vlib_buffer_advance (b0, vnet_buffer (b0)->l2_hdr_offset -
+					     b0->current_data);
+	      else
+		vlib_buffer_reset (b0);
 	      if (osvbng_punt_send_packet
 		  (vm, b0, sw_if_index0, OSVBNG_PUNT_PROTO_ARP) == 0)
 		{

@@ -148,8 +148,14 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 
 	  if (p0)
 	    {
-	      /* Reset buffer to ethernet header for full L2 frame punt */
-	      vlib_buffer_reset (b0);
+	      /* Rewind to the L2 header of the CURRENT frame; on tunnel
+	       * paths the inner frame sits deep in the buffer, so a reset
+	       * to data start would punt the outer encapsulation. */
+	      if (b0->flags & VNET_BUFFER_F_L2_HDR_OFFSET_VALID)
+		vlib_buffer_advance (b0, vnet_buffer (b0)->l2_hdr_offset -
+					     b0->current_data);
+	      else
+		vlib_buffer_reset (b0);
 	      if (osvbng_punt_send_packet (vm, b0, sw_if_index0,
 					   OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY)
 		  == 0)
@@ -170,8 +176,14 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 
 	  if (p1)
 	    {
-	      /* Reset buffer to ethernet header for full L2 frame punt */
-	      vlib_buffer_reset (b1);
+	      /* Rewind to the L2 header of the CURRENT frame; on tunnel
+	       * paths the inner frame sits deep in the buffer, so a reset
+	       * to data start would punt the outer encapsulation. */
+	      if (b1->flags & VNET_BUFFER_F_L2_HDR_OFFSET_VALID)
+		vlib_buffer_advance (b1, vnet_buffer (b1)->l2_hdr_offset -
+					     b1->current_data);
+	      else
+		vlib_buffer_reset (b1);
 	      if (osvbng_punt_send_packet (vm, b1, sw_if_index1,
 					   OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY)
 		  == 0)
@@ -241,8 +253,14 @@ osvbng_punt_pppoe_disc_inline (vlib_main_t * vm,
 
 	  if (p0)
 	    {
-	      /* Reset buffer to ethernet header for full L2 frame punt */
-	      vlib_buffer_reset (b0);
+	      /* Rewind to the L2 header of the CURRENT frame; on tunnel
+	       * paths the inner frame sits deep in the buffer, so a reset
+	       * to data start would punt the outer encapsulation. */
+	      if (b0->flags & VNET_BUFFER_F_L2_HDR_OFFSET_VALID)
+		vlib_buffer_advance (b0, vnet_buffer (b0)->l2_hdr_offset -
+					     b0->current_data);
+	      else
+		vlib_buffer_reset (b0);
 	      if (osvbng_punt_send_packet (vm, b0, sw_if_index0,
 					   OSVBNG_PUNT_PROTO_PPPOE_DISCOVERY)
 		  == 0)
