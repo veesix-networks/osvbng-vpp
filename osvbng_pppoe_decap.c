@@ -45,12 +45,18 @@ static u8 * format_pppoe_rx_trace (u8 * s, va_list * args)
 }
 
 /* Mirrors the VLAN walk below to build the lookahead packet's key and warm
- * its session-table bucket. vlib_buffer_reset leaves the ethernet header at
- * b->data, so this reads the same bytes without touching the buffer. */
+ * its session-table bucket. The L2 header of the CURRENT frame starts at
+ * l2_hdr_offset (which is b->data on physical ports but sits past the
+ * encapsulation on tunnel paths); read the same bytes without touching
+ * the buffer. */
 static_always_inline void
 pppoe_prefetch_bucket (osvbng_pppoe_main_t * pem, vlib_buffer_t * b)
 {
-  ethernet_header_t *h = (ethernet_header_t *) b->data;
+  ethernet_header_t *h;
+  if (b->flags & VNET_BUFFER_F_L2_HDR_OFFSET_VALID)
+    h = (ethernet_header_t *) (b->data + vnet_buffer (b)->l2_hdr_offset);
+  else
+    h = (ethernet_header_t *) b->data;
   u16 type = clib_net_to_host_u16 (h->type);
   pppoe_header_t *pppoe;
 
@@ -141,8 +147,15 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
           n_left_to_next -= 1;
           error0 = 0;
 
-          /* Reset buffer to ethernet header to get client MAC */
-          vlib_buffer_reset (b0);
+          /* Rewind to the L2 header of the CURRENT frame to get the
+           * client MAC; on tunnel paths the inner frame sits deep in
+           * the buffer, so a reset to data start would parse the outer
+           * encapsulation. */
+          if (b0->flags & VNET_BUFFER_F_L2_HDR_OFFSET_VALID)
+            vlib_buffer_advance (b0, vnet_buffer (b0)->l2_hdr_offset -
+                                       b0->current_data);
+          else
+            vlib_buffer_reset (b0);
           h0 = vlib_buffer_get_current (b0);
 
           /* Parse through VLAN tags to get to PPPoE header */
