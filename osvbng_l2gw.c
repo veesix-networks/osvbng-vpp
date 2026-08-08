@@ -375,6 +375,35 @@ l2gw_init (vlib_main_t *vm)
 
 VLIB_INIT_FUNCTION (l2gw_init);
 
+/* Interface deletion wipes VPP's feature configs but this plugin's
+ * per-sw_if state would survive, and VPP freely reuses sw_if_index
+ * values: a recreated interface with a recycled index would inherit
+ * the stale enabled bit (turning the next enable into a silent no-op
+ * with the feature actually absent) and stale trigger S-VLAN arming.
+ * Clear both when the interface goes away. */
+static clib_error_t *
+l2gw_sw_interface_add_del (vnet_main_t *vnm, u32 sw_if_index, u32 is_add)
+{
+  l2gw_main_t *lm = &l2gw_main;
+
+  if (is_add)
+    return 0;
+
+  if (sw_if_index < vec_len (lm->trigger_svlans) &&
+      lm->trigger_svlans[sw_if_index])
+    {
+      clib_bitmap_free (lm->trigger_svlans[sw_if_index]);
+      lm->trigger_svlans[sw_if_index] = 0;
+    }
+
+  lm->enabled_by_sw_if_index =
+    clib_bitmap_set (lm->enabled_by_sw_if_index, sw_if_index, 0);
+
+  return 0;
+}
+
+VNET_SW_INTERFACE_ADD_DEL_FUNCTION (l2gw_sw_interface_add_del);
+
 VLIB_PLUGIN_REGISTER () = {
   .version = "1.0.0",
   .description = "osvbng Layer 2 Wholesale Gateway Plugin",
