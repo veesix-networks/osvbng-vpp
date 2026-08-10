@@ -37,15 +37,6 @@ typedef enum
   OSVBNG_PUNT_N_PROTO,
 } osvbng_punt_protocol_t;
 
-typedef struct
-{
-  f64 rate;
-  u32 burst;
-  f64 tokens;
-  f64 last_update;
-  u64 policed;
-} osvbng_punt_policer_t;
-
 typedef struct __attribute__ ((packed))
 {
   u32 sw_if_index;
@@ -54,6 +45,30 @@ typedef struct __attribute__ ((packed))
   u16 data_len;
   u64 timestamp_ns;
 } osvbng_punt_packet_header_t;
+
+/* Per-thread punt state. Single writer: the owning VPP thread. Cache
+ * line aligned because the whole point of the per-thread split is that
+ * no two threads touch the same line on the punt path (v2 shm). */
+typedef struct
+{
+  CLIB_CACHE_LINE_ALIGN_MARK (cacheline0);
+
+  osvbng_ring_header_t *ring;   /* this thread's punt ring header */
+  osvbng_punt_desc_t *descs;    /* this thread's descriptor array */
+  u8 *data;                     /* base of this thread's data slots */
+
+  /* Token bucket per protocol; this thread's share of the aggregate. */
+  f64 rate[OSVBNG_PUNT_N_PROTO];
+  f64 burst[OSVBNG_PUNT_N_PROTO];
+  f64 tokens[OSVBNG_PUNT_N_PROTO];
+  f64 last_update[OSVBNG_PUNT_N_PROTO];
+
+  u64 punted[OSVBNG_PUNT_N_PROTO];
+  u64 dropped[OSVBNG_PUNT_N_PROTO];
+  u64 policed[OSVBNG_PUNT_N_PROTO];
+  u64 ring_full;
+  u64 truncated;
+} osvbng_punt_per_thread_t;
 
 typedef struct
 {
@@ -76,20 +91,18 @@ typedef struct
   u8 client_connected;                 /* 1 if osvbng has connected */
 
   /* Ring configuration */
-  u32 punt_ring_size;                  /* number of punt descriptors */
+  u32 punt_ring_size;                  /* descriptors per punt ring */
   u32 egress_ring_size;                /* number of egress descriptors */
-  u32 data_slots;                      /* total data slots */
   u32 slot_size;                       /* size of each data slot */
-  u32 punt_data_slots;                 /* data slots for punt */
-  u32 egress_data_slots;               /* data slots for egress */
-  u32 egress_data_offset;              /* offset to egress data region */
+  u32 n_punt_rings;                    /* one per VPP thread */
+  u32 punt_ring_stride;                /* bytes between punt rings */
+  u32 punt_data_offset;                /* first punt data slot */
+  u32 egress_data_offset;              /* first egress data slot */
 
-  /* Ring pointers (into shm) */
-  osvbng_ring_header_t *punt_ring;     /* punt ring header */
-  osvbng_punt_desc_t *punt_descs;      /* punt descriptors array */
+  /* Per-thread punt rings; the egress ring stays single. */
+  osvbng_punt_per_thread_t *per_thread;
   osvbng_ring_header_t *egress_ring;   /* egress ring header */
   osvbng_egress_desc_t *egress_descs;  /* egress descriptors array */
-  u8 *data_region;                     /* data region start */
 
   /* Eventfds for signaling */
   int punt_eventfd;                    /* VPP writes, osvbng reads */
@@ -103,9 +116,8 @@ typedef struct
   /* Egress state */
   u64 egress_tail;                     /* local copy of egress tail */
 
-  /* Statistics */
-  u64 punt_ring_full;                  /* punt ring full drops */
-  u64 punt_truncated;                  /* packets truncated */
+  /* Egress statistics (single ring, main-thread consumer). Punt
+   * counters live per-thread. */
   u64 egress_transmitted;              /* packets transmitted */
   u64 egress_alloc_fail;               /* buffer allocation failures */
 
@@ -120,10 +132,10 @@ typedef struct
    * doesn't need an arc cached here. */
   u32 l2tpv2_input_next_arc;	/* from osvbng-punt-l2tp -> l2tpv2-input */
 
-  u64 packets_punted[OSVBNG_PUNT_N_PROTO];
-  u64 packets_dropped[OSVBNG_PUNT_N_PROTO];
-
-  osvbng_punt_policer_t policers[OSVBNG_PUNT_N_PROTO];
+  /* Configured aggregate policer, main thread writes, workers read
+   * their per-thread share (osvbng_punt_policer_apply). */
+  f64 policer_rate[OSVBNG_PUNT_N_PROTO];
+  u32 policer_burst[OSVBNG_PUNT_N_PROTO];
 
   vlib_log_class_t log_class;
   vnet_main_t *vnet_main;
@@ -166,11 +178,46 @@ int osvbng_punt_disable_l2tp (u32 sw_if_index);
 int osvbng_punt_enable_ipv6_nd (u32 sw_if_index);
 int osvbng_punt_disable_ipv6_nd (u32 sw_if_index);
 
-/* Control plane policing */
+/* Control plane policing. Rates are aggregate across threads; each
+ * thread gets an equal share pushed into its per-thread bucket by
+ * osvbng_punt_policer_apply, so the punt path stays lock-free. */
 void osvbng_punt_policer_init (void);
+void osvbng_punt_policer_apply (void);
 int osvbng_punt_policer_configure (osvbng_punt_protocol_t protocol, f64 rate,
 				   u32 burst);
-int osvbng_punt_policer_allow (osvbng_punt_protocol_t protocol);
+
+static_always_inline osvbng_punt_per_thread_t *
+osvbng_punt_get_per_thread (vlib_main_t *vm)
+{
+  return vec_elt_at_index (osvbng_punt_main.per_thread, vm->thread_index);
+}
+
+/* Token bucket for one protocol on this thread. Single writer, so no
+ * locks; rate 0 means unlimited. `now` is passed in because the caller
+ * already read the clock for the descriptor timestamp. */
+static_always_inline int
+osvbng_punt_policer_allow (osvbng_punt_per_thread_t *pt, f64 now,
+			   osvbng_punt_protocol_t protocol)
+{
+  f64 elapsed;
+
+  if (pt->rate[protocol] == 0)
+    return 1;
+
+  elapsed = now - pt->last_update[protocol];
+  pt->last_update[protocol] = now;
+  pt->tokens[protocol] += elapsed * pt->rate[protocol];
+  if (pt->tokens[protocol] > pt->burst[protocol])
+    pt->tokens[protocol] = pt->burst[protocol];
+
+  if (PREDICT_TRUE (pt->tokens[protocol] >= 1.0))
+    {
+      pt->tokens[protocol] -= 1.0;
+      return 1;
+    }
+  pt->policed[protocol]++;
+  return 0;
+}
 
 /* Shared memory functions */
 int osvbng_punt_shm_init (vlib_main_t *vm);

@@ -130,9 +130,10 @@ osvbng_punt_l2tp_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
 	      vlib_buffer_advance (b0, -rewind);
 
+	      /* osvbng_punt_send_packet counts per-thread; no separate
+	       * increment here. */
 	      osvbng_punt_send_packet (vm, b0, sw_if_index0,
 				       OSVBNG_PUNT_PROTO_L2TP);
-	      pm->packets_punted[OSVBNG_PUNT_PROTO_L2TP]++;
 	      next0 = OSVBNG_PUNT_L2TP_NEXT_DROP;
 	    }
 	  else if (l2tpv2_next != ~0u)
@@ -146,7 +147,6 @@ osvbng_punt_l2tp_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  else
 	    {
 	      /* Data message but no L2TPv2 plugin loaded: drop. */
-	      pm->packets_dropped[OSVBNG_PUNT_PROTO_L2TP]++;
 	      next0 = OSVBNG_PUNT_L2TP_NEXT_DROP;
 	    }
 

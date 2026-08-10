@@ -111,17 +111,28 @@ vl_api_osvbng_punt_stats_dump_t_handler (vl_api_osvbng_punt_stats_dump_t * mp)
 
   for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
     {
+      u64 punted = 0, dropped = 0, policed = 0;
+      osvbng_punt_per_thread_t *pt;
+
+      /* Sum per-thread counters off the punt path. */
+      vec_foreach (pt, pm->per_thread)
+	{
+	  punted += pt->punted[i];
+	  dropped += pt->dropped[i];
+	  policed += pt->policed[i];
+	}
+
       rmp = vl_msg_api_alloc (sizeof (*rmp));
       clib_memset (rmp, 0, sizeof (*rmp));
       rmp->_vl_msg_id =
 	ntohs (VL_API_OSVBNG_PUNT_STATS_DETAILS + pm->msg_id_base);
       rmp->context = mp->context;
       rmp->protocol = i;
-      rmp->packets_punted = clib_host_to_net_u64 (pm->packets_punted[i]);
-      rmp->packets_dropped = clib_host_to_net_u64 (pm->packets_dropped[i]);
-      rmp->packets_policed = clib_host_to_net_u64 (pm->policers[i].policed);
-      rmp->policer_rate = pm->policers[i].rate;
-      rmp->policer_burst = htonl (pm->policers[i].burst);
+      rmp->packets_punted = clib_host_to_net_u64 (punted);
+      rmp->packets_dropped = clib_host_to_net_u64 (dropped);
+      rmp->packets_policed = clib_host_to_net_u64 (policed);
+      rmp->policer_rate = pm->policer_rate[i];
+      rmp->policer_burst = htonl (pm->policer_burst[i]);
 
       vl_api_send_msg (reg, (u8 *) rmp);
     }
