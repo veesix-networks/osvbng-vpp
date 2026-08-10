@@ -20,10 +20,55 @@
 #include <vlibmemory/api.h>
 #include <vpp/app/version.h>
 #include <vlib/log.h>
+#include <vnet/fib/fib_table.h>
+#include <vnet/fib/fib_source.h>
+#include <vnet/fib/ip4_fib.h>
 
 #include <osvbng_punt/osvbng_punt.h>
 
 osvbng_punt_main_t osvbng_punt_main;
+
+/* Our own FIB source for the DHCP broadcast receive route, allocated
+ * at init (26.06 has no static plugin source), at DHCP priority so it
+ * composes with VPP's own dhcp machinery rather than fighting it. */
+static fib_source_t osvbng_punt_fib_source;
+
+void
+osvbng_punt_dhcp_bcast_route (u32 sw_if_index, int enable)
+{
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
+  u32 fib_index = ip4_fib_table_get_index_for_sw_if_index (sw_if_index);
+  const fib_prefix_t all_ones = {
+    .fp_len = 32,
+    .fp_proto = FIB_PROTOCOL_IP4,
+    .fp_addr.ip4.as_u32 = 0xffffffff,
+  };
+  uword *count = hash_get (pm->dhcp_bcast_refs, fib_index);
+
+  if (enable)
+    {
+      if (!count)
+	{
+	  fib_table_entry_special_add (fib_index, &all_ones,
+				       osvbng_punt_fib_source,
+				       FIB_ENTRY_FLAG_LOCAL);
+	  hash_set (pm->dhcp_bcast_refs, fib_index, 1);
+	}
+      else
+	hash_set (pm->dhcp_bcast_refs, fib_index, count[0] + 1);
+    }
+  else if (count)
+    {
+      if (count[0] <= 1)
+	{
+	  fib_table_entry_special_remove (fib_index, &all_ones,
+					  osvbng_punt_fib_source);
+	  hash_unset (pm->dhcp_bcast_refs, fib_index);
+	}
+      else
+	hash_set (pm->dhcp_bcast_refs, fib_index, count[0] - 1);
+    }
+}
 
 void
 osvbng_punt_policer_init (void)
@@ -109,6 +154,10 @@ osvbng_punt_enable_disable (u32 sw_if_index,
       return VNET_API_ERROR_INIT_FAILED;
     }
 
+  /* The datapath reads this hash per packet and hash_set can realloc
+   * it. The binapi path already holds the API barrier; the CLI path
+   * does not, so take it here (nested from binapi is a refcount). */
+  vlib_worker_thread_barrier_sync (pm->vlib_main);
   if (enable_disable)
     {
       hash_set (pm->enabled_interfaces[protocol], sw_if_index, 1);
@@ -125,6 +174,7 @@ osvbng_punt_enable_disable (u32 sw_if_index,
 		     "punt disabled: protocol %d on sw_if_index %d",
 		     protocol, sw_if_index);
     }
+  vlib_worker_thread_barrier_release (pm->vlib_main);
 
   return 0;
 }
@@ -191,6 +241,10 @@ osvbng_punt_init (vlib_main_t *vm)
     }
 
   pm->l2tpv2_input_next_arc = ~0;
+  pm->dhcp_bcast_refs = hash_create (0, sizeof (uword));
+  osvbng_punt_fib_source =
+    fib_source_allocate ("osvbng-punt", FIB_SOURCE_PRIORITY_HI,
+			 FIB_SOURCE_BH_SIMPLE);
 
   osvbng_punt_policer_init ();
 

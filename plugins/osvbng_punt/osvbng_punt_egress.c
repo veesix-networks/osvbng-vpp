@@ -79,9 +79,16 @@ VLIB_NODE_FN (osvbng_egress_node)
   u32 n_tx = 0;
   osvbng_egress_pending_t pending[OSVBNG_EGRESS_MAX_IFS];
   u32 n_pending = 0;
+  u32 n_trace;
 
   if (PREDICT_FALSE (!pm->shm_initialized))
     return 0;
+
+  /* An input node owns its own trace accounting: vlib_add_trace alone
+   * records nothing and leaves the buffer unmarked for downstream
+   * nodes. Injection is the path an operator traces when a control
+   * reply never reaches a subscriber, so it has to work. */
+  n_trace = vlib_get_trace_count (vm, node);
 
   ring = pm->egress_ring;
   mask = pm->egress_ring_size - 1;
@@ -145,12 +152,14 @@ VLIB_NODE_FN (osvbng_egress_node)
       vnet_buffer (b)->sw_if_index[VLIB_TX] = desc->sw_if_index;
       vnet_buffer (b)->sw_if_index[VLIB_RX] = ~0;
 
-      if (PREDICT_FALSE (node->flags & VLIB_NODE_FLAG_TRACE))
+      if (PREDICT_FALSE (n_trace > 0 &&
+			 vlib_trace_buffer (vm, node, 0, b, 0 /* chain */)))
 	{
 	  osvbng_egress_trace_t *t =
 	    vlib_add_trace (vm, node, b, sizeof (*t));
 	  t->sw_if_index = desc->sw_if_index;
 	  t->data_length = desc->data_length;
+	  vlib_set_trace_count (vm, node, --n_trace);
 	}
 
       u32 out_node = hw->output_node_index;
@@ -211,6 +220,14 @@ VLIB_NODE_FN (osvbng_egress_node)
   /* Clear interrupt pending flag */
   atomic_store_explicit (&ring->interrupt_pending, 0, memory_order_release);
 
+  /* The batch cap can leave frames in the ring, and the daemon only
+   * signals on the flag's 0 to 1 edge, so without this self-interrupt
+   * a burst larger than one batch would strand its tail until the next
+   * inject arrives. Also covers a frame enqueued between the drain and
+   * the flag clear. */
+  if (atomic_load_explicit (&ring->head, memory_order_acquire) != tail)
+    vlib_node_set_interrupt_pending (vm, node->node_index);
+
   pm->egress_transmitted += n_tx;
 
   return n_tx;
@@ -221,6 +238,10 @@ VLIB_REGISTER_NODE (osvbng_egress_node) = {
   .type = VLIB_NODE_TYPE_INPUT,
   .state = VLIB_NODE_STATE_INTERRUPT,
   .vector_size = sizeof (u32),
+  /* Without this an input node refuses `trace add`, and injection is
+   * exactly the path an operator wants to trace when a control reply
+   * does not reach a subscriber. */
+  .flags = VLIB_NODE_FLAG_TRACE_SUPPORTED,
   .format_trace = format_osvbng_egress_trace,
 };
 

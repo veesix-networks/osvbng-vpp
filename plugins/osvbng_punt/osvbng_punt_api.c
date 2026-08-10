@@ -26,6 +26,33 @@
 #include <vlibapi/api_helper_macros.h>
 
 static void
+vl_api_osvbng_punt_capabilities_get_t_handler (
+  vl_api_osvbng_punt_capabilities_get_t *mp)
+{
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
+  vl_api_osvbng_punt_capabilities_get_reply_t *rmp;
+  u32 supported = 0;
+  int rv = 0;
+
+  for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
+    supported |= 1 << i;
+
+  REPLY_MACRO2 (
+    VL_API_OSVBNG_PUNT_CAPABILITIES_GET_REPLY, ({
+      rmp->shm_version = htonl (OSVBNG_SHM_VERSION);
+      rmp->supported_protocols = htonl (supported);
+      rmp->punt_ring_size = htonl (pm->punt_ring_size);
+      rmp->egress_ring_size = htonl (pm->egress_ring_size);
+      rmp->slot_size = htonl (pm->slot_size);
+      /* Fixed-width fields in the .api, so plain bounded copies. */
+      clib_strncpy ((char *) rmp->shm_path, OSVBNG_SHM_PATH,
+		    sizeof (rmp->shm_path) - 1);
+      clib_strncpy ((char *) rmp->event_socket, OSVBNG_SHM_PUNT_EVT_PATH,
+		    sizeof (rmp->event_socket) - 1);
+    }));
+}
+
+static void
   vl_api_osvbng_punt_enable_disable_t_handler
   (vl_api_osvbng_punt_enable_disable_t * mp)
 {

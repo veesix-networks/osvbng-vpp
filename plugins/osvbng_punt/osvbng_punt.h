@@ -61,6 +61,13 @@ typedef struct
 
   uword *enabled_interfaces[OSVBNG_PUNT_N_PROTO];
 
+  /* Per-FIB refcount of DHCPv4-punt-enabled interfaces. Enabling the
+   * punt implies receivability: the all-ones broadcast a discover is
+   * addressed to needs a receive route in the interface FIB, as VPP's
+   * own DHCP machinery installs when it is enabled. Keyed by
+   * fib_index; entry added on 0 to 1, removed on 1 to 0. */
+  uword *dhcp_bcast_refs;
+
   /* Shared memory dataplane */
   void *shm;                           /* mmap'd shared memory region */
   int shm_fd;                          /* shared memory file descriptor */
@@ -147,6 +154,11 @@ int osvbng_punt_enable_disable (u32 sw_if_index,
 
 int osvbng_punt_enable_dhcpv4 (u32 sw_if_index);
 int osvbng_punt_disable_dhcpv4 (u32 sw_if_index);
+
+/* Add or remove the all-ones broadcast receive route for the FIB the
+ * interface lives in, refcounted so overlapping enables share one
+ * route. Runs under the caller's worker barrier. */
+void osvbng_punt_dhcp_bcast_route (u32 sw_if_index, int enable);
 int osvbng_punt_enable_dhcpv6 (u32 sw_if_index);
 int osvbng_punt_disable_dhcpv6 (u32 sw_if_index);
 int osvbng_punt_enable_l2tp (u32 sw_if_index);
