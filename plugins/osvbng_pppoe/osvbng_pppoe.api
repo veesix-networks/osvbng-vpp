@@ -1,0 +1,124 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2017 Intel and/or its affiliates.
+ * Copyright (c) 2025 veesix ::networks
+ *
+ * Based on VPP pppoe plugin, modified for explicit control plane programming
+ * and Q-in-Q VLAN support.
+ */
+
+option version = "1.0.0";
+import "vnet/interface_types.api";
+import "vnet/ethernet/ethernet_types.api";
+import "vnet/ip/ip_types.api";
+
+/** \brief Set or delete a PPPoE session
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add address if non-zero, else delete
+    @param session_id - PPPoE session ID
+    @param client_ip - PPPoE session's client address
+    @param decap_vrf_id - the vrf index for pppoe decaped packet
+    @param client_mac - the client ethernet address
+    @param local_mac - the BNG ethernet address (explicit, not learned)
+    @param encap_if_index - the index of tx interface for pppoe encaped packet (explicit)
+    @param outer_vlan - S-VLAN tag (0 if untagged, or single VLAN tag value)
+    @param inner_vlan - C-VLAN tag (0 if not Q-in-Q)
+*/
+define osvbng_pppoe_add_del_session
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  u16 session_id;
+  vl_api_address_t client_ip;
+  u32 decap_vrf_id;
+  vl_api_mac_address_t client_mac;
+  vl_api_mac_address_t local_mac;
+  vl_api_interface_index_t encap_if_index;
+  u16 outer_vlan;
+  u16 inner_vlan;
+};
+
+/** \brief reply for set or delete a PPPoE session
+    @param context - sender context, to match reply w/ request
+    @param retval - return code
+    @param sw_if_index - software index of the interface
+*/
+define osvbng_pppoe_add_del_session_reply
+{
+  u32 context;
+  i32 retval;
+  vl_api_interface_index_t sw_if_index;
+};
+
+/** \brief Set or clear the LAC-tunneled flag on a PPPoE session
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - software index of the PPPoE session interface
+    @param is_lac_tunneled - 1 to bridge subscriber↔LNS via L2TPv2, 0 to clear
+    @param lac_l2tp_session_index - L2TPv2 session sw_if_index stashed in
+           vnet_buffer for the subscriber→LNS direction; ignored when
+           is_lac_tunneled=0
+*/
+define osvbng_pppoe_set_lac_tunnel
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  bool is_lac_tunneled;
+  u32 lac_l2tp_session_index;
+};
+
+/** \brief reply for osvbng_pppoe_set_lac_tunnel
+    @param context - sender context, to match reply w/ request
+    @param retval - return code
+*/
+define osvbng_pppoe_set_lac_tunnel_reply
+{
+  u32 context;
+  i32 retval;
+};
+
+/** \brief Dump PPPoE session
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - software index of the interface (~0 for all)
+*/
+define osvbng_pppoe_session_dump
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+};
+
+/** \brief dump details of a PPPoE session
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - software index of the interface
+    @param session_id - PPPoE session ID
+    @param client_ip - PPPoE session's client address
+    @param encap_if_index - the index of tx interface for pppoe encaped packet
+    @param decap_vrf_id - the vrf index for pppoe decaped packet
+    @param local_mac - the BNG ethernet address
+    @param client_mac - the client ethernet address
+    @param outer_vlan - S-VLAN tag
+    @param inner_vlan - C-VLAN tag
+*/
+define osvbng_pppoe_session_details
+{
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  u16 session_id;
+  vl_api_address_t client_ip;
+  vl_api_interface_index_t encap_if_index;
+  u32 decap_vrf_id;
+  vl_api_mac_address_t local_mac;
+  vl_api_mac_address_t client_mac;
+  u16 outer_vlan;
+  u16 inner_vlan;
+};
+
+/*
+ * Local Variables:
+ * eval: (c-set-style "gnu")
+ * End:
+ */
