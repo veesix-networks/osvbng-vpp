@@ -1,0 +1,17 @@
+# Copyright 2026 The osvbng Authors
+# Licensed under the GNU General Public License v3.0 or later.
+# SPDX-License-Identifier: GPL-3.0-or-later
+---
+name: osvbng Layer 2 Wholesale Gateway
+maintainer: The osvbng Authors
+features:
+  - Bidirectional L2 circuit cross-connect between access and handoff ports
+  - Exact (port, S-VLAN, C-VLAN) and per-S-VLAN wildcard circuit matching
+  - S/C-VLAN translate, push, pop and transparent pass-through rewrites
+  - Per-circuit combined packet/byte counters in the stats segment
+  - Circuit enable/disable state for HA standby pre-programming
+description: "Layer 2 wholesale gateway for IPoE subscriber circuits:
+  cross-connects QinQ subscriber traffic between access networks and
+  retail ISP handoff ports without terminating DHCP or L3."
+state: development
+properties: [API, CLI, STATS, MULTITHREAD]

@@ -1,0 +1,185 @@
+/* Copyright 2026 The osvbng Authors
+ * Licensed under the GNU General Public License v3.0 or later.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * osvbng L2GW Plugin API
+ * Layer 2 wholesale gateway circuits.
+ */
+
+option version = "1.2.0";
+import "vnet/interface_types.api";
+
+/** \brief Enable/disable L2GW processing on an interface (device-input arc)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - interface to arm/disarm
+    @param enable - enable (1) or disable (0)
+*/
+define osvbng_l2gw_enable_disable
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  bool enable;
+};
+
+define osvbng_l2gw_enable_disable_reply
+{
+  u32 context;
+  i32 retval;
+};
+
+/** \brief Arm/disarm the circuit trigger snoop for an S-VLAN range on a port
+    On circuit miss, frames whose outer VLAN is armed are punted to the
+    control plane via the punt SHM service instead of continuing down the
+    feature arc. In DHCP mode (any_protocol = 0) only DHCPv4 (udp dst 67)
+    and DHCPv6 (udp dst 547) payloads punt; in any-protocol mode
+    (any_protocol = 1) the first frame of any ethertype punts, gated by a
+    per-tuple dampener. This is the wholesale circuit trigger path; the
+    port must also be armed with osvbng_l2gw_enable_disable.
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - access port
+    @param svlan_lo - first S-VLAN of the range (1-4094)
+    @param svlan_hi - last S-VLAN of the range (inclusive)
+    @param any_protocol - any-protocol (packet) mode instead of DHCP-only
+    @param is_add - arm if non-zero, else disarm
+*/
+autoreply define osvbng_l2gw_trigger_svlan_range
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  u16 svlan_lo;
+  u16 svlan_hi;
+  bool any_protocol;
+  bool is_add;
+};
+
+/** \brief Add or delete a bidirectional L2GW circuit
+    Installs (or removes) both direction entries atomically.
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add circuit if non-zero, else delete (keyed on access side)
+    @param access_sw_if_index - access-side port
+    @param access_svlan - access outer VLAN (0 = untagged)
+    @param access_cvlan - access inner VLAN (0 = none; ignored when access_cvlan_any)
+    @param access_cvlan_any - wildcard: match any (or no) inner VLAN
+    @param access_tpid - outer TPID emitted toward access (0 = 0x88A8)
+    @param handoff_sw_if_index - handoff-side port
+    @param handoff_svlan - handoff outer VLAN (0 = untagged)
+    @param handoff_cvlan - handoff inner VLAN (0 = none; ignored when handoff_cvlan_any)
+    @param handoff_cvlan_any - wildcard: must match access_cvlan_any
+    @param handoff_tpid - outer TPID emitted toward handoff (0 = 0x88A8)
+    @param transparent - no tag rewrite in either direction
+    @param enabled - forwarding state (0 = installed but inactive)
+*/
+define osvbng_l2gw_add_del_circuit
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  vl_api_interface_index_t access_sw_if_index;
+  u16 access_svlan;
+  u16 access_cvlan;
+  bool access_cvlan_any;
+  u16 access_tpid;
+  vl_api_interface_index_t handoff_sw_if_index;
+  u16 handoff_svlan;
+  u16 handoff_cvlan;
+  bool handoff_cvlan_any;
+  u16 handoff_tpid;
+  bool transparent;
+  bool enabled;
+};
+
+/** \brief Reply for add/delete circuit
+    @param context - sender context, to match reply w/ request
+    @param retval - return code
+    @param circuit_id - stable circuit identifier (also the access-side
+           counter index in the /osvbng/l2gw stats segment)
+    @param handoff_entry_index - handoff-direction counter index
+*/
+define osvbng_l2gw_add_del_circuit_reply
+{
+  u32 context;
+  i32 retval;
+  u32 circuit_id;
+  u32 handoff_entry_index;
+};
+
+/** \brief Set forwarding state on a circuit (both directions)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param circuit_id - circuit to update (~0 = all circuits)
+    @param enabled - forwarding state
+*/
+define osvbng_l2gw_circuit_set_state
+{
+  u32 client_index;
+  u32 context;
+  u32 circuit_id;
+  bool enabled;
+};
+
+define osvbng_l2gw_circuit_set_state_reply
+{
+  u32 context;
+  i32 retval;
+};
+
+/** \brief Dump L2GW circuits
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param circuit_id - specific circuit (~0 for all)
+*/
+define osvbng_l2gw_circuit_dump
+{
+  u32 client_index;
+  u32 context;
+  u32 circuit_id;
+};
+
+/** \brief L2GW circuit details
+    @param context - sender context, to match reply w/ request
+    @param circuit_id - circuit identifier
+    @param access_entry_index - counter index, access->handoff direction
+    @param handoff_entry_index - counter index, handoff->access direction
+    @param access_sw_if_index - access-side port
+    @param access_svlan - access outer VLAN
+    @param access_cvlan - access inner VLAN
+    @param access_cvlan_any - wildcard circuit
+    @param access_tpid - outer TPID emitted toward access
+    @param handoff_sw_if_index - handoff-side port
+    @param handoff_svlan - handoff outer VLAN
+    @param handoff_cvlan - handoff inner VLAN
+    @param handoff_cvlan_any - wildcard circuit
+    @param handoff_tpid - outer TPID emitted toward handoff
+    @param transparent - no tag rewrite
+    @param enabled - forwarding state
+*/
+define osvbng_l2gw_circuit_details
+{
+  u32 context;
+  u32 circuit_id;
+  u32 access_entry_index;
+  u32 handoff_entry_index;
+  vl_api_interface_index_t access_sw_if_index;
+  u16 access_svlan;
+  u16 access_cvlan;
+  bool access_cvlan_any;
+  u16 access_tpid;
+  vl_api_interface_index_t handoff_sw_if_index;
+  u16 handoff_svlan;
+  u16 handoff_cvlan;
+  bool handoff_cvlan_any;
+  u16 handoff_tpid;
+  bool transparent;
+  bool enabled;
+};
+
+/*
+ * Local Variables:
+ * eval: (c-set-style "gnu")
+ * End:
+ */

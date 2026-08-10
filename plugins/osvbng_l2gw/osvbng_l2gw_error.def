@@ -1,0 +1,11 @@
+/* Copyright 2026 The osvbng Authors
+ * Licensed under the GNU General Public License v3.0 or later.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
+l2gw_error (SWITCHED, "L2GW circuit switched")
+l2gw_error (NO_CIRCUIT, "no circuit match (pass-through)")
+l2gw_error (DISABLED, "circuit disabled (pass-through)")
+l2gw_error (TX_UNRESOLVED, "tx interface unresolved (drop)")
+l2gw_error (TRIGGER_PUNTED, "trigger punted")
+l2gw_error (TRIGGER_DAMPENED, "trigger punt dampened")
