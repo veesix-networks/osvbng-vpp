@@ -106,16 +106,35 @@ Design for N workers, never a specific number.
 - icmp6_register_type dispatch: buffer at the IPv6 header, not ICMPv6.
 - Plugin .so changes need a VPP restart; nothing hot-reloads.
 
+## Plugins serve any control plane, not just osvbng
+
+A plugin is a general VPP dataplane building block. Its .api, its node
+graph and any shared-memory protocol are the entire contract; nothing
+inside a plugin may assume osvbng specifically sits above it. Policy
+(which subscriber, which pool, which service) belongs to the control
+plane; the plugin exposes mechanism. This is not politeness, it is
+what keeps the plugins reusable and forces the clean seam that makes
+them correct.
+
 ## Per-plugin requirements
 
 - An affinity statement in the main header: RSS-pinned, handoff, or
   main-thread, and why.
-- A capability/version query message in every .api so the control
+- A capability/version query message in every .api so ANY control
   plane discovers what it is talking to instead of assuming.
 - No hardcoded paths; every runtime parameter via .api or
   startup.conf, defaults stated in one place.
 - Node-internal shared-memory protocols carry a magic and a version;
   a consumer refuses a version it was not built for.
+
+## Patches: upstream first
+
+A patch about VPP itself, not about osvbng, goes to fd.io before it
+enters patches/, and stays in the queue only until it merges upstream.
+The patch header records the gerrit link and Upstream-Status;
+local-only needs a stated reason. VPP is a commons we build on and
+give back to, and a short queue is what survives a version bump. See
+patches/README.md and context ADR 0002.
 
 ## Anti-patterns (each cost real debugging time once)
 
