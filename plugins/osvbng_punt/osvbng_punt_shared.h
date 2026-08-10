@@ -30,7 +30,11 @@
  */
 
 #define OSVBNG_SHM_MAGIC      0x4F53564E47424E47ULL  /* "OSVBNGBN" */
-#define OSVBNG_SHM_VERSION    1
+/* Version 2: one punt ring per VPP thread (was a single ring shared by
+ * every worker, which was a publish race, not just cache contention).
+ * The egress ring stays single, the daemon is its only producer. A
+ * consumer built for v1 refuses v2 at attach rather than misread it. */
+#define OSVBNG_SHM_VERSION    2
 
 /* Default ring sizes (must be power of 2) */
 #define OSVBNG_SHM_DEFAULT_PUNT_RING_SIZE    4096
@@ -52,15 +56,15 @@ typedef struct
   uint64_t magic;                /* OSVBNG_SHM_MAGIC */
   uint32_t version;              /* OSVBNG_SHM_VERSION */
   uint32_t flags;                /* Reserved for future use */
-  uint32_t punt_ring_offset;     /* Offset to punt ring header */
-  uint32_t punt_ring_size;       /* Number of punt descriptors */
-  uint32_t egress_ring_offset;   /* Offset to egress ring header */
-  uint32_t egress_ring_size;     /* Number of egress descriptors */
-  uint32_t data_region_offset;   /* Offset to data region */
-  uint32_t data_region_size;     /* Total data region size in bytes */
-  uint32_t slot_size;            /* Size of each data slot */
-  uint32_t punt_data_slots;      /* Number of data slots for punt */
-  uint32_t egress_data_slots;    /* Number of data slots for egress */
+  uint32_t n_punt_rings;         /* One per VPP thread */
+  uint32_t punt_ring_size;       /* Descriptors per punt ring */
+  uint32_t punt_ring_stride;     /* Bytes from one punt ring to the next */
+  uint32_t punt_ring_offset;     /* Offset of punt ring 0 */
+  uint32_t egress_ring_offset;   /* Offset of the egress ring */
+  uint32_t egress_ring_size;     /* Descriptors in the egress ring */
+  uint32_t punt_data_offset;     /* Offset of the first punt data slot */
+  uint32_t egress_data_offset;   /* Offset of the first egress data slot */
+  uint32_t slot_size;            /* Bytes per data slot, both directions */
   uint8_t reserved[12];          /* Pad to 64 bytes */
 } __attribute__ ((aligned (64))) osvbng_shm_header_t;
 
@@ -146,28 +150,35 @@ osvbng_ring_count (osvbng_ring_header_t *ring)
   return head - tail;
 }
 
+/* Bytes from one punt ring (header + its descriptors) to the next. */
+static inline uint32_t
+osvbng_punt_ring_stride (uint32_t punt_ring_size)
+{
+  return sizeof (osvbng_ring_header_t) +
+	 punt_ring_size * sizeof (osvbng_punt_desc_t);
+}
+
 /*
- * Calculate total shared memory size needed
+ * Total region size for the v2 layout: N punt rings (one per thread),
+ * one egress ring, then 1:1 data slots for every punt descriptor
+ * across all rings plus the egress descriptors.
  */
 static inline uint32_t
-osvbng_shm_calc_size (uint32_t punt_ring_size, uint32_t egress_ring_size,
-		      uint32_t data_slots, uint32_t slot_size)
+osvbng_shm_calc_size (uint32_t n_punt_rings, uint32_t punt_ring_size,
+		      uint32_t egress_ring_size, uint32_t slot_size)
 {
   uint32_t size = 0;
 
-  /* Header */
   size += sizeof (osvbng_shm_header_t);
-
-  /* Punt ring: header + descriptors */
-  size += sizeof (osvbng_ring_header_t);
-  size += punt_ring_size * sizeof (osvbng_punt_desc_t);
+  size += n_punt_rings * osvbng_punt_ring_stride (punt_ring_size);
 
   /* Egress ring: header + descriptors */
   size += sizeof (osvbng_ring_header_t);
   size += egress_ring_size * sizeof (osvbng_egress_desc_t);
 
-  /* Data region */
-  size += data_slots * slot_size;
+  /* Data slots: one per punt descriptor across all rings, plus egress */
+  size += n_punt_rings * punt_ring_size * slot_size;
+  size += egress_ring_size * slot_size;
 
   return size;
 }

@@ -75,17 +75,42 @@ osvbng_punt_policer_init (void)
 {
   osvbng_punt_main_t *pm = &osvbng_punt_main;
 
-  /* Default rates: packets per second, burst size */
+  /* Default aggregate rates: packets per second, burst size. These
+   * size the management link, not the subscriber load. */
   f64 default_rates[] = { 1000, 1000, 500, 1000, 1000, 500, 500, 1000 };
   u32 default_bursts[] = { 100, 100, 50, 100, 100, 50, 50, 100 };
 
   for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
     {
-      pm->policers[i].rate = default_rates[i];
-      pm->policers[i].burst = default_bursts[i];
-      pm->policers[i].tokens = (f64) default_bursts[i];
-      pm->policers[i].last_update = vlib_time_now (pm->vlib_main);
-      pm->policers[i].policed = 0;
+      pm->policer_rate[i] = default_rates[i];
+      pm->policer_burst[i] = default_bursts[i];
+    }
+}
+
+/* Push the configured aggregate rates into the per-thread buckets,
+ * each thread getting an equal share. The aggregate holds when traffic
+ * spreads across workers, and a storm on one worker is limited to its
+ * share, which errs towards protecting the management link. Runs after
+ * shm init (per_thread must exist) and under a worker barrier when
+ * called on a config change. */
+void
+osvbng_punt_policer_apply (void)
+{
+  osvbng_punt_main_t *pm = &osvbng_punt_main;
+  u32 n = vec_len (pm->per_thread);
+
+  for (u32 t = 0; t < n; t++)
+    {
+      osvbng_punt_per_thread_t *pt = vec_elt_at_index (pm->per_thread, t);
+      for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
+	{
+	  pt->rate[i] = pm->policer_rate[i] / (f64) n;
+	  pt->burst[i] = (f64) pm->policer_burst[i] / (f64) n;
+	  if (pt->burst[i] < 1.0)
+	    pt->burst[i] = 1.0;
+	  pt->tokens[i] = pt->burst[i];
+	  pt->last_update[i] = vlib_time_now (pm->vlib_main);
+	}
     }
 }
 
@@ -98,38 +123,16 @@ osvbng_punt_policer_configure (osvbng_punt_protocol_t protocol, f64 rate,
   if (protocol >= OSVBNG_PUNT_N_PROTO)
     return -1;
 
-  pm->policers[protocol].rate = rate;
-  pm->policers[protocol].burst = burst;
-  pm->policers[protocol].tokens = (f64) burst;
-  pm->policers[protocol].last_update = vlib_time_now (pm->vlib_main);
+  pm->policer_rate[protocol] = rate;
+  if (burst > 0)
+    pm->policer_burst[protocol] = burst;
 
-  return 0;
-}
+  /* Rewriting another thread's bucket needs the workers stopped: a
+   * one-shot config change, never a per-packet path. */
+  vlib_worker_thread_barrier_sync (pm->vlib_main);
+  osvbng_punt_policer_apply ();
+  vlib_worker_thread_barrier_release (pm->vlib_main);
 
-int
-osvbng_punt_policer_allow (osvbng_punt_protocol_t protocol)
-{
-  osvbng_punt_main_t *pm = &osvbng_punt_main;
-  osvbng_punt_policer_t *p = &pm->policers[protocol];
-
-  if (p->rate == 0)
-    return 1;
-
-  f64 now = vlib_time_now (pm->vlib_main);
-  f64 elapsed = now - p->last_update;
-  p->last_update = now;
-
-  p->tokens += elapsed * p->rate;
-  if (p->tokens > (f64) p->burst)
-    p->tokens = (f64) p->burst;
-
-  if (p->tokens >= 1.0)
-    {
-      p->tokens -= 1.0;
-      return 1;
-    }
-
-  p->policed++;
   return 0;
 }
 
@@ -234,11 +237,7 @@ osvbng_punt_init (vlib_main_t *vm)
   pm->egress_file_index = ~0;
 
   for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
-    {
-      pm->enabled_interfaces[i] = hash_create (0, sizeof (uword));
-      pm->packets_punted[i] = 0;
-      pm->packets_dropped[i] = 0;
-    }
+    pm->enabled_interfaces[i] = hash_create (0, sizeof (uword));
 
   pm->l2tpv2_input_next_arc = ~0;
   pm->dhcp_bcast_refs = hash_create (0, sizeof (uword));
@@ -250,27 +249,10 @@ osvbng_punt_init (vlib_main_t *vm)
 
   osvbng_punt_register_ethertypes (vm);
 
-  /* Initialize shared memory dataplane */
-  if (osvbng_punt_shm_init (vm) < 0)
-    {
-      vlib_log_err (pm->log_class, "shared memory init failed");
-      return clib_error_return (0, "shared memory init failed");
-    }
-
-  /* Initialize eventfd socket for osvbng connection */
-  if (osvbng_punt_eventfd_socket_init (vm) < 0)
-    {
-      vlib_log_err (pm->log_class, "eventfd socket init failed");
-      return clib_error_return (0, "eventfd socket init failed");
-    }
-
-  /* Initialize egress node */
-  if (osvbng_punt_egress_init (vm) < 0)
-    {
-      vlib_log_err (pm->log_class, "egress init failed");
-      return clib_error_return (0, "egress init failed");
-    }
-
+  /* The shared memory region has one punt ring per thread, and the
+   * worker count is only known once the threads exist, so the region
+   * is built at main-loop entry, not here (VLIB_INIT_FUNCTION runs
+   * before workers exist). See osvbng_punt_main_loop_enter. */
   vlib_log_notice (pm->log_class, "initialized successfully");
 
   return 0;
@@ -280,6 +262,23 @@ osvbng_punt_init (vlib_main_t *vm)
 VLIB_INIT_FUNCTION (osvbng_punt_init) = {
   .runs_after = VLIB_INITS ("pppoe_init"),
 };
+
+static clib_error_t *
+osvbng_punt_main_loop_enter (vlib_main_t *vm)
+{
+  if (osvbng_punt_shm_init (vm) < 0)
+    return clib_error_return (0, "shared memory init failed");
+  if (osvbng_punt_eventfd_socket_init (vm) < 0)
+    return clib_error_return (0, "eventfd socket init failed");
+  if (osvbng_punt_egress_init (vm) < 0)
+    return clib_error_return (0, "egress init failed");
+
+  /* per_thread exists now; push the configured rates into the buckets. */
+  osvbng_punt_policer_apply ();
+  return 0;
+}
+
+VLIB_MAIN_LOOP_ENTER_FUNCTION (osvbng_punt_main_loop_enter);
 
 static clib_error_t *
 osvbng_punt_enable_disable_command_fn (vlib_main_t *vm,
@@ -378,10 +377,21 @@ osvbng_punt_show_stats_command_fn (vlib_main_t *vm,
 
   for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
     {
+      u64 punted = 0, dropped = 0, policed = 0;
+      osvbng_punt_per_thread_t *pt;
+
+      /* Sum the per-thread counters here, off the punt path, which is
+       * what pays for keeping them per-thread on the path. */
+      vec_foreach (pt, pm->per_thread)
+	{
+	  punted += pt->punted[i];
+	  dropped += pt->dropped[i];
+	  policed += pt->policed[i];
+	}
+
       vlib_cli_output (vm, "%-15s %15llu %15llu %15llu %10.0f %10u",
-		       proto_names[i], pm->packets_punted[i],
-		       pm->packets_dropped[i], pm->policers[i].policed,
-		       pm->policers[i].rate, pm->policers[i].burst);
+		       proto_names[i], punted, dropped, policed,
+		       pm->policer_rate[i], pm->policer_burst[i]);
     }
 
   return 0;
@@ -435,12 +445,10 @@ osvbng_punt_policer_command_fn (vlib_main_t *vm, unformat_input_t *input,
 
   osvbng_punt_main_t *pm = &osvbng_punt_main;
 
-  if (rate > 0)
-    pm->policers[protocol].rate = rate;
-  if (burst > 0)
-    pm->policers[protocol].burst = burst;
-
-  pm->policers[protocol].tokens = (f64) pm->policers[protocol].burst;
+  /* Config plus barrier plus per-thread re-apply, all in one place. */
+  if (rate == 0)
+    rate = pm->policer_rate[protocol];
+  osvbng_punt_policer_configure (protocol, rate, burst);
 
   return 0;
 }

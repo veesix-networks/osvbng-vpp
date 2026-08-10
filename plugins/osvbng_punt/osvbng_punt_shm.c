@@ -26,6 +26,7 @@
 #include <vlib/unix/unix.h>
 #include <vlib/file.h>
 #include <vnet/vnet.h>
+#include <vlib/global_funcs.h>
 
 #include <osvbng_punt/osvbng_punt.h>
 #include <osvbng_punt/osvbng_punt_shared.h>
@@ -51,15 +52,18 @@ osvbng_punt_shm_init (vlib_main_t *vm)
     pm->punt_ring_size = OSVBNG_SHM_DEFAULT_PUNT_RING_SIZE;
   if (pm->egress_ring_size == 0)
     pm->egress_ring_size = OSVBNG_SHM_DEFAULT_EGRESS_RING_SIZE;
-  if (pm->data_slots == 0)
-    pm->data_slots = OSVBNG_SHM_DEFAULT_DATA_SLOTS;
   if (pm->slot_size == 0)
     pm->slot_size = OSVBNG_SHM_DEFAULT_SLOT_SIZE;
 
+  /* One punt ring per VPP thread: the count is only known once the
+   * threads exist, which is why shm init runs at main-loop entry. */
+  pm->n_punt_rings = vlib_get_n_threads ();
+  pm->punt_ring_stride = osvbng_punt_ring_stride (pm->punt_ring_size);
+
   /* Calculate total shared memory size */
   shm_size =
-    osvbng_shm_calc_size (pm->punt_ring_size, pm->egress_ring_size,
-			  pm->data_slots, pm->slot_size);
+    osvbng_shm_calc_size (pm->n_punt_rings, pm->punt_ring_size,
+			  pm->egress_ring_size, pm->slot_size);
 
   vlib_log_info (pm->log_class, "creating shared memory: size=%u bytes",
 		 shm_size);
@@ -102,53 +106,58 @@ osvbng_punt_shm_init (vlib_main_t *vm)
   clib_memset (hdr, 0, sizeof (*hdr));
   hdr->magic = OSVBNG_SHM_MAGIC;
   hdr->version = OSVBNG_SHM_VERSION;
+  hdr->n_punt_rings = pm->n_punt_rings;
+  hdr->punt_ring_size = pm->punt_ring_size;
+  hdr->punt_ring_stride = pm->punt_ring_stride;
+  hdr->egress_ring_size = pm->egress_ring_size;
   hdr->slot_size = pm->slot_size;
 
-  /* Calculate offsets */
   offset = sizeof (osvbng_shm_header_t);
 
-  /* Punt ring */
+  /* N punt rings, one per thread. */
   hdr->punt_ring_offset = offset;
-  hdr->punt_ring_size = pm->punt_ring_size;
-  pm->punt_ring = (osvbng_ring_header_t *) ((u8 *) pm->shm + offset);
-  clib_memset (pm->punt_ring, 0, sizeof (osvbng_ring_header_t));
-  offset += sizeof (osvbng_ring_header_t);
+  offset += pm->n_punt_rings * pm->punt_ring_stride;
 
-  /* Punt descriptors */
-  pm->punt_descs = (osvbng_punt_desc_t *) ((u8 *) pm->shm + offset);
-  offset += pm->punt_ring_size * sizeof (osvbng_punt_desc_t);
-
-  /* Egress ring */
+  /* Single egress ring. */
   hdr->egress_ring_offset = offset;
-  hdr->egress_ring_size = pm->egress_ring_size;
   pm->egress_ring = (osvbng_ring_header_t *) ((u8 *) pm->shm + offset);
   clib_memset (pm->egress_ring, 0, sizeof (osvbng_ring_header_t));
   offset += sizeof (osvbng_ring_header_t);
-
-  /* Egress descriptors */
   pm->egress_descs = (osvbng_egress_desc_t *) ((u8 *) pm->shm + offset);
   offset += pm->egress_ring_size * sizeof (osvbng_egress_desc_t);
 
-  /* Data region - split between punt and egress */
-  hdr->data_region_offset = offset;
-  hdr->data_region_size = pm->data_slots * pm->slot_size;
-  pm->data_region = (u8 *) pm->shm + offset;
+  /* Data slots: punt (all rings) then egress. */
+  hdr->punt_data_offset = offset;
+  pm->punt_data_offset = offset;
+  offset += pm->n_punt_rings * pm->punt_ring_size * pm->slot_size;
+  hdr->egress_data_offset = offset;
+  pm->egress_data_offset = offset;
 
-  /* Split data slots: half for punt, half for egress */
-  hdr->punt_data_slots = pm->data_slots / 2;
-  hdr->egress_data_slots = pm->data_slots / 2;
-  pm->punt_data_slots = hdr->punt_data_slots;
-  pm->egress_data_slots = hdr->egress_data_slots;
-  pm->egress_data_offset =
-    hdr->data_region_offset + (pm->punt_data_slots * pm->slot_size);
+  /* Per-thread ring/desc/data pointers: after this, the punt path
+   * never touches memory another thread writes. */
+  vec_validate_aligned (pm->per_thread, pm->n_punt_rings - 1,
+			CLIB_CACHE_LINE_BYTES);
+  for (u32 t = 0; t < pm->n_punt_rings; t++)
+    {
+      osvbng_punt_per_thread_t *pt = vec_elt_at_index (pm->per_thread, t);
+      u8 *ring_base =
+	(u8 *) pm->shm + hdr->punt_ring_offset + t * pm->punt_ring_stride;
+
+      pt->ring = (osvbng_ring_header_t *) ring_base;
+      pt->descs =
+	(osvbng_punt_desc_t *) (ring_base + sizeof (osvbng_ring_header_t));
+      pt->data = (u8 *) pm->shm + pm->punt_data_offset +
+		 (u64) t * pm->punt_ring_size * pm->slot_size;
+      clib_memset (pt->ring, 0, sizeof (*pt->ring));
+    }
 
   vlib_log_info (pm->log_class,
-		 "shm layout: punt_ring=%u@%u, egress_ring=%u@%u, "
-		 "data=%u@%u (punt_slots=%u, egress_slots=%u)",
-		 hdr->punt_ring_size, hdr->punt_ring_offset,
+		 "shm layout v%u: %u punt ring(s) of %u @%u stride %u, "
+		 "egress %u @%u, slot %u",
+		 hdr->version, hdr->n_punt_rings, hdr->punt_ring_size,
+		 hdr->punt_ring_offset, hdr->punt_ring_stride,
 		 hdr->egress_ring_size, hdr->egress_ring_offset,
-		 hdr->data_region_size, hdr->data_region_offset,
-		 hdr->punt_data_slots, hdr->egress_data_slots);
+		 hdr->slot_size);
 
   /* Create eventfds */
   pm->punt_eventfd = eventfd (0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -366,71 +375,65 @@ osvbng_punt_to_shm (vlib_main_t *vm, vlib_buffer_t *b, u32 sw_if_index,
 		    u16 inner_vlan)
 {
   osvbng_punt_main_t *pm = &osvbng_punt_main;
+  osvbng_punt_per_thread_t *pt;
   osvbng_ring_header_t *ring;
   osvbng_punt_desc_t *desc;
-  uint64_t head, tail;
-  uint64_t mask;
-  uint32_t data_slot, data_offset;
-  u8 *data_ptr;
+  uint64_t head, tail, mask;
+  uint32_t slot;
   u16 len;
+  f64 now;
 
   if (PREDICT_FALSE (!pm->shm_initialized))
-    {
-      pm->packets_dropped[protocol]++;
-      return -1;
-    }
+    return -1;
 
-  if (PREDICT_FALSE (!osvbng_punt_policer_allow (protocol)))
-    {
-      return -1;
-    }
+  /* Write only this thread's ring: single writer, no cross-worker
+   * cache line, no locks (v2 shm, per-worker rings). */
+  pt = osvbng_punt_get_per_thread (vm);
+  now = vlib_time_now (vm);
 
-  ring = pm->punt_ring;
+  if (PREDICT_FALSE (!osvbng_punt_policer_allow (pt, now, protocol)))
+    return -1;
+
+  ring = pt->ring;
   mask = pm->punt_ring_size - 1;
 
   head = atomic_load_explicit (&ring->head, memory_order_relaxed);
   tail = atomic_load_explicit (&ring->tail, memory_order_acquire);
 
-  /* Check if ring is full */
   if (PREDICT_FALSE ((head - tail) >= pm->punt_ring_size))
     {
-      pm->punt_ring_full++;
-      pm->packets_dropped[protocol]++;
+      pt->ring_full++;
+      pt->dropped[protocol]++;
       return -1;
     }
 
-  /* Get descriptor slot */
-  desc = &pm->punt_descs[head & mask];
+  slot = head & mask;
+  desc = &pt->descs[slot];
 
-  /* Allocate data slot (wraps around within punt data region) */
-  data_slot = head % pm->punt_data_slots;
-  data_offset =
-    ((osvbng_shm_header_t *) pm->shm)->data_region_offset +
-    (data_slot * pm->slot_size);
-
-  /* Copy frame to shared memory */
-  data_ptr = (u8 *) pm->shm + data_offset;
   len = b->current_length;
   if (PREDICT_FALSE (len > pm->slot_size))
     {
       len = pm->slot_size;
-      pm->punt_truncated++;
+      pt->truncated++;
     }
-  clib_memcpy_fast (data_ptr, vlib_buffer_get_current (b), len);
+  clib_memcpy_fast (pt->data + (u64) slot * pm->slot_size,
+		    vlib_buffer_get_current (b), len);
 
-  /* Fill descriptor */
-  desc->data_offset = data_offset;
+  desc->data_offset =
+    (u32) ((pt->data - (u8 *) pm->shm) + (u64) slot * pm->slot_size);
   desc->data_length = len;
   desc->sw_if_index = sw_if_index;
   desc->protocol = protocol;
+  desc->flags = 0;
   desc->outer_vlan = outer_vlan;
   desc->inner_vlan = inner_vlan;
-  desc->timestamp = (uint64_t) (vlib_time_now (vm) * 1e9);
+  desc->timestamp = (uint64_t) (now * 1e9);
 
-  /* Publish descriptor (release ensures writes above are visible) */
+  /* Release: the descriptor and its frame must be visible before head. */
   atomic_store_explicit (&ring->head, head + 1, memory_order_release);
 
-  /* Signal osvbng if needed (coalesce interrupts) */
+  /* One shared punt eventfd: any worker signals it on its ring's
+   * 0 to 1 edge, the daemon wakes and drains every ring. */
   if (atomic_exchange_explicit (&ring->interrupt_pending, 1,
 				memory_order_acq_rel) == 0)
     {
@@ -439,7 +442,7 @@ osvbng_punt_to_shm (vlib_main_t *vm, vlib_buffer_t *b, u32 sw_if_index,
 					     sizeof (val));
     }
 
-  pm->packets_punted[protocol]++;
+  pt->punted[protocol]++;
   return 0;
 }
 
@@ -470,18 +473,17 @@ osvbng_punt_show_shm_command_fn (vlib_main_t *vm, unformat_input_t *input,
 		   pm->client_connected ? "yes" : "no");
   vlib_cli_output (vm, "");
 
-  vlib_cli_output (vm, "Punt Ring:");
-  vlib_cli_output (vm, "  Size: %u descriptors", pm->punt_ring_size);
-  vlib_cli_output (vm, "  Head: %llu",
-		   atomic_load_explicit (&pm->punt_ring->head,
-					 memory_order_relaxed));
-  vlib_cli_output (vm, "  Tail: %llu",
-		   atomic_load_explicit (&pm->punt_ring->tail,
-					 memory_order_relaxed));
-  vlib_cli_output (vm, "  Pending: %llu", osvbng_ring_count (pm->punt_ring));
-  vlib_cli_output (vm, "  Data slots: %u", pm->punt_data_slots);
-  vlib_cli_output (vm, "  Ring full drops: %llu", pm->punt_ring_full);
-  vlib_cli_output (vm, "  Truncated packets: %llu", pm->punt_truncated);
+  vlib_cli_output (vm, "Punt Rings: %u (one per thread), %u descriptors each",
+		   pm->n_punt_rings, pm->punt_ring_size);
+  for (u32 t = 0; t < pm->n_punt_rings; t++)
+    {
+      osvbng_punt_per_thread_t *pt = vec_elt_at_index (pm->per_thread, t);
+      vlib_cli_output (
+	vm, "  [%u] head %llu tail %llu pending %llu ring-full %llu trunc %llu",
+	t, atomic_load_explicit (&pt->ring->head, memory_order_relaxed),
+	atomic_load_explicit (&pt->ring->tail, memory_order_relaxed),
+	osvbng_ring_count (pt->ring), pt->ring_full, pt->truncated);
+    }
   vlib_cli_output (vm, "");
 
   vlib_cli_output (vm, "Egress Ring:");
@@ -493,7 +495,6 @@ osvbng_punt_show_shm_command_fn (vlib_main_t *vm, unformat_input_t *input,
 		   atomic_load_explicit (&pm->egress_ring->tail,
 					 memory_order_relaxed));
   vlib_cli_output (vm, "  Pending: %llu", osvbng_ring_count (pm->egress_ring));
-  vlib_cli_output (vm, "  Data slots: %u", pm->egress_data_slots);
   vlib_cli_output (vm, "  Transmitted: %llu", pm->egress_transmitted);
   vlib_cli_output (vm, "  Alloc failures: %llu", pm->egress_alloc_fail);
 

@@ -109,7 +109,6 @@ osvbng_punt_dhcp6_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  /* Send packet to userspace */
 	  osvbng_punt_send_packet (vm, b0, sw_if_index0,
 				   OSVBNG_PUNT_PROTO_DHCPV6);
-	  pm->packets_punted[OSVBNG_PUNT_PROTO_DHCPV6]++;
 
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
 			     (b0->flags & VLIB_BUFFER_IS_TRACED)))
