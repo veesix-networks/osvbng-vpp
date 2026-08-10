@@ -1,0 +1,16 @@
+# Copyright 2026 The osvbng Authors
+# Licensed under the GNU General Public License v3.0 or later.
+# SPDX-License-Identifier: GPL-3.0-or-later
+---
+name: osvbng Generic Tunnel RX Dispatch
+maintainer: The osvbng Authors
+features:
+  - Re-enters the device-input feature arc after vxlan tunnel decap
+  - Makes tunnel interfaces behave like physical ports for l2gw/ipoe/pppoe
+  - Decap next index discovery API for the control plane
+description: "Generic tunnel RX dispatch: overlay tunnel interfaces
+  (VXLAN today, other encaps later) re-enter the device-input feature
+  arc after decap, so every osvbng dataplane feature that arms ports on
+  that arc works on tunnels without tunnel-specific code."
+state: development
+properties: [API, CLI, MULTITHREAD]
