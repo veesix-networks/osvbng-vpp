@@ -171,10 +171,12 @@ osvbng_punt_enable_dhcpv6 (u32 sw_if_index)
 
   /* DHCPv6 uses UDP port 546 (client) and 547 (server)
    * The '0' parameter indicates IPv6 (vs '1' for IPv4 in DHCPv4) */
+  vlib_worker_thread_barrier_sync (vm);
   udp_register_dst_port (vm, 546, node_index, 0);
   udp_register_dst_port (vm, 547, node_index, 0);
 
   hash_set (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_DHCPV6], sw_if_index, 1);
+  vlib_worker_thread_barrier_release (vm);
 
   return 0;
 }
@@ -185,6 +187,7 @@ osvbng_punt_disable_dhcpv6 (u32 sw_if_index)
   osvbng_punt_main_t *pm = &osvbng_punt_main;
   vlib_main_t *vm = pm->vlib_main;
 
+  vlib_worker_thread_barrier_sync (vm);
   hash_unset (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_DHCPV6], sw_if_index);
 
   if (hash_elts (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_DHCPV6]) == 0)
@@ -192,6 +195,7 @@ osvbng_punt_disable_dhcpv6 (u32 sw_if_index)
       udp_unregister_dst_port (vm, 546, 0);
       udp_unregister_dst_port (vm, 547, 0);
     }
+  vlib_worker_thread_barrier_release (vm);
 
   return 0;
 }

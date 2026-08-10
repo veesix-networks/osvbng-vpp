@@ -234,6 +234,7 @@ osvbng_punt_enable_l2tp (u32 sw_if_index)
   node_index = osvbng_punt_l2tp_node.index;
 
   /* Register L2TP control port (1701) */
+  vlib_worker_thread_barrier_sync (vm);
   udp_register_dst_port (vm, 1701, node_index, 1);
 
   /* Resolve the T=0 → l2tpv2-input next-arc now that all plugins have
@@ -242,6 +243,7 @@ osvbng_punt_enable_l2tp (u32 sw_if_index)
   osvbng_punt_l2tp_resolve_next_arc (vm);
 
   hash_set (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_L2TP], sw_if_index, 1);
+  vlib_worker_thread_barrier_release (vm);
 
   return 0;
 }
@@ -252,6 +254,7 @@ osvbng_punt_disable_l2tp (u32 sw_if_index)
   osvbng_punt_main_t *pm = &osvbng_punt_main;
   vlib_main_t *vm = pm->vlib_main;
 
+  vlib_worker_thread_barrier_sync (vm);
   hash_unset (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_L2TP], sw_if_index);
 
   /* Unregister UDP port if no more interfaces enabled */
@@ -259,6 +262,7 @@ osvbng_punt_disable_l2tp (u32 sw_if_index)
     {
       udp_unregister_dst_port (vm, 1701, 1);
     }
+  vlib_worker_thread_barrier_release (vm);
 
   return 0;
 }

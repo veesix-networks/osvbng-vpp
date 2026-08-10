@@ -201,11 +201,13 @@ osvbng_punt_enable_ipv6_nd (u32 sw_if_index)
 
   node_index = osvbng_punt_ipv6_nd_node.index;
 
-  /* Only register Router Solicitation — we only need to punt RS */
+  /* Only register Router Solicitation, we only need to punt RS */
+  vlib_worker_thread_barrier_sync (vm);
   icmp6_register_type (vm, ICMP6_router_solicitation, node_index);
 
   hash_set (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_IPV6_ND], sw_if_index,
 	    1);
+  vlib_worker_thread_barrier_release (vm);
 
   return 0;
 }
@@ -215,11 +217,13 @@ osvbng_punt_disable_ipv6_nd (u32 sw_if_index)
 {
   osvbng_punt_main_t *pm = &osvbng_punt_main;
 
+  vlib_worker_thread_barrier_sync (pm->vlib_main);
   hash_unset (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_IPV6_ND],
 	      sw_if_index);
+  vlib_worker_thread_barrier_release (pm->vlib_main);
 
-  /* Note: We don't unregister ICMPv6 types as other interfaces may still need them */
-  /* VPP's icmp6_register_type doesn't provide per-interface granularity */
+  /* We don't unregister ICMPv6 types as other interfaces may still
+   * need them; icmp6_register_type has no per-interface granularity. */
 
   return 0;
 }

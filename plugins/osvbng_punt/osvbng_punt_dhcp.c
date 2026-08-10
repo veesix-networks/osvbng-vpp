@@ -150,10 +150,22 @@ osvbng_punt_enable_dhcpv4 (u32 sw_if_index)
 
   node_index = osvbng_punt_dhcp_node.index;
 
+  /* udp_register_dst_port and hash_set both mutate structures workers
+   * read per packet (the dst-port table, the enabled hash) and can
+   * realloc them. The binapi path already holds VPP's API barrier; the
+   * CLI path holds nothing, so take it here (nested is a refcount). */
+  vlib_worker_thread_barrier_sync (vm);
+
   udp_register_dst_port (vm, 67, node_index, 1);
   udp_register_dst_port (vm, 68, node_index, 1);
 
   hash_set (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_DHCPV4], sw_if_index, 1);
+
+  /* A discover is addressed to 255.255.255.255; without a receive
+   * route it dies in ip4-lookup before this node ever sees it. */
+  osvbng_punt_dhcp_bcast_route (sw_if_index, 1);
+
+  vlib_worker_thread_barrier_release (vm);
 
   return 0;
 }
@@ -164,13 +176,18 @@ osvbng_punt_disable_dhcpv4 (u32 sw_if_index)
   osvbng_punt_main_t *pm = &osvbng_punt_main;
   vlib_main_t *vm = pm->vlib_main;
 
+  vlib_worker_thread_barrier_sync (vm);
+
   hash_unset (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_DHCPV4], sw_if_index);
+  osvbng_punt_dhcp_bcast_route (sw_if_index, 0);
 
   if (hash_elts (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_DHCPV4]) == 0)
     {
       udp_unregister_dst_port (vm, 67, 1);
       udp_unregister_dst_port (vm, 68, 1);
     }
+
+  vlib_worker_thread_barrier_release (vm);
 
   return 0;
 }
