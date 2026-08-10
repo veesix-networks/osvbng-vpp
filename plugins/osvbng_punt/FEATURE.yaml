@@ -1,0 +1,17 @@
+---
+name: OSVBNG Unified Control Plane Punt
+maintainer: Veesix Networks <engineering@veesix-networks.co.uk>
+features:
+  - Unified punt socket for all control plane protocols
+  - Per-interface, per-protocol punt configuration
+  - Support for DHCPv4, DHCPv6, ARP, PPPoE, L2TP, IPv6 ND
+  - Consistent packet metadata (sw_if_index, protocol, timestamp)
+  - Efficient feature arc integration for L2 protocols
+  - VPP native punt integration for L4 protocols
+description: >
+  The OSVBNG Punt plugin provides a unified mechanism for punting
+  control plane packets to the OSVBNG control plane daemon via a
+  single unix socket. It supports multiple protocols including DHCP,
+  ARP, PPPoE, and L2TP with per-interface configuration and detailed
+  statistics.
+state: development
