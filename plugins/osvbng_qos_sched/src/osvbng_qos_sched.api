@@ -1,0 +1,145 @@
+/* Copyright 2026 Veesix Networks Ltd
+ * Licensed under the GNU General Public License v3.0 or later.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * osvbng QoS Scheduler Plugin API
+ * CAKE-equivalent per-subscriber traffic scheduling.
+ */
+
+option version = "2.0.0";
+import "vnet/interface_types.api";
+
+enum osvbng_cake_tin_mode : u8
+{
+  OSVBNG_CAKE_TIN_MODE_BESTEFFORT = 0,
+  OSVBNG_CAKE_TIN_MODE_DIFFSERV3 = 1,
+  OSVBNG_CAKE_TIN_MODE_DIFFSERV4 = 2,
+  OSVBNG_CAKE_TIN_MODE_DIFFSERV8 = 3,
+};
+
+enum osvbng_cake_atm_mode : u8
+{
+  OSVBNG_CAKE_ATM_NONE = 0,
+  OSVBNG_CAKE_ATM_ATM = 1,
+  OSVBNG_CAKE_ATM_PTM = 2,
+};
+
+enum osvbng_cake_flags : u32
+{
+  OSVBNG_CAKE_FLAG_NONE = 0x0,
+  OSVBNG_CAKE_FLAG_WASH_DSCP = 0x1,
+  OSVBNG_CAKE_FLAG_ACK_FILTER = 0x2,
+  OSVBNG_CAKE_FLAG_SPLIT_GSO = 0x4,
+};
+
+autoreply define osvbng_cake_sched_enable_disable
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  bool is_enable;
+  u64 rate_bytes_per_sec;
+  vl_api_osvbng_cake_tin_mode_t tin_mode;
+  i16 overhead_bytes;
+  vl_api_osvbng_cake_atm_mode_t atm_mode;
+  u8 mpu;
+  u32 buffer_limit;
+  u32 target_us;
+  u32 interval_us;
+  vl_api_osvbng_cake_flags_t flags;
+};
+
+define osvbng_cake_sched_dump
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+};
+
+define osvbng_cake_sched_details
+{
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  u64 rate_bytes_per_sec;
+  vl_api_osvbng_cake_tin_mode_t tin_mode;
+  u8 tin_cnt;
+  u32 buffer_usage;
+  u32 buffer_limit;
+  u64 tin_packets[8];
+  u64 tin_bytes[8];
+  u64 tin_drops[8];
+  u64 tin_ecn_marks[8];
+  u32 tin_peak_delay_us[8];
+  u32 tin_avg_delay_us[8];
+  u32 tin_sparse_flows[8];
+  u32 tin_bulk_flows[8];
+};
+
+autoreply define osvbng_cake_sched_reset_stats
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+};
+
+/** \brief Create per-port aggregate shaper
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - physical or bond interface
+    @param rate_bytes_per_sec - aggregate shaping rate (bytes/sec)
+    @param buffer_limit - max aggregate buffered bytes (0 = auto)
+*/
+autoreply define osvbng_cake_aggregate_create
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  u64 rate_bytes_per_sec;
+  u32 buffer_limit;
+};
+
+/** \brief Delete per-port aggregate shaper
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - physical or bond interface
+*/
+autoreply define osvbng_cake_aggregate_delete
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+};
+
+/** \brief Dump aggregate shaper state
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - physical or bond interface (~0 for all)
+*/
+define osvbng_cake_aggregate_dump
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+};
+
+/** \brief Aggregate shaper details (response to dump)
+    @param context - sender context
+    @param sw_if_index - physical or bond interface
+    @param rate_bytes_per_sec - configured aggregate rate
+    @param buffer_usage - current aggregate bytes queued
+    @param buffer_limit - maximum aggregate buffer bytes
+    @param shaped_pkts - total packets shaped through aggregate
+    @param shaped_bytes - total bytes shaped through aggregate
+    @param backpressure_events - aggregate buffer overflow drops
+*/
+define osvbng_cake_aggregate_details
+{
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  u64 rate_bytes_per_sec;
+  u32 buffer_usage;
+  u32 buffer_limit;
+  u64 shaped_pkts;
+  u64 shaped_bytes;
+  u64 backpressure_events;
+};

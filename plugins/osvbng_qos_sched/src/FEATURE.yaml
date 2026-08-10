@@ -1,0 +1,21 @@
+---
+name: OSVBNG QoS Scheduler (CAKE)
+maintainer: Veesix Networks <engineering@veesix-networks.co.uk>
+features:
+  - Per-subscriber egress traffic scheduling
+  - Per-flow queuing with set-associative hashing (1024 flows per tin)
+  - COBALT AQM (CoDel + BLUE) for bufferbloat mitigation
+  - DiffServ-aware traffic classification (1, 3, 4, or 8 tins)
+  - Token-bucket shaping with nanosecond precision
+  - Link-layer overhead compensation (ATM, PTM, GPON, DOCSIS)
+  - Deficit round robin with sparse flow optimization
+  - Triple isolation (per-flow + per-host fairness)
+  - ECN marking (RFC 3168)
+  - DSCP wash mode
+description: >
+  CAKE-equivalent per-subscriber traffic scheduler for BNG deployments.
+  Replaces egress policers with intelligent queuing to eliminate bufferbloat
+  while maintaining per-flow fairness within each subscriber's rate allocation.
+  Hooks into VPP's interface-output feature arc for enqueue and uses an INPUT
+  polling node for timer-driven dequeue.
+state: development
