@@ -1,0 +1,703 @@
+/* Copyright 2026 Veesix Networks Ltd
+ * Licensed under the GNU General Public License v3.0 or later.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * osvbng CGNAT Plugin - in2out nodes
+ * Fast/slow split on the ip4-unicast feature arc. The fast node translates
+ * existing-session traffic and hands new flows off to the slow node, which
+ * owns mapping lookup + port allocation + cgnat_session_create + first-packet
+ * translation. Both nodes share the rewrite helper inline below; the slow
+ * node carries the cost of new-session creation while the fast node stays
+ * tight on the per-packet established-session path.
+ */
+
+#include <vlib/vlib.h>
+#include <vnet/vnet.h>
+#include <vnet/ip/ip4_packet.h>
+#include <vnet/feature/feature.h>
+#include <vnet/ip/ip4.h>
+
+#include <osvbng_cgnat/osvbng_cgnat.h>
+
+typedef struct
+{
+  u32 sw_if_index;
+  ip4_address_t src_ip;
+  ip4_address_t dst_ip;
+  u16 src_port;
+  u16 dst_port;
+  u8 proto;
+  u8 action;
+} cgnat_in2out_trace_t;
+
+#define CGNAT_TRACE_TRANSLATED 0
+#define CGNAT_TRACE_BYPASSED   1
+#define CGNAT_TRACE_DROPPED    2
+#define CGNAT_TRACE_HAIRPINNED 3
+#define CGNAT_TRACE_CREATED    4
+#define CGNAT_TRACE_SLOWPATH   5
+
+static u8 *
+format_cgnat_in2out_trace (u8 *s, va_list *args)
+{
+  CLIB_UNUSED (vlib_main_t * vm) = va_arg (*args, vlib_main_t *);
+  CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
+  cgnat_in2out_trace_t *t = va_arg (*args, cgnat_in2out_trace_t *);
+
+  char *actions[] = { "translated", "bypassed", "dropped", "hairpinned",
+		      "session-created", "slowpath" };
+
+  s = format (s, "cgnat-in2out: sw_if %u %U:%u -> %U:%u proto %u action %s",
+	      t->sw_if_index, format_ip4_address, &t->src_ip, t->src_port,
+	      format_ip4_address, &t->dst_ip, t->dst_port, t->proto,
+	      actions[t->action]);
+  return s;
+}
+
+/* Pull L4 ports from the sv-reass-populated buffer metadata.
+ * Returns 0 on success, non-zero error code if sv-reass didn't populate
+ * (operator disabled it, refcnt-enable failed, etc.) — caller drops with
+ * CGNAT_ERROR_NO_REASS_METADATA or CGNAT_ERROR_FRAGMENT_DROP. */
+always_inline int
+cgnat_in2out_ports_from_reass (vlib_buffer_t *b0, ip4_header_t *ip0, u8 proto0,
+			       u16 *src_port, u16 *dst_port)
+{
+  *src_port = 0;
+  *dst_port = 0;
+
+  /* sv-reass populates reass.ip_proto from the IP header it parsed.
+   * Mismatch => sv-reass didn't run on this packet (recycled buffer
+   * metadata) — fail closed rather than rewrite from garbage ports. */
+  if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.ip_proto != proto0))
+    return CGNAT_ERROR_NO_REASS_METADATA;
+
+  if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.l4_hdr_truncated))
+    return CGNAT_ERROR_NO_REASS_METADATA;
+
+  /* Non-first fragments have no L4 header — caller hands off to the slow
+   * node which does an IP-only rewrite via the aux fragment record. */
+  if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.is_non_first_fragment))
+    return CGNAT_ERROR_FRAGMENT_DROP;  /* sentinel — caller routes to slow */
+
+  if (proto0 == IP_PROTOCOL_TCP || proto0 == IP_PROTOCOL_UDP)
+    {
+      *src_port = vnet_buffer (b0)->ip.reass.l4_src_port;
+      *dst_port = vnet_buffer (b0)->ip.reass.l4_dst_port;
+    }
+  else if (proto0 == IP_PROTOCOL_ICMP)
+    {
+      /* sv-reass stashes the ICMP echo identifier in BOTH l4_src_port and
+       * l4_dst_port for echo request/reply (it has no concept of "port" for
+       * ICMP so it populates both with the echo id). nat44-ed's
+       * nat_get_icmp_session_lookup_values reads both — we mirror it so the
+       * session key carries echo_id in both slots, which lets the slowpath
+       * inner-ICMP lookup (which also uses echo_id in both ports per
+       * nat44-ed convention) actually find the session for traceroute /
+       * tracepath / PMTUd ICMP errors. ICMP errors fall through with zero
+       * ports here — the slowpath inner-tuple lookup recovers the original
+       * session. Other ICMP types we don't translate — drop explicitly. */
+      u8 icmp_type = vnet_buffer (b0)->ip.reass.icmp_type_or_tcp_flags;
+      if (icmp_type == ICMP4_echo_request || icmp_type == ICMP4_echo_reply)
+	{
+	  *src_port = vnet_buffer (b0)->ip.reass.l4_src_port;
+	  *dst_port = vnet_buffer (b0)->ip.reass.l4_src_port;
+	}
+      else if (!icmp_type_is_error_message (icmp_type))
+	return CGNAT_ERROR_BAD_ICMP_TYPE;
+    }
+  return 0;
+}
+
+/* Apply the i2o flow's rewrite: replace ip0->src + L4 sport using the flow's
+ * precomputed L3/L4 checksum deltas (one ip_csum_add_even + fold per
+ * checksum). Shared by fast and slow paths — slow calls it on the first
+ * packet after session_create, fast on every subsequent packet. */
+always_inline void
+cgnat_in2out_translate (vlib_main_t *vm, vlib_buffer_t *b0, ip4_header_t *ip0,
+			cgnat_session_t *s0, u8 proto0, f64 now)
+{
+  cgnat_flow_t *f = &s0->i2o;
+  cgnat_main_t *cm = &cgnat_main;
+
+  s0->last_active = now;
+  s0->total_pkts++;
+  s0->total_bytes += vlib_buffer_length_in_chain (vm, b0);
+
+  ip0->src_address = f->rewrite_saddr;
+  ip0->checksum =
+    ip_csum_fold (ip_csum_add_even (ip0->checksum, f->l3_csum_delta));
+
+  if (proto0 == IP_PROTOCOL_TCP)
+    {
+      tcp_header_t *tcp0 =
+	(tcp_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
+      tcp0->src_port = f->rewrite_sport;
+      tcp0->checksum =
+	ip_csum_fold (ip_csum_add_even (tcp0->checksum, f->l4_csum_delta));
+      cgnat_pool_t *pool0 = pool_elt_at_index (cm->pools, s0->pool_index);
+      cgnat_set_tcp_session_state (s0, pool0, tcp0->flags, CGNAT_TCP_DIR_I2O,
+				   now);
+    }
+  else if (proto0 == IP_PROTOCOL_UDP)
+    {
+      udp_header_t *udp0 =
+	(udp_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
+      udp_header_t old_udp = *udp0;
+      udp0->src_port = f->rewrite_sport;
+      if (old_udp.checksum != 0)
+	{
+	  udp0->checksum = ip_csum_fold (
+	    ip_csum_add_even (old_udp.checksum, f->l4_csum_delta));
+	  if (udp0->checksum == 0)
+	    udp0->checksum = 0xFFFF;
+	}
+    }
+  else if (proto0 == IP_PROTOCOL_ICMP)
+    {
+      icmp46_header_t *icmp0 =
+	(icmp46_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
+      u16 *id0 = (u16 *) (icmp0 + 1);
+      u8 itype = icmp0->type;
+      if (itype == ICMP4_echo_request || itype == ICMP4_echo_reply)
+	{
+	  *id0 = f->rewrite_sport;
+	  icmp0->checksum = ip_csum_fold (
+	    ip_csum_add_even (icmp0->checksum, f->l4_csum_delta));
+	}
+    }
+}
+
+VLIB_NODE_FN (cgnat_in2out_node)
+(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+{
+  /* Single-worker invariant (D15) — cm->sessions / mapping->session_count /
+   * cgnat_port_alloc are not thread-safe. ASSERT no-ops in production
+   * builds; CI catches misconfigured multi-worker deployments. */
+  ASSERT (vm->thread_index == 0);
+  cgnat_main_t *cm = &cgnat_main;
+  u32 n_left_from, *from, *to_next;
+  cgnat_in2out_next_t next_index;
+  u32 pkts_translated = 0;
+  u32 pkts_bypassed = 0;
+  u32 pkts_dropped = 0;
+  u32 pkts_slowpath = 0;
+  u32 pkts_no_reass = 0;
+  u32 pkts_frag_drop = 0;
+  f64 now = vlib_time_now (vm);
+
+  from = vlib_frame_vector_args (frame);
+  n_left_from = frame->n_vectors;
+  next_index = node->cached_next_index;
+
+  while (n_left_from > 0)
+    {
+      u32 n_left_to_next;
+
+      vlib_get_next_frame (vm, node, next_index, to_next, n_left_to_next);
+
+      while (n_left_from > 0 && n_left_to_next > 0)
+	{
+	  vlib_buffer_t *b0;
+	  u32 bi0;
+	  u32 next0 = CGNAT_IN2OUT_NEXT_LOOKUP;
+	  ip4_header_t *ip0;
+	  u32 sw_if_index0;
+	  u16 src_port0 = 0, dst_port0 = 0;
+	  u8 proto0;
+	  u8 trace_action = CGNAT_TRACE_TRANSLATED;
+	  cgnat_mapping_t *m0 = NULL;
+	  cgnat_session_t *s0 = NULL;
+
+	  bi0 = from[0];
+	  to_next[0] = bi0;
+	  from += 1;
+	  to_next += 1;
+	  n_left_from -= 1;
+	  n_left_to_next -= 1;
+
+	  b0 = vlib_get_buffer (vm, bi0);
+	  ip0 = vlib_buffer_get_current (b0);
+	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
+	  proto0 = ip0->protocol;
+
+	  {
+	    int rerr = cgnat_in2out_ports_from_reass (b0, ip0, proto0,
+						      &src_port0, &dst_port0);
+	    if (PREDICT_FALSE (rerr))
+	      {
+		if (rerr == CGNAT_ERROR_FRAGMENT_DROP)
+		  {
+		    /* Non-first fragment — slow node does the IP-only
+		     * rewrite via aux fragment record lookup. */
+		    next0 = CGNAT_IN2OUT_NEXT_SLOWPATH;
+		    trace_action = CGNAT_TRACE_SLOWPATH;
+		    pkts_slowpath++;
+		    goto trace;
+		  }
+		trace_action = CGNAT_TRACE_DROPPED;
+		next0 = CGNAT_IN2OUT_NEXT_DROP;
+		pkts_no_reass++;
+		b0->error = node->errors[rerr];
+		goto trace;
+	      }
+	  }
+
+	  u32 fib_index0 =
+	    vec_elt (ip4_main.fib_index_by_sw_if_index, sw_if_index0);
+
+	  if (cgnat_bypass_check (&ip0->src_address, fib_index0))
+	    {
+	      trace_action = CGNAT_TRACE_BYPASSED;
+	      vnet_feature_next (&next0, b0);
+	      pkts_bypassed++;
+	      goto trace;
+	    }
+
+	  /* Skip translation when dst is a local-receive address in this FIB
+	   * (subscriber default gateway, BNG loopback, broadcast). Let
+	   * ip4-lookup deliver to the receive DPO so LCP punts to Linux. */
+	  if (PREDICT_FALSE (
+		cgnat_is_local_receive (fib_index0, &ip0->dst_address)))
+	    {
+	      trace_action = CGNAT_TRACE_BYPASSED;
+	      vnet_feature_next (&next0, b0);
+	      pkts_bypassed++;
+	      goto trace;
+	    }
+
+	  m0 = cgnat_mapping_lookup (&ip0->src_address, fib_index0);
+	  if (PREDICT_FALSE (!m0))
+	    {
+	      trace_action = CGNAT_TRACE_DROPPED;
+	      next0 = CGNAT_IN2OUT_NEXT_DROP;
+	      pkts_dropped++;
+	      b0->error = node->errors[CGNAT_ERROR_NO_MAPPING];
+	      goto trace;
+	    }
+
+	  cgnat_pool_t *pool0 =
+	    pool_elt_at_index (cm->pools, m0->pool_index);
+
+	  if (PREDICT_FALSE (!pool0->outside_fib_valid))
+	    {
+	      trace_action = CGNAT_TRACE_DROPPED;
+	      next0 = CGNAT_IN2OUT_NEXT_DROP;
+	      pkts_dropped++;
+	      b0->error = node->errors[CGNAT_ERROR_NO_POOL];
+	      goto trace;
+	    }
+
+	  s0 = cgnat_session_lookup_in2out (&ip0->src_address,
+					    &ip0->dst_address, src_port0,
+					    dst_port0, proto0, fib_index0);
+
+	  if (PREDICT_FALSE (!s0))
+	    {
+	      /* New flow: defer session create to the slow node. */
+	      next0 = CGNAT_IN2OUT_NEXT_SLOWPATH;
+	      trace_action = CGNAT_TRACE_SLOWPATH;
+	      pkts_slowpath++;
+	      goto trace;
+	    }
+
+	  cgnat_in2out_translate (vm, b0, ip0, s0, proto0, now);
+
+	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = pool0->outside_fib_index;
+
+	  pkts_translated++;
+
+	trace:
+	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
+			     (b0->flags & VLIB_BUFFER_IS_TRACED)))
+	    {
+	      cgnat_in2out_trace_t *t =
+		vlib_add_trace (vm, node, b0, sizeof (*t));
+	      t->sw_if_index = sw_if_index0;
+	      t->src_ip = ip0->src_address;
+	      t->dst_ip = ip0->dst_address;
+	      t->src_port = src_port0;
+	      t->dst_port = dst_port0;
+	      t->proto = proto0;
+	      t->action = trace_action;
+	    }
+
+	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
+					   n_left_to_next, bi0, next0);
+	}
+
+      vlib_put_next_frame (vm, node, next_index, n_left_to_next);
+    }
+
+  vlib_node_increment_counter (vm, node->node_index,
+			       CGNAT_ERROR_TRANSLATED, pkts_translated);
+  vlib_node_increment_counter (vm, node->node_index,
+			       CGNAT_ERROR_BYPASSED, pkts_bypassed);
+  vlib_node_increment_counter (vm, node->node_index, CGNAT_ERROR_DROP,
+			       pkts_dropped);
+  vlib_node_increment_counter (vm, node->node_index,
+			       CGNAT_ERROR_NO_REASS_METADATA, pkts_no_reass);
+  vlib_node_increment_counter (vm, node->node_index,
+			       CGNAT_ERROR_FRAGMENT_DROP, pkts_frag_drop);
+  /* pkts_slowpath flows through to the slow node which owns the
+   * SESSION_CREATE counter; we don't double-count here. */
+  (void) pkts_slowpath;
+
+  return frame->n_vectors;
+}
+
+VLIB_NODE_FN (cgnat_in2out_slowpath_node)
+(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
+{
+  ASSERT (vm->thread_index == 0);
+  cgnat_main_t *cm = &cgnat_main;
+  u32 n_left_from, *from, *to_next;
+  cgnat_in2out_next_t next_index;
+  u32 pkts_translated = 0;
+  u32 pkts_created = 0;
+  u32 pkts_dropped = 0;
+  u32 pkts_no_reass = 0;
+  u32 pkts_frag_drop = 0;
+  f64 now = vlib_time_now (vm);
+
+  from = vlib_frame_vector_args (frame);
+  n_left_from = frame->n_vectors;
+  next_index = node->cached_next_index;
+
+  while (n_left_from > 0)
+    {
+      u32 n_left_to_next;
+
+      vlib_get_next_frame (vm, node, next_index, to_next, n_left_to_next);
+
+      while (n_left_from > 0 && n_left_to_next > 0)
+	{
+	  vlib_buffer_t *b0;
+	  u32 bi0;
+	  u32 next0 = CGNAT_IN2OUT_NEXT_LOOKUP;
+	  ip4_header_t *ip0;
+	  u32 sw_if_index0;
+	  u16 src_port0 = 0, dst_port0 = 0;
+	  u8 proto0;
+	  u8 trace_action = CGNAT_TRACE_CREATED;
+	  cgnat_mapping_t *m0 = NULL;
+	  cgnat_session_t *s0 = NULL;
+
+	  bi0 = from[0];
+	  to_next[0] = bi0;
+	  from += 1;
+	  to_next += 1;
+	  n_left_from -= 1;
+	  n_left_to_next -= 1;
+
+	  b0 = vlib_get_buffer (vm, bi0);
+	  ip0 = vlib_buffer_get_current (b0);
+	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
+	  proto0 = ip0->protocol;
+
+	  u32 fib_index0 =
+	    vec_elt (ip4_main.fib_index_by_sw_if_index, sw_if_index0);
+
+	  /* ICMP error inner-rewrite (D4) — symmetric of out2in. Outer is
+	   * inside_ip → somewhere with proto=ICMP error type; inner was a
+	   * packet that arrived at the subscriber (so inner.dst=inside_ip,
+	   * inner.dport=inside_port). Rewrite outer src (inside→outside) +
+	   * inner dst + inner dport so the remote sees an error with the
+	   * outside identity, not the inside leak. */
+	  if (PREDICT_FALSE (
+		proto0 == IP_PROTOCOL_ICMP &&
+		icmp_type_is_error_message (
+		  vnet_buffer (b0)->ip.reass.icmp_type_or_tcp_flags)))
+	    {
+	      icmp46_header_t *icmp0 =
+		(icmp46_header_t *) ip4_next_header (ip0);
+	      nat_icmp_echo_header_t *echo0 =
+		(nat_icmp_echo_header_t *) (icmp0 + 1);
+	      ip4_header_t *inner_ip = (ip4_header_t *) (echo0 + 1);
+	      void *inner_l4 = ip4_next_header (inner_ip);
+
+	      ip4_address_t lookup_src = inner_ip->dst_address;
+	      ip4_address_t lookup_dst = inner_ip->src_address;
+	      u16 lookup_sport = 0, lookup_dport = 0;
+	      u8 inner_proto = inner_ip->protocol;
+
+	      if (inner_proto == IP_PROTOCOL_TCP ||
+		  inner_proto == IP_PROTOCOL_UDP)
+		{
+		  nat_tcp_udp_header_t *th = inner_l4;
+		  lookup_sport = th->dst_port;
+		  lookup_dport = th->src_port;
+		}
+	      else if (inner_proto == IP_PROTOCOL_ICMP)
+		{
+		  icmp46_header_t *inner_icmp = inner_l4;
+		  nat_icmp_echo_header_t *inner_echo =
+		    (nat_icmp_echo_header_t *) (inner_icmp + 1);
+		  lookup_sport = inner_echo->identifier;
+		  lookup_dport = inner_echo->identifier;
+		}
+	      else
+		{
+		  trace_action = CGNAT_TRACE_DROPPED;
+		  next0 = CGNAT_IN2OUT_NEXT_DROP;
+		  pkts_dropped++;
+		  b0->error = node->errors[CGNAT_ERROR_NO_SESSION];
+		  goto trace;
+		}
+
+	      cgnat_session_t *s0 = cgnat_session_lookup_in2out (
+		&lookup_src, &lookup_dst, lookup_sport, lookup_dport,
+		inner_proto, fib_index0);
+	      if (PREDICT_FALSE (!s0))
+		{
+		  trace_action = CGNAT_TRACE_DROPPED;
+		  next0 = CGNAT_IN2OUT_NEXT_DROP;
+		  pkts_dropped++;
+		  b0->error = node->errors[CGNAT_ERROR_NO_SESSION];
+		  goto trace;
+		}
+
+	      ip0->src_address = s0->i2o.rewrite_saddr;
+	      ip0->checksum = ip_csum_fold (
+		ip_csum_add_even (ip0->checksum, s0->i2o.l3_csum_delta));
+
+	      inner_ip->dst_address = s0->i2o.rewrite_saddr;
+	      inner_ip->checksum = ip_csum_fold (
+		ip_csum_add_even (inner_ip->checksum, s0->i2o.l3_csum_delta));
+
+	      if (inner_proto == IP_PROTOCOL_TCP ||
+		  inner_proto == IP_PROTOCOL_UDP)
+		((nat_tcp_udp_header_t *) inner_l4)->src_port =
+		  s0->i2o.rewrite_sport;
+	      else if (inner_proto == IP_PROTOCOL_ICMP)
+		{
+		  icmp46_header_t *inner_icmp = inner_l4;
+		  nat_icmp_echo_header_t *inner_echo =
+		    (nat_icmp_echo_header_t *) (inner_icmp + 1);
+		  /* Update inner_icmp checksum incrementally so the inner stays
+		   * internally self-consistent — the outer ICMP checksum recompute
+		   * below covers the byte change, but stricter subscriber stacks
+		   * validate the inner ICMP's own checksum independently and would
+		   * reject otherwise. Mirrors nat44-ed's nat_6t_flow_icmp_translate
+		   * inner ICMP-id rewrite. */
+		  u16 old_id = inner_echo->identifier;
+		  u16 new_id = s0->i2o.rewrite_sport;
+		  if (old_id != new_id)
+		    {
+		      inner_icmp->checksum = ip_csum_fold (ip_csum_update (
+			inner_icmp->checksum, old_id, new_id,
+			nat_icmp_echo_header_t, identifier));
+		      inner_echo->identifier = new_id;
+		    }
+		}
+
+	      icmp0->checksum = 0;
+	      ip_csum_t sum = ip_incremental_checksum_buffer (
+		vm, b0, (u8 *) icmp0 - (u8 *) vlib_buffer_get_current (b0),
+		ntohs (ip0->length) - ip4_header_bytes (ip0), 0);
+	      icmp0->checksum = ~ip_csum_fold (sum);
+
+	      s0->last_active = now;
+	      s0->total_pkts++;
+	      s0->total_bytes += vlib_buffer_length_in_chain (vm, b0);
+
+	      vnet_buffer (b0)->sw_if_index[VLIB_TX] = s0->i2o.rewrite_fib_index;
+	      trace_action = CGNAT_TRACE_TRANSLATED;
+	      pkts_translated++;
+	      goto trace;
+	    }
+
+	  /* Non-first fragment: IP-only rewrite via aux fragment record.
+	   * No port extraction needed (the fragment has no L4 header). */
+	  if (PREDICT_FALSE (
+		vnet_buffer (b0)->ip.reass.is_non_first_fragment))
+	    {
+	      cgnat_frag_rewrite_t *fr = cgnat_frag_rewrite_lookup (
+		ip0->src_address, ip0->dst_address, proto0, fib_index0);
+	      if (PREDICT_FALSE (!fr))
+		{
+		  trace_action = CGNAT_TRACE_DROPPED;
+		  next0 = CGNAT_IN2OUT_NEXT_DROP;
+		  pkts_frag_drop++;
+		  b0->error = node->errors[CGNAT_ERROR_FRAGMENT_DROP];
+		  goto trace;
+		}
+	      ip0->src_address = fr->outside_ip;
+	      ip0->checksum = ip_csum_fold (
+		ip_csum_add_even (ip0->checksum, fr->l3_csum_delta_i2o));
+	      vnet_buffer (b0)->sw_if_index[VLIB_TX] = fr->outside_fib_index;
+	      pkts_translated++;
+	      trace_action = CGNAT_TRACE_TRANSLATED;
+	      goto trace;
+	    }
+
+	  {
+	    int rerr = cgnat_in2out_ports_from_reass (b0, ip0, proto0,
+						      &src_port0, &dst_port0);
+	    if (PREDICT_FALSE (rerr))
+	      {
+		trace_action = CGNAT_TRACE_DROPPED;
+		next0 = CGNAT_IN2OUT_NEXT_DROP;
+		pkts_no_reass++;
+		b0->error = node->errors[rerr];
+		goto trace;
+	      }
+	  }
+
+	  /* Re-lookup the mapping. The fast path already verified it existed,
+	   * but mappings can be deleted between the fast-path lookup and the
+	   * slow-path arrival (concurrent control-plane reconfig). Cheap
+	   * bihash hit on the new-session path only. */
+	  m0 = cgnat_mapping_lookup (&ip0->src_address, fib_index0);
+	  if (PREDICT_FALSE (!m0))
+	    {
+	      trace_action = CGNAT_TRACE_DROPPED;
+	      next0 = CGNAT_IN2OUT_NEXT_DROP;
+	      pkts_dropped++;
+	      b0->error = node->errors[CGNAT_ERROR_NO_MAPPING];
+	      goto trace;
+	    }
+
+	  cgnat_pool_t *pool0 =
+	    pool_elt_at_index (cm->pools, m0->pool_index);
+
+	  if (PREDICT_FALSE (!pool0->outside_fib_valid))
+	    {
+	      trace_action = CGNAT_TRACE_DROPPED;
+	      next0 = CGNAT_IN2OUT_NEXT_DROP;
+	      pkts_dropped++;
+	      b0->error = node->errors[CGNAT_ERROR_NO_POOL];
+	      goto trace;
+	    }
+
+	  /* A packet for an existing session may end up here if it raced
+	   * a concurrent create from another flow's first packet. Re-check
+	   * the session table before allocating a fresh port. */
+	  s0 = cgnat_session_lookup_in2out (&ip0->src_address,
+					    &ip0->dst_address, src_port0,
+					    dst_port0, proto0, fib_index0);
+
+	  if (!s0)
+	    {
+	      u16 outside_port0 = 0;
+	      int needs_port = !cgnat_is_unk_proto (proto0);
+	      if (needs_port)
+		{
+		  outside_port0 = cgnat_port_alloc (m0, now);
+		  if (PREDICT_FALSE (outside_port0 == 0))
+		    {
+		      trace_action = CGNAT_TRACE_DROPPED;
+		      next0 = CGNAT_IN2OUT_NEXT_DROP;
+		      pkts_dropped++;
+		      b0->error = node->errors[CGNAT_ERROR_PORT_EXHAUSTED];
+		      goto trace;
+		    }
+		}
+
+	      s0 = cgnat_session_create (m0, &ip0->dst_address, dst_port0,
+					 proto0, outside_port0, src_port0,
+					 now);
+	      if (PREDICT_FALSE (!s0))
+		{
+		  if (needs_port)
+		    cgnat_port_free (m0, outside_port0);
+		  trace_action = CGNAT_TRACE_DROPPED;
+		  next0 = CGNAT_IN2OUT_NEXT_DROP;
+		  pkts_dropped++;
+		  b0->error = node->errors[CGNAT_ERROR_SESSION_LIMIT];
+		  goto trace;
+		}
+
+	      pkts_created++;
+	    }
+	  else
+	    {
+	      trace_action = CGNAT_TRACE_TRANSLATED;
+	    }
+
+	  cgnat_in2out_translate (vm, b0, ip0, s0, proto0, now);
+
+	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = pool0->outside_fib_index;
+
+	  pkts_translated++;
+
+	trace:
+	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
+			     (b0->flags & VLIB_BUFFER_IS_TRACED)))
+	    {
+	      cgnat_in2out_trace_t *t =
+		vlib_add_trace (vm, node, b0, sizeof (*t));
+	      t->sw_if_index = sw_if_index0;
+	      t->src_ip = ip0->src_address;
+	      t->dst_ip = ip0->dst_address;
+	      t->src_port = src_port0;
+	      t->dst_port = dst_port0;
+	      t->proto = proto0;
+	      t->action = trace_action;
+	    }
+
+	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
+					   n_left_to_next, bi0, next0);
+	}
+
+      vlib_put_next_frame (vm, node, next_index, n_left_to_next);
+    }
+
+  vlib_node_increment_counter (vm, node->node_index,
+			       CGNAT_ERROR_TRANSLATED, pkts_translated);
+  vlib_node_increment_counter (vm, node->node_index,
+			       CGNAT_ERROR_SESSION_CREATE, pkts_created);
+  vlib_node_increment_counter (vm, node->node_index, CGNAT_ERROR_DROP,
+			       pkts_dropped);
+  vlib_node_increment_counter (vm, node->node_index,
+			       CGNAT_ERROR_NO_REASS_METADATA, pkts_no_reass);
+  vlib_node_increment_counter (vm, node->node_index,
+			       CGNAT_ERROR_FRAGMENT_DROP, pkts_frag_drop);
+
+  return frame->n_vectors;
+}
+
+VLIB_REGISTER_NODE (cgnat_in2out_node) = {
+  .name = "cgnat-in2out",
+  .vector_size = sizeof (u32),
+  .format_trace = format_cgnat_in2out_trace,
+  .type = VLIB_NODE_TYPE_INTERNAL,
+  .n_errors = CGNAT_N_ERROR,
+  .error_strings = cgnat_error_strings,
+  .n_next_nodes = CGNAT_IN2OUT_N_NEXT,
+  .next_nodes = {
+    [CGNAT_IN2OUT_NEXT_DROP] = "error-drop",
+    [CGNAT_IN2OUT_NEXT_LOOKUP] = "ip4-lookup",
+    [CGNAT_IN2OUT_NEXT_SLOWPATH] = "cgnat-in2out-slowpath",
+  },
+};
+
+VLIB_REGISTER_NODE (cgnat_in2out_slowpath_node) = {
+  .name = "cgnat-in2out-slowpath",
+  .vector_size = sizeof (u32),
+  .format_trace = format_cgnat_in2out_trace,
+  .type = VLIB_NODE_TYPE_INTERNAL,
+  .n_errors = CGNAT_N_ERROR,
+  .error_strings = cgnat_error_strings,
+  /* Slowpath only ever dispatches to DROP or LOOKUP — it never re-enqueues
+   * to itself. Cap n_next_nodes to 2 so VPP doesn't try to wire SLOWPATH
+   * slot to a duplicate "error-drop", which VPP's vlib_node_add_next dedup
+   * leaves as ~0 in the next_nodes table → segfault at vlib_node_main_init. */
+  .n_next_nodes = 2,
+  .next_nodes = {
+    [CGNAT_IN2OUT_NEXT_DROP] = "error-drop",
+    [CGNAT_IN2OUT_NEXT_LOOKUP] = "ip4-lookup",
+  },
+};
+
+VNET_FEATURE_INIT (cgnat_in2out_feat, static) = {
+  .arc_name = "ip4-unicast",
+  .node_name = "cgnat-in2out",
+  .runs_after = VNET_FEATURES ("ip4-sv-reassembly-feature"),
+  .runs_before = VNET_FEATURES ("ip4-lookup"),
+};
+
+/*
+ * Local Variables:
+ * eval: (c-set-style "gnu")
+ * End:
+ */

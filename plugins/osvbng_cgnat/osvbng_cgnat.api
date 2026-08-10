@@ -1,0 +1,472 @@
+/* Copyright 2026 Veesix Networks Ltd
+ * Licensed under the GNU General Public License v3.0 or later.
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * osvbng CGNAT Plugin API
+ * Carrier-Grade NAT with PBA and Deterministic modes.
+ */
+
+option version = "1.0.0";
+import "vnet/interface_types.api";
+import "vnet/ip/ip_types.api";
+
+enum osvbng_cgnat_pool_mode : u8
+{
+  OSVBNG_CGNAT_POOL_MODE_PBA = 0,
+  OSVBNG_CGNAT_POOL_MODE_DETERMINISTIC = 1,
+};
+
+enum osvbng_cgnat_address_pooling : u8
+{
+  OSVBNG_CGNAT_ADDRESS_POOLING_PAIRED = 0,
+  OSVBNG_CGNAT_ADDRESS_POOLING_ARBITRARY = 1,
+};
+
+enum osvbng_cgnat_filtering : u8
+{
+  OSVBNG_CGNAT_FILTERING_ENDPOINT_INDEPENDENT = 0,
+  OSVBNG_CGNAT_FILTERING_ENDPOINT_DEPENDENT = 1,
+};
+
+/** \brief Session timeout configuration (v1 — pre-#153, no `other` slot;
+    plugin back-fills "other" from `udp` for backward compatibility). */
+typedef osvbng_cgnat_timeouts
+{
+  u32 tcp_established;
+  u32 tcp_transitory;
+  u32 udp;
+  u32 icmp;
+};
+
+/** \brief Session timeout configuration v2 (#153 — adds `other` slot for
+    non-port L4 protocols like GRE/ESP/SCTP). Used by pool_add_del_v2 /
+    pool_update_v2. */
+typedef osvbng_cgnat_timeouts_v2
+{
+  u32 tcp_established;
+  u32 tcp_transitory;
+  u32 udp;
+  u32 icmp;
+  u32 other;
+};
+
+/** \brief Per-pool inside prefix */
+typedef osvbng_cgnat_inside_prefix
+{
+  vl_api_prefix_t prefix;
+  u32 vrf_id;
+};
+
+/** \brief Add or delete a CGNAT pool
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add pool if true, delete if false
+    @param pool_id - unique pool identifier (assigned by control plane)
+    @param mode - PBA or deterministic
+    @param address_pooling - paired or arbitrary
+    @param filtering - endpoint-independent or endpoint-dependent
+    @param block_size - ports per block (PBA mode)
+    @param max_blocks_per_sub - max port blocks per subscriber (PBA mode)
+    @param max_sessions_per_sub - max concurrent sessions per subscriber
+    @param port_range_start - first usable port (default 1024)
+    @param port_range_end - last usable port (default 65535)
+    @param port_reuse_timeout - seconds before port reuse (default 120)
+    @param alg_bitmask - per-pool ALG enable flags (bit 0=FTP, 1=TFTP, 2=PPTP, 3=SIP, 4=RTSP, 5=DNS)
+    @param timeouts - protocol-specific session timeouts
+*/
+autoreply define osvbng_cgnat_pool_add_del
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  u32 pool_id;
+  vl_api_osvbng_cgnat_pool_mode_t mode;
+  vl_api_osvbng_cgnat_address_pooling_t address_pooling;
+  vl_api_osvbng_cgnat_filtering_t filtering;
+  u16 block_size;
+  u8 max_blocks_per_sub;
+  u32 max_sessions_per_sub;
+  u16 port_range_start;
+  u16 port_range_end;
+  u16 port_reuse_timeout;
+  u8 alg_bitmask;
+  vl_api_osvbng_cgnat_timeouts_t timeouts;
+};
+
+/** \brief Add or delete an inside prefix on a pool
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add prefix if true, delete if false
+    @param pool_id - pool identifier
+    @param prefix - inside prefix (e.g. 100.64.0.0/16)
+    @param vrf_id - VRF for this inside prefix
+*/
+autoreply define osvbng_cgnat_pool_add_del_inside_prefix
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  u32 pool_id;
+  vl_api_prefix_t prefix;
+  u32 vrf_id;
+};
+
+/** \brief Add or delete an outside address range on a pool
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add range if true, delete if false
+    @param pool_id - pool identifier
+    @param prefix - outside address range (e.g. 203.0.113.0/24)
+*/
+autoreply define osvbng_cgnat_pool_add_del_outside_address
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  u32 pool_id;
+  vl_api_prefix_t prefix;
+};
+
+/** \brief Set the outside VRF for a pool
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param pool_id - pool identifier
+    @param vrf_id - VRF table ID for outside routing (0 = default)
+*/
+autoreply define osvbng_cgnat_set_outside_fib
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+  u32 vrf_id;
+};
+
+/** \brief Add or delete a subscriber mapping (PBA mode)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add mapping if true, delete if false
+    @param pool_id - pool this mapping belongs to
+    @param sw_if_index - subscriber's per-session P2P interface
+    @param inside_ip - subscriber inside IP
+    @param inside_vrf_id - subscriber inside VRF
+    @param outside_ip - allocated outside IP
+    @param port_block_start - first port in allocated block
+    @param port_block_end - last port in allocated block
+    @param enable_feature - also enable cgnat-in2out feature on sw_if_index
+*/
+autoreply define osvbng_cgnat_add_del_subscriber_mapping
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  u32 pool_id;
+  vl_api_interface_index_t sw_if_index;
+  vl_api_ip4_address_t inside_ip;
+  u32 inside_vrf_id;
+  vl_api_ip4_address_t outside_ip;
+  u16 port_block_start;
+  u16 port_block_end;
+  bool enable_feature;
+};
+
+/** \brief Bulk add subscriber mappings (for restart recovery)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param pool_id - pool these mappings belong to
+    @param count - number of mappings
+*/
+typedef osvbng_cgnat_bulk_mapping_entry
+{
+  vl_api_interface_index_t sw_if_index;
+  vl_api_ip4_address_t inside_ip;
+  u32 inside_vrf_id;
+  vl_api_ip4_address_t outside_ip;
+  u16 port_block_start;
+  u16 port_block_end;
+  bool enable_feature;
+};
+
+autoreply define osvbng_cgnat_add_subscriber_mapping_bulk
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+  u32 count;
+  vl_api_osvbng_cgnat_bulk_mapping_entry_t mappings[count];
+};
+
+/** \brief Enable CGNAT on a subscriber session (deterministic mode)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_enable - enable or disable
+    @param pool_id - pool to use
+    @param sw_if_index - subscriber's per-session P2P interface
+*/
+autoreply define osvbng_cgnat_enable_on_session
+{
+  u32 client_index;
+  u32 context;
+  bool is_enable;
+  u32 pool_id;
+  vl_api_interface_index_t sw_if_index;
+};
+
+/** \brief Refcnt-enable/disable ip4-sv-reassembly on an outside interface
+    Required because the cgnat-in2out fast path reads L4 ports out of
+    vnet_buffer(b)->ip.reass.* (populated by ip4-sv-reassembly upstream).
+    Each outside interface must be refcnt-enabled once per pool that
+    references it; the refcount is global per sw_if so multiple pools
+    sharing an outside interface compose correctly.
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param pool_id - pool that owns this outside interface entry
+    @param sw_if_index - outside interface
+    @param is_add - add (refcnt up) if true, delete (refcnt down) if false
+*/
+autoreply define osvbng_cgnat_pool_outside_interface_add_del
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+  vl_api_interface_index_t sw_if_index;
+  bool is_add;
+};
+
+/** \brief Add or delete a bypass prefix (static IP subscribers skip NAT)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param is_add - add bypass if true, delete if false
+    @param prefix - inside prefix to bypass (e.g. 203.0.113.0/24 or single /32)
+    @param inside_vrf_id - subscriber VRF
+*/
+autoreply define osvbng_cgnat_add_del_bypass
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  vl_api_prefix_t prefix;
+  u32 inside_vrf_id;
+};
+
+/** \brief Update pool parameters at runtime
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param pool_id - pool to update
+    @param max_sessions_per_sub - new session limit
+    @param alg_bitmask - new ALG flags
+    @param timeouts - new timeout values
+*/
+autoreply define osvbng_cgnat_pool_update
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+  u32 max_sessions_per_sub;
+  u8 alg_bitmask;
+  vl_api_osvbng_cgnat_timeouts_t timeouts;
+};
+
+/** \brief Add or delete a CGNAT pool (v2)
+    Same shape as v1 but carries timeouts_v2 with the `other` field for
+    non-port L4 protocols (GRE / ESP / SCTP / etc.). v1 stays accepted for
+    backward compat; old clients fall back to udp's value for `other`.
+    @param timeouts - five-slot protocol-specific session timeouts
+*/
+autoreply define osvbng_cgnat_pool_add_del_v2
+{
+  u32 client_index;
+  u32 context;
+  bool is_add;
+  u32 pool_id;
+  vl_api_osvbng_cgnat_pool_mode_t mode;
+  vl_api_osvbng_cgnat_address_pooling_t address_pooling;
+  vl_api_osvbng_cgnat_filtering_t filtering;
+  u16 block_size;
+  u8 max_blocks_per_sub;
+  u32 max_sessions_per_sub;
+  u16 port_range_start;
+  u16 port_range_end;
+  u16 port_reuse_timeout;
+  u8 alg_bitmask;
+  vl_api_osvbng_cgnat_timeouts_v2_t timeouts;
+};
+
+/** \brief Update pool parameters at runtime (v2 — carries `other` timeout) */
+autoreply define osvbng_cgnat_pool_update_v2
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+  u32 max_sessions_per_sub;
+  u8 alg_bitmask;
+  vl_api_osvbng_cgnat_timeouts_v2_t timeouts;
+};
+
+/** \brief Dump subscriber mappings
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param pool_id - pool to dump (~0 for all)
+*/
+define osvbng_cgnat_subscriber_mapping_dump
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+};
+
+define osvbng_cgnat_subscriber_mapping_details
+{
+  u32 context;
+  u32 pool_id;
+  vl_api_interface_index_t sw_if_index;
+  vl_api_ip4_address_t inside_ip;
+  u32 inside_vrf_id;
+  vl_api_ip4_address_t outside_ip;
+  u16 port_block_start;
+  u16 port_block_end;
+  u32 active_sessions;
+};
+
+/** \brief Dump pools (~0 for all) */
+define osvbng_cgnat_pool_dump
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+};
+
+define osvbng_cgnat_pool_details
+{
+  u32 context;
+  u32 pool_id;
+  vl_api_osvbng_cgnat_pool_mode_t mode;
+  vl_api_osvbng_cgnat_address_pooling_t address_pooling;
+  vl_api_osvbng_cgnat_filtering_t filtering;
+  u16 block_size;
+  u8 max_blocks_per_sub;
+  u32 max_sessions_per_sub;
+  u16 port_range_start;
+  u16 port_range_end;
+  u16 port_reuse_timeout;
+  u8 alg_bitmask;
+  vl_api_osvbng_cgnat_timeouts_t timeouts;
+  u32 outside_vrf_table_id;
+  u32 active_mappings;
+};
+
+/** \brief Dump inside prefixes for a pool (~0 for all pools) */
+define osvbng_cgnat_pool_inside_prefix_dump
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+};
+
+define osvbng_cgnat_pool_inside_prefix_details
+{
+  u32 context;
+  u32 pool_id;
+  vl_api_prefix_t prefix;
+  u32 vrf_id;
+};
+
+/** \brief Dump outside addresses for a pool (~0 for all pools) */
+define osvbng_cgnat_pool_outside_address_dump
+{
+  u32 client_index;
+  u32 context;
+  u32 pool_id;
+};
+
+define osvbng_cgnat_pool_outside_address_details
+{
+  u32 context;
+  u32 pool_id;
+  vl_api_prefix_t prefix;
+};
+
+/** \brief Dump active CGNAT sessions (translations), filtered and windowed.
+
+    All filter fields are optional: a zero/empty value means "do not filter on
+    this field". Sentinels: 0.0.0.0 for IPs, 0 for ports/proto/pool_id (port 0
+    is reserved and pool_id 0 is not used by deployments).
+
+    Ports are presented host-order on the wire (the session struct stores them
+    network-order; the handler converts). For ICMP, inside_port/outside_port
+    carry the ICMP identifier and remote_port is 0.
+
+    The plugin both filters and windows: the walk resumes from start_index (a
+    session pool index) and emits at most `limit` matches, each carrying its own
+    session_index so the caller can resume the next page. limit 0 means the
+    plugin default (CGNAT_SESSION_DUMP_DEFAULT_LIMIT).
+
+    @param inside_ip - filter on subscriber address (0.0.0.0 = any)
+    @param outside_ip - filter on translated address (0.0.0.0 = any)
+    @param remote_ip - filter on remote peer address (0.0.0.0 = any)
+    @param inside_port - filter on subscriber port (0 = any; host-order)
+    @param outside_port - filter on translated port (0 = any; host-order)
+    @param remote_port - filter on remote port (0 = any; host-order)
+    @param proto - filter on IP protocol, IP_PROTOCOL_* (0 = any)
+    @param pool_id - filter on pool (0 = any)
+    @param start_index - resume cursor; session pool index to start from (0 = begin)
+    @param limit - max sessions to emit this page (0 = plugin default)
+*/
+define osvbng_cgnat_session_dump
+{
+  u32 client_index;
+  u32 context;
+
+  vl_api_ip4_address_t inside_ip;
+  vl_api_ip4_address_t outside_ip;
+  vl_api_ip4_address_t remote_ip;
+  u16 inside_port;
+  u16 outside_port;
+  u16 remote_port;
+  u8 proto;
+  u32 pool_id;
+  u32 start_index;
+  u32 limit;
+};
+
+/** \brief One active CGNAT session. Ports host-order; age is seconds since the
+    session was last active (computed at dump time). */
+define osvbng_cgnat_session_details
+{
+  u32 context;
+  u32 session_index;
+  u32 pool_id;
+  vl_api_ip4_address_t inside_ip;
+  vl_api_ip4_address_t outside_ip;
+  vl_api_ip4_address_t remote_ip;
+  u16 inside_port;
+  u16 outside_port;
+  u16 remote_port;
+  u8 proto;
+  u8 alg_flags;
+  u32 inside_fib_index;
+  u32 mapping_index;
+  f64 age;
+  u32 timeout;
+  u64 total_pkts;
+  u64 total_bytes;
+};
+
+/** \brief Count active CGNAT sessions (global, O(1) — no table walk). */
+define osvbng_cgnat_session_count
+{
+  u32 client_index;
+  u32 context;
+};
+
+define osvbng_cgnat_session_count_reply
+{
+  u32 context;
+  i32 retval;
+  u64 total;
+};
+
+/*
+ * Local Variables:
+ * eval: (c-set-style "gnu")
+ * End:
+ */
