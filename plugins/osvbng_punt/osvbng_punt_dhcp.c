@@ -75,6 +75,18 @@ osvbng_punt_dhcp_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  b0 = vlib_get_buffer (vm, bi0);
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
+	  /* The UDP port registration is global, so frames reach this
+	   * node from every interface; punt only from interfaces the
+	   * control plane enabled, or a DHCP relay elsewhere on the box
+	   * would be punted to us. */
+	  if (!hash_get (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_DHCPV4],
+			 sw_if_index0))
+	    {
+	      vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
+					       n_left_to_next, bi0, next0);
+	      continue;
+	    }
+
 	  i16 rewind = sizeof (udp_header_t) + sizeof (ip4_header_t) + sizeof (ethernet_header_t);
 
 	  if (b0->flags & VNET_BUFFER_F_VLAN_2_DEEP)

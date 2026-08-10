@@ -106,7 +106,16 @@ osvbng_punt_l2tp_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  l2tp_hdr = vlib_buffer_get_current (b0);
 	  is_control = (l2tp_hdr[0] & L2TPV2_FLAG_T_MASK) != 0;
 
-	  if (is_control)
+	  if (is_control &&
+	      !hash_get (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_L2TP],
+			 sw_if_index0))
+	    {
+	      /* Control frame on an interface with no L2TP punt: the global
+	       * port registration delivered it, but this is not our
+	       * subscriber. Drop rather than punt someone else's L2TP. */
+	      next0 = OSVBNG_PUNT_L2TP_NEXT_DROP;
+	    }
+	  else if (is_control)
 	    {
 	      /* Control message: rewind to full L2 frame and hand off to
 	       * userspace via the existing SHM channel. Behaviour

@@ -85,6 +85,16 @@ osvbng_punt_dhcp6_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  b0 = vlib_get_buffer (vm, bi0);
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
+	  /* Global UDP registration reaches this node from every
+	   * interface; punt only where the control plane enabled it. */
+	  if (!hash_get (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_DHCPV6],
+			 sw_if_index0))
+	    {
+	      vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
+					       n_left_to_next, bi0, next0);
+	      continue;
+	    }
+
 	  /* Buffer points to UDP payload, rewind to include UDP + IPv6 + Ethernet */
 	  i16 rewind = sizeof (udp_header_t) + sizeof (ip6_header_t) +
 	    sizeof (ethernet_header_t);
