@@ -13,9 +13,47 @@
  * limitations under the License.
  */
 
-option version = "1.0.0";
+option version = "1.1.0";
 
 import "vnet/interface_types.api";
+
+/** \brief Discover what this punt plugin supports and where its shared
+    memory lives. Any control plane asks this before attaching, so it
+    never assumes the shm protocol version or geometry; a control plane
+    built against a different version fails loudly here rather than
+    misreading descriptors.
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+*/
+define osvbng_punt_capabilities_get
+{
+  u32 client_index;
+  u32 context;
+};
+
+/** \brief Punt capabilities and shared memory geometry
+    @param context - sender context, to match reply w/ request
+    @param retval - 0 on success
+    @param shm_version - node-internal shm protocol version
+    @param supported_protocols - bitmap, bit N set means protocol N punts
+    @param punt_ring_size - descriptors in the punt ring
+    @param egress_ring_size - descriptors in the egress ring
+    @param slot_size - bytes per frame slot
+    @param shm_path - shared memory region path
+    @param event_socket - unix socket that hands out the eventfds
+*/
+define osvbng_punt_capabilities_get_reply
+{
+  u32 context;
+  i32 retval;
+  u32 shm_version;
+  u32 supported_protocols;
+  u32 punt_ring_size;
+  u32 egress_ring_size;
+  u32 slot_size;
+  string shm_path[256];
+  string event_socket[256];
+};
 
 /** \brief Enable/disable OSVBNG punt for a protocol on an interface
     @param client_index - opaque cookie to identify the sender
