@@ -41,6 +41,13 @@ you touch.
 - Rig scripts own their containers: named, cleaned on any exit. Never
   `exec docker run` from a script and never leave a privileged VPP
   container to a killed client.
+- The loop is edit on the host, build in the container: change a
+  plugin, `make vpp-dev`, load the .so in a VPP smoke to check. The
+  build never uses a host toolchain. `.devcontainer/` opens the same
+  builder image for humans who want clangd navigation against the VPP
+  tree; there `make vpp-dev` builds in place (OSVBNG_IN_BUILDER) rather
+  than spawning a nested container. A plugin .so change needs a VPP
+  restart; nothing hot-reloads.
 
 ## The two execution contexts
 

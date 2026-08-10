@@ -16,6 +16,19 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source build/builder.sh
 
+# Already inside the builder image (the devcontainer sets this): run the
+# inner loop directly against the mounted /work and /ccache volumes.
+# Spawning docker from here would be nested, and would bind host paths
+# the daemon cannot see; the tree and ccache are already mounted, so
+# build in place. Same volumes as a host-spawned build, same result.
+if [ -n "${OSVBNG_IN_BUILDER:-}" ]; then
+  export VPP_DEV_BUILD="${VPP_DEV_BUILD:-release}"
+  export VPP_DEV_TARGET="${VPP_DEV_TARGET:-}"
+  export PLUGINS_DIR="$PWD/plugins"
+  export GLUE="$PWD/build/glue-plugins.sh"
+  exec bash build/inner-dev.sh
+fi
+
 ensure_builder
 
 NAME=osvbng-vpp-dev

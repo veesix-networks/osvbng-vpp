@@ -1,0 +1,48 @@
+// Copyright 2026 The osvbng Authors
+// Licensed under the GNU General Public License v3.0 or later.
+// SPDX-License-Identifier: GPL-3.0-or-later
+//
+// Opens the repo inside the pinned build image, so an IDE navigates
+// plugin sources against the exact VPP tree they compile in and a
+// terminal builds in place with no nested docker. The primary loop is
+// still edit-on-host plus `make vpp-dev`; this is for code navigation
+// and an in-container shell. See README "Editing in an IDE".
+{
+  "name": "osvbng-vpp",
+
+  // Reuse the image the make targets build, not a second toolchain.
+  // initializeCommand runs on the host first and builds it (and the
+  // volumes) if absent, mirroring builder.sh's ensure_builder.
+  "image": "osvbng-vpp-builder:v26.06",
+  "initializeCommand": "bash build/ensure-builder.sh",
+
+  // VPP needs hugepages and raw device access to run for a smoke test;
+  // the same reason the perf and build containers run privileged.
+  "runArgs": ["--privileged"],
+
+  "workspaceFolder": "/workspaces/osvbng-vpp",
+
+  // The VPP source tree and ccache live in the same named volumes a
+  // host `make vpp-dev` uses. An in-container build and a host build
+  // are therefore the same build against the same tree.
+  "mounts": [
+    "source=osvbng-vpp-work,target=/work,type=volume",
+    "source=osvbng-vpp-ccache,target=/ccache,type=volume"
+  ],
+
+  // OSVBNG_IN_BUILDER tells `make vpp-dev` it is already inside the
+  // builder and should run the inner loop directly (build/dev.sh).
+  "containerEnv": {
+    "OSVBNG_IN_BUILDER": "1",
+    "CCACHE_DIR": "/ccache"
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": ["llvm-vs-code-extensions.vscode-clangd"],
+      "settings": {
+        "clangd.arguments": ["--background-index", "--header-insertion=never"]
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+# Copyright 2026 The osvbng Authors
+# Licensed under the GNU General Public License v3.0 or later.
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# VPP ships no compile_commands.json and its tree lives in the build
+# container at /work/vpp, so clangd needs the header roots named here.
+# These paths resolve only inside the devcontainer; on a bare host they
+# are absent and navigation degrades to nothing, which is harmless.
+# Generated .api headers appear under the build tree after the first
+# `make vpp-dev`.
+CompileFlags:
+  Add:
+    - -I/work/vpp/src
+    - -I/work/vpp/src/plugins
+    - -I/work/vpp/build-root/build-vpp-native/vpp/CMakeFiles/plugins
+    - -I/work/vpp/build-root/install-vpp-native/vpp/include
+    - -Wno-unknown-warning-option
