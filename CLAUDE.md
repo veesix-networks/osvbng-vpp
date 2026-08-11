@@ -49,6 +49,27 @@ you touch.
   than spawning a nested container. A plugin .so change needs a VPP
   restart; nothing hot-reloads.
 
+## Smoke a plugin without the daemon
+
+After `make vpp-dev`, the .so is under
+`$B/lib/x86_64-linux-gnu/vpp_plugins` where
+`B=/work/vpp/build-root/build-vpp-native/vpp`. Boot VPP on that tree
+(`plugins { path $B/... plugin dpdk_plugin.so { disable } plugin
+osvbng_punt_plugin.so { enable } }`, a `cli-listen` socket, dpdk off)
+and drive it with `vppctl`. Works from the host or inside the
+devcontainer; both need `--privileged` for hugepages and raw devices.
+
+What a CLI-only smoke can and cannot enable: `osvbng punt enable` sets
+the per-interface gating hash and nothing else. Punts hooked at
+ethertype registration (ARP, PPPoE, ND) traverse from a CLI enable, so
+they are the way to smoke the ring, counter and policer path. Punts
+that need a port or protocol registration (DHCPv4/v6, L2TP) get it only
+from the binapi enable the daemon sends; over CLI they hit "no
+listener" and never reach the punt node. A pure-VPP rig therefore
+proves mechanism (a punt lands in the right per-thread ring); punt
+correctness and performance under real enablement are an osvbng-level
+test with the daemon driving the binapi, not a VPP-only rig.
+
 ## The two execution contexts
 
 Every design and review decision starts with: which context does this
@@ -160,3 +181,8 @@ patches/README.md and context ADR 0002.
   die in ip4-lookup before the punt node ever sees them.
 - Spinlocks or barrier_sync on hot paths; fmt-style formatting in
   binapi handlers; DPOs holding pointers into vecs (store indices).
+- Trusting a CLI `osvbng punt enable` to fully enable a protocol: it
+  sets the gating hash only, and the UDP/port registration rides the
+  binapi enable. A DHCP or L2TP smoke over CLI measures a punt node
+  that never runs; use ARP/PPPoE/ND to smoke over CLI, or drive the
+  binapi for the port-registered protocols.
