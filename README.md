@@ -24,6 +24,16 @@ make vpp-perf    # per-node cycle regression rig
 `build/dev.sh` documents the dev-loop knobs (debug tree, single
 target).
 
+## Editing in an IDE
+
+`.devcontainer/` opens the repo in the pinned build image (in VS Code,
+Reopen in Container). VPP's headers resolve for clangd, and `make
+vpp-dev` builds in place against the same work and ccache volumes a
+host build uses, so an in-container build and a host build are the same
+build. Editing on the host and running `make vpp-dev` stays the primary
+loop; the devcontainer adds code navigation and an in-container shell,
+it does not replace the loop.
+
 ## Layout
 
 ```

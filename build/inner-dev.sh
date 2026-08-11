@@ -34,7 +34,9 @@ cd /work/vpp
 # the stamp VPP's build targets expect is a statement of fact here.
 mkdir -p build-root && touch build-root/.deps.ok
 
-bash /glue-plugins.sh
+# Docker mode mounts these at fixed paths; the devcontainer runs this
+# script straight from the workspace and points them at the checkout.
+bash "${GLUE:-/glue-plugins.sh}" "${PLUGINS_DIR:-/plugins}"
 
 # The stamp tracks what was actually glued, not what sits in /plugins:
 # a directory the glue skipped must not force a cmake regeneration on
