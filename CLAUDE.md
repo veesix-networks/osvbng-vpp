@@ -17,6 +17,10 @@ you touch.
   build when they differ).
 - Conventional Commits, title only, imperative, no attribution
   trailers of any kind.
+- Line wrapping matches what renders the text: commit bodies wrap at
+  about 72, PR and issue descriptions are Markdown and are not
+  hard-wrapped (one line per paragraph), a committed .md keeps its
+  existing wrap. Full rule in osvbng-context CLAUDE.md.
 - Comments are for what code cannot say: the invariant, the why, the
   constraint, the ADR or RFC section that governs. Plain engineering
   language. Never narrate what a line does, never pad ("simply",
