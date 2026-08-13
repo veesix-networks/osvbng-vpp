@@ -291,6 +291,17 @@ osvbng_srg_send_garp_batch (vlib_main_t *vm, u8 *srg_name,
 
 	  vlib_buffer_reset (b);
 
+	  /* A tagged GARP is 46 to 50 bytes, under the Ethernet minimum.
+	   * veth and af_packet carry runts, but DPDK/virtio NICs count
+	   * tx undersize and drop them (issue 417 follow-up), so pad. */
+	  if (b->current_length < ETHERNET_MIN_PACKET_BYTES)
+	    {
+	      u32 pad = ETHERNET_MIN_PACKET_BYTES - b->current_length;
+	      clib_memset (vlib_buffer_get_current (b) + b->current_length, 0,
+			   pad);
+	      b->current_length = ETHERNET_MIN_PACKET_BYTES;
+	    }
+
 	  to_next[to_frame->n_vectors] = bi[i];
 	  to_frame->n_vectors++;
 	}
