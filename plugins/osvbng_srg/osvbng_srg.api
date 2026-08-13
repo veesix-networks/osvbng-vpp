@@ -6,18 +6,27 @@
  * Subscriber Resilience Group dataplane management.
  */
 
-option version = "1.0.0";
+option version = "2.0.0";
 import "vnet/interface_types.api";
 import "vnet/ethernet/ethernet_types.api";
 import "vnet/ip/ip_types.api";
 
 /** \brief GARP/NA entry for batch send
-    @param sw_if_index - sub-interface to send on
+    @param sw_if_index - access interface; the frame transmits on its wire
+           parent (sup hw interface), so a catch-all VLAN sub-interface is
+           acceptable here. Interfaces without a hardware output path
+           (per-session virtual interfaces) are refused and counted.
+    @param outer_vlan - outer 802.1q tag, 0 = untagged
+    @param inner_vlan - inner 802.1q tag, 0 = single tag
+    @param outer_tpid - outer TPID, 0 = 0x8100
     @param ip_address - IPv4 triggers GARP, IPv6 triggers unsolicited NA
 */
 typedef osvbng_srg_garp_entry
 {
   vl_api_interface_index_t sw_if_index;
+  u16 outer_vlan;
+  u16 inner_vlan;
+  u16 outer_tpid;
   vl_api_address_t ip_address;
 };
 

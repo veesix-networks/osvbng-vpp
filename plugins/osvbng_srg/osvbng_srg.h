@@ -64,6 +64,7 @@ typedef struct
   u64 *na_sent;
   u64 *mac_adds;
   u64 *mac_removes;
+  u64 *garp_skipped;
 
   /* API message ID base */
   u16 msg_id_base;
@@ -81,15 +82,5 @@ extern osvbng_srg_main_t osvbng_srg_main;
 int osvbng_srg_add_del (u8 *name, mac_address_t *mac, u32 *sw_if_indices,
 			u32 count, u8 is_add);
 int osvbng_srg_set_state (u8 *name, u8 is_active);
-int osvbng_srg_send_garp_batch (vlib_main_t *vm, u8 *srg_name,
-				u32 *sw_if_indices,
-				ip46_address_t *ip_addrs, u8 *af_flags,
-				u32 count, mac_address_t *virtual_mac);
-
-/* GARP/NA builders */
-void osvbng_srg_garp_build (vlib_buffer_t *b, u32 sw_if_index,
-			    ip4_address_t *ip4, mac_address_t *vmac);
-void osvbng_srg_na_build (vlib_main_t *vm, vlib_buffer_t *b, u32 sw_if_index,
-			  ip6_address_t *ip6, mac_address_t *vmac);
 
 #endif /* __included_osvbng_srg_h__ */

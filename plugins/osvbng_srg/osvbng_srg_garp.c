@@ -19,39 +19,70 @@ static const mac_address_t broadcast_mac = {
 };
 
 /*
- * Build a gratuitous ARP frame for IPv4.
- *
- * Uses ethernet_build_rewrite() which handles VLAN encapsulation (802.1q,
- * QinQ) automatically based on the sub-interface configuration. We then
- * overwrite the source MAC in the Ethernet header with the virtual MAC.
+ * Write the Ethernet header with VLAN tags from the entry. Tags cannot
+ * come from sub-interface rewrite state: subscriber-group sub-interfaces
+ * match vlan-any and ethernet_build_rewrite refuses those; the control
+ * plane knows each session's exact encap and sends it in the entry.
+ * Mirrors the encap cases of the session dataplane: QinQ, single outer,
+ * single inner, untagged.
  */
-void
-osvbng_srg_garp_build (vlib_buffer_t *b, u32 sw_if_index,
-		       ip4_address_t *ip4, mac_address_t *vmac)
+static u32
+garp_l2_header (u8 *p, mac_address_t *vmac, const u8 *dst_mac,
+		osvbng_srg_garp_entry_arg_t *e, u16 ethertype)
 {
-  vnet_main_t *vnm = vnet_get_main ();
-  ethernet_header_t *eth;
-  ethernet_arp_header_t *arp;
-  int rewrite_bytes;
-  u8 *rewrite;
+  ethernet_header_t *eth = (ethernet_header_t *) p;
+  u8 *cur = p + sizeof (*eth);
+  u16 outer_tpid = e->outer_tpid ? e->outer_tpid : ETHERNET_TYPE_VLAN;
 
-  eth = vlib_buffer_get_current (b);
-
-  rewrite =
-    ethernet_build_rewrite (vnm, sw_if_index, VNET_LINK_ARP,
-			    broadcast_mac.bytes);
-  if (PREDICT_FALSE (!rewrite))
-    return;
-
-  rewrite_bytes = vec_len (rewrite);
-  clib_memcpy (eth, rewrite, rewrite_bytes);
-  vec_free (rewrite);
-
-  /* Overwrite source MAC with virtual MAC */
+  clib_memcpy (eth->dst_address, dst_mac, 6);
   clib_memcpy (eth->src_address, vmac->bytes, 6);
 
-  b->current_length += rewrite_bytes;
-  vlib_buffer_advance (b, rewrite_bytes);
+  if (e->outer_vlan && e->inner_vlan)
+    {
+      eth->type = clib_host_to_net_u16 (outer_tpid);
+      ethernet_vlan_header_t *svlan = (ethernet_vlan_header_t *) cur;
+      svlan->priority_cfi_and_id =
+	clib_host_to_net_u16 (e->outer_vlan & 0xFFF);
+      svlan->type = clib_host_to_net_u16 (ETHERNET_TYPE_VLAN);
+      cur += sizeof (*svlan);
+
+      ethernet_vlan_header_t *cvlan = (ethernet_vlan_header_t *) cur;
+      cvlan->priority_cfi_and_id =
+	clib_host_to_net_u16 (e->inner_vlan & 0xFFF);
+      cvlan->type = clib_host_to_net_u16 (ethertype);
+      cur += sizeof (*cvlan);
+    }
+  else if (e->outer_vlan || e->inner_vlan)
+    {
+      u16 vlan_id = e->outer_vlan ? e->outer_vlan : e->inner_vlan;
+      eth->type = clib_host_to_net_u16 (e->outer_vlan ? outer_tpid :
+					ETHERNET_TYPE_VLAN);
+      ethernet_vlan_header_t *tag = (ethernet_vlan_header_t *) cur;
+      tag->priority_cfi_and_id = clib_host_to_net_u16 (vlan_id & 0xFFF);
+      tag->type = clib_host_to_net_u16 (ethertype);
+      cur += sizeof (*tag);
+    }
+  else
+    eth->type = clib_host_to_net_u16 (ethertype);
+
+  return cur - p;
+}
+
+/*
+ * Build a gratuitous ARP: broadcast ARP reply, sender and target both
+ * the subscriber IP, both MACs pointing at the virtual MAC.
+ */
+static void
+osvbng_srg_garp_build (vlib_buffer_t *b, osvbng_srg_garp_entry_arg_t *e,
+		       mac_address_t *vmac)
+{
+  ethernet_arp_header_t *arp;
+  u32 l2_len;
+
+  l2_len = garp_l2_header (vlib_buffer_get_current (b), vmac,
+			   broadcast_mac.bytes, e, ETHERNET_TYPE_ARP);
+  b->current_length += l2_len;
+  vlib_buffer_advance (b, l2_len);
 
   arp = vlib_buffer_get_current (b);
   b->current_length += sizeof (*arp);
@@ -64,9 +95,9 @@ osvbng_srg_garp_build (vlib_buffer_t *b, u32 sw_if_index,
   arp->n_l3_address_bytes = 4;
   arp->opcode = clib_host_to_net_u16 (ETHERNET_ARP_OPCODE_reply);
   arp->ip4_over_ethernet[0].mac = *vmac;
-  arp->ip4_over_ethernet[0].ip4 = *ip4;
+  arp->ip4_over_ethernet[0].ip4 = e->ip.ip4;
   arp->ip4_over_ethernet[1].mac = broadcast_mac;
-  arp->ip4_over_ethernet[1].ip4 = *ip4;
+  arp->ip4_over_ethernet[1].ip4 = e->ip.ip4;
 }
 
 /*
@@ -76,38 +107,24 @@ osvbng_srg_garp_build (vlib_buffer_t *b, u32 sw_if_index,
  * Source: link-local derived from vMAC via EUI-64.
  * ICMPv6 NA with OVERRIDE | ROUTER flags, target link-layer address option.
  */
-void
-osvbng_srg_na_build (vlib_main_t *vm, vlib_buffer_t *b, u32 sw_if_index,
-		     ip6_address_t *ip6, mac_address_t *vmac)
+static void
+osvbng_srg_na_build (vlib_main_t *vm, vlib_buffer_t *b,
+		     osvbng_srg_garp_entry_arg_t *e, mac_address_t *vmac)
 {
-  vnet_main_t *vnm = vnet_get_main ();
-  ethernet_header_t *eth;
   ip6_header_t *ip6h;
   icmp6_neighbor_solicitation_or_advertisement_header_t *na;
   icmp6_neighbor_discovery_ethernet_link_layer_address_option_t *ll_opt;
   int payload_length, bogus_length;
-  int rewrite_bytes;
-  u8 *rewrite;
+  u32 l2_len;
   u8 dst_mac[6];
-
-  eth = vlib_buffer_get_current (b);
 
   /* All-nodes multicast MAC: 33:33:00:00:00:01 */
   ip6_multicast_ethernet_address (dst_mac, IP6_MULTICAST_GROUP_ID_all_hosts);
-  rewrite =
-    ethernet_build_rewrite (vnm, sw_if_index, VNET_LINK_IP6, dst_mac);
-  if (PREDICT_FALSE (!rewrite))
-    return;
 
-  rewrite_bytes = vec_len (rewrite);
-  clib_memcpy (eth, rewrite, rewrite_bytes);
-  vec_free (rewrite);
-
-  /* Overwrite source MAC with virtual MAC */
-  clib_memcpy (eth->src_address, vmac->bytes, 6);
-
-  b->current_length += rewrite_bytes;
-  vlib_buffer_advance (b, rewrite_bytes);
+  l2_len = garp_l2_header (vlib_buffer_get_current (b), vmac, dst_mac, e,
+			   ETHERNET_TYPE_IP6);
+  b->current_length += l2_len;
+  vlib_buffer_advance (b, l2_len);
 
   /* IPv6 header */
   ip6h = vlib_buffer_get_current (b);
@@ -145,7 +162,7 @@ osvbng_srg_na_build (vlib_main_t *vm, vlib_buffer_t *b, u32 sw_if_index,
   clib_memset (na, 0, payload_length);
 
   na->icmp.type = ICMP6_neighbor_advertisement;
-  na->target_address = *ip6;
+  na->target_address = e->ip.ip6;
   na->advertisement_flags = clib_host_to_net_u32 (
     ICMP6_NEIGHBOR_ADVERTISEMENT_FLAG_OVERRIDE |
     ICMP6_NEIGHBOR_ADVERTISEMENT_FLAG_ROUTER);
@@ -161,21 +178,48 @@ osvbng_srg_na_build (vlib_main_t *vm, vlib_buffer_t *b, u32 sw_if_index,
 }
 
 /*
+ * Resolve the interface the frame actually transmits on: the wire (sup
+ * hw) parent of the entry's interface. Interfaces registered without a
+ * device tx function (per-session midchain interfaces: IPoE, PPPoE
+ * sessions) keep output_node_index 0, and interface-output dispatches
+ * their zeroed next-slot to local0-output, where the frame dies as
+ * "interface is down" (osvbng issue 417). Those must be refused loudly.
+ * Returns ~0 when the entry cannot transmit.
+ */
+static u32
+garp_tx_sw_if_index (vnet_main_t *vnm, u32 sw_if_index)
+{
+  vnet_hw_interface_t *hw;
+
+  if (!vnet_sw_interface_is_valid (vnm, sw_if_index))
+    return ~0;
+
+  hw = vnet_get_sup_hw_interface (vnm, sw_if_index);
+  if (!hw || hw->output_node_index == 0)
+    return ~0;
+
+  return hw->sw_if_index;
+}
+
+/*
  * Batch send GARP/NA packets.
  *
- * Allocates buffers in VLIB_FRAME_SIZE batches, builds frames, and enqueues
- * to interface-output. VPP handles VLAN encapsulation on the TX path.
- * af_flags: 0 = IPv4 (GARP), 1 = IPv6 (NA).
+ * Allocates buffers in VLIB_FRAME_SIZE batches, builds frames with the
+ * entry's VLAN encap, and enqueues to interface-output on the wire
+ * parent. Entries whose interface cannot transmit are skipped and
+ * counted in garp_skipped; the sent counters only ever cover frames
+ * handed to a real output path.
  */
 int
 osvbng_srg_send_garp_batch (vlib_main_t *vm, u8 *srg_name,
-			    u32 *sw_if_indices, ip46_address_t *ip_addrs,
-			    u8 *af_flags, u32 count,
+			    osvbng_srg_garp_entry_arg_t *entries, u32 count,
 			    mac_address_t *virtual_mac)
 {
   osvbng_srg_main_t *sm = &osvbng_srg_main;
+  vnet_main_t *vnm = vnet_get_main ();
   u32 srg_index = ~0;
   u32 offset = 0;
+  u32 skipped = 0;
 
   /* Look up SRG for counter attribution */
   uword *p = hash_get_mem (sm->srg_by_name, srg_name);
@@ -215,31 +259,39 @@ osvbng_srg_send_garp_batch (vlib_main_t *vm, u8 *srg_name,
 
       for (u32 i = 0; i < batch; i++)
 	{
-	  u32 idx = offset + i;
+	  osvbng_srg_garp_entry_arg_t *e = &entries[offset + i];
 	  vlib_buffer_t *b = vlib_get_buffer (vm, bi[i]);
+	  u32 tx_sw_if_index = garp_tx_sw_if_index (vnm, e->sw_if_index);
+
+	  if (PREDICT_FALSE (tx_sw_if_index == ~0))
+	    {
+	      vlib_buffer_free_one (vm, bi[i]);
+	      skipped++;
+	      if (srg_index != ~0)
+		sm->garp_skipped[srg_index]++;
+	      continue;
+	    }
 
 	  b->flags |= VNET_BUFFER_F_LOCALLY_ORIGINATED;
 	  vnet_buffer (b)->sw_if_index[VLIB_RX] = 0;
-	  vnet_buffer (b)->sw_if_index[VLIB_TX] = sw_if_indices[idx];
+	  vnet_buffer (b)->sw_if_index[VLIB_TX] = tx_sw_if_index;
 
-	  if (af_flags[idx])
-	    {
-	      osvbng_srg_na_build (vm, b, sw_if_indices[idx],
-				   &ip_addrs[idx].ip6, virtual_mac);
-	      if (srg_index != ~0)
-		sm->na_sent[srg_index]++;
-	    }
+	  if (e->is_ip6)
+	    osvbng_srg_na_build (vm, b, e, virtual_mac);
 	  else
+	    osvbng_srg_garp_build (b, e, virtual_mac);
+
+	  if (srg_index != ~0)
 	    {
-	      osvbng_srg_garp_build (b, sw_if_indices[idx],
-				     &ip_addrs[idx].ip4, virtual_mac);
-	      if (srg_index != ~0)
+	      if (e->is_ip6)
+		sm->na_sent[srg_index]++;
+	      else
 		sm->garp_sent[srg_index]++;
 	    }
 
 	  vlib_buffer_reset (b);
 
-	  to_next[i] = bi[i];
+	  to_next[to_frame->n_vectors] = bi[i];
 	  to_frame->n_vectors++;
 	}
 
@@ -248,6 +300,12 @@ osvbng_srg_send_garp_batch (vlib_main_t *vm, u8 *srg_name,
       vec_free (bi);
       offset += batch;
     }
+
+  if (PREDICT_FALSE (skipped > 0))
+    vlib_log_warn (sm->log_class,
+		   "GARP batch: %u of %u entries skipped, interface cannot "
+		   "transmit (session interface instead of access encap?)",
+		   skipped, count);
 
   return 0;
 }

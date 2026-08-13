@@ -73,28 +73,27 @@ vl_api_osvbng_srg_send_garp_t_handler (vl_api_osvbng_srg_send_garp_t *mp)
   u32 srg_index = p[0];
   osvbng_srg_t *srg = pool_elt_at_index (sm->srgs, srg_index);
 
-  u32 *sw_ifs = 0;
-  ip46_address_t *addrs = 0;
-  u8 *af = 0;
+  osvbng_srg_garp_entry_arg_t *entries = 0;
 
   for (u32 i = 0; i < count; i++)
     {
       vl_api_osvbng_srg_garp_entry_t *e = &mp->entries[i];
-      ip46_address_t decoded;
+      osvbng_srg_garp_entry_arg_t arg = { 0 };
       ip46_type_t type;
 
-      vec_add1 (sw_ifs, ntohl (e->sw_if_index));
-      type = ip_address_decode (&e->ip_address, &decoded);
-      vec_add1 (af, (type == IP46_TYPE_IP6) ? 1 : 0);
-      vec_add1 (addrs, decoded);
+      arg.sw_if_index = ntohl (e->sw_if_index);
+      arg.outer_vlan = ntohs (e->outer_vlan);
+      arg.inner_vlan = ntohs (e->inner_vlan);
+      arg.outer_tpid = ntohs (e->outer_tpid);
+      type = ip_address_decode (&e->ip_address, &arg.ip);
+      arg.is_ip6 = (type == IP46_TYPE_IP6) ? 1 : 0;
+      vec_add1 (entries, arg);
     }
 
-  rv = osvbng_srg_send_garp_batch (sm->vlib_main, mp->srg_name, sw_ifs,
-				   addrs, af, count, &srg->virtual_mac);
+  rv = osvbng_srg_send_garp_batch (sm->vlib_main, mp->srg_name, entries,
+				   count, &srg->virtual_mac);
 
-  vec_free (sw_ifs);
-  vec_free (addrs);
-  vec_free (af);
+  vec_free (entries);
 
 reply:
   REPLY_MACRO (VL_API_OSVBNG_SRG_SEND_GARP_REPLY);
