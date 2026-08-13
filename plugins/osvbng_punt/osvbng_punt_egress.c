@@ -115,6 +115,21 @@ VLIB_NODE_FN (osvbng_egress_node)
 	  continue;
 	}
 
+      /* A session teardown races the control plane's last frames (LCP
+       * Terminate-Ack, Echo-Reply): the interface may already be admin
+       * down or parked hidden for reuse. interface-output would drop the
+       * frame anyway - skip the inject instead of transiting a corpse. */
+      {
+	vnet_sw_interface_t *si_tx =
+	  vnet_get_sw_interface (vnm, desc->sw_if_index);
+	if (PREDICT_FALSE (!(si_tx->flags & VNET_SW_INTERFACE_FLAG_ADMIN_UP) ||
+			   (si_tx->flags & VNET_SW_INTERFACE_FLAG_HIDDEN)))
+	  {
+	    tail++;
+	    continue;
+	  }
+      }
+
       hw = vnet_get_sup_hw_interface (vnm, desc->sw_if_index);
       if (PREDICT_FALSE (!hw))
 	{
@@ -149,8 +164,12 @@ VLIB_NODE_FN (osvbng_egress_node)
 	  b->current_length = desc->data_length;
 	}
 
+      /* RX must be a real interface: any later drop indexes per-interface
+       * counters by it, and error-drop does so unchecked - ~0 there is a
+       * wild write and a SIGSEGV. Charge the injected frame to the
+       * interface it leaves through. */
       vnet_buffer (b)->sw_if_index[VLIB_TX] = desc->sw_if_index;
-      vnet_buffer (b)->sw_if_index[VLIB_RX] = ~0;
+      vnet_buffer (b)->sw_if_index[VLIB_RX] = desc->sw_if_index;
 
       if (PREDICT_FALSE (n_trace > 0 &&
 			 vlib_trace_buffer (vm, node, 0, b, 0 /* chain */)))
