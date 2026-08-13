@@ -87,12 +87,23 @@ osvbng_punt_dhcp6_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
 	  /* Global UDP registration reaches this node from every
 	   * interface; punt only where the control plane enabled it. */
+	  /* Same sup resolution as the DHCPv4 node: a session-decapped
+	   * unicast (renew, release) carries the per-session interface
+	   * in RX, whose sup is the enabled encap sub-interface. */
 	  if (!hash_get (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_DHCPV6],
 			 sw_if_index0))
 	    {
-	      vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
-					       n_left_to_next, bi0, next0);
-	      continue;
+	      vnet_sw_interface_t *sw0 = vnet_get_sw_interface_or_null (
+		vnet_get_main (), sw_if_index0);
+	      if (!sw0 || sw0->sup_sw_if_index == sw_if_index0 ||
+		  !hash_get (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_DHCPV6],
+			     sw0->sup_sw_if_index))
+		{
+		  vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
+						   to_next, n_left_to_next,
+						   bi0, next0);
+		  continue;
+		}
 	    }
 
 	  /* Buffer points to UDP payload, rewind to include UDP + IPv6 + Ethernet */

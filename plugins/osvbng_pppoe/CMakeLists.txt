@@ -14,10 +14,7 @@ add_vpp_plugin(osvbng_pppoe
 
   API_FILES
   osvbng_pppoe.api
-)
 
-# Deliberately no LINK_LIBRARIES ppp_plugin: only headers are used (the
-# built .so has no undefined ppp symbols), and a plugin-to-plugin link
-# in the in-tree build records a relative-path NEEDED entry that dlopen
-# resolves against the working directory, which silently prevented this
-# plugin from loading at all.
+  LINK_LIBRARIES
+  ppp_plugin
+)

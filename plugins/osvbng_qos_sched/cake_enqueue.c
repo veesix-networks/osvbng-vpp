@@ -51,11 +51,12 @@ format_cake_enqueue_trace (u8 *s, va_list *args)
 }
 
 static_always_inline void
-cake_flow_evict (vlib_main_t *vm, cake_tin_t *tin, u32 slot)
+cake_flow_evict (vlib_main_t *vm, cake_main_t *cm, cake_sched_t *cs,
+		 cake_tin_t *tin, u32 slot)
 {
   cake_flow_t *ef = &tin->flows[slot];
 
-  cake_flow_ring_free (vm, ef);
+  cake_flow_discard (vm, cm, cs, tin, ef);
 
   if (ef->flow_state == CAKE_FLOW_SPARSE)
     {
@@ -104,6 +105,7 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
   u32 n_enqueued = 0;
   u32 n_dropped = 0;
+  u32 n_agg_backpressure = 0;
 
   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
   vlib_get_buffers (vm, from, bufs, n_left);
@@ -223,7 +225,7 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
       if (PREDICT_FALSE (flow_idx == ~0))
 	{
-	  cake_flow_evict (vm, tin, evict_slot);
+	  cake_flow_evict (vm, cm, cs, tin, evict_slot);
 	  tin->flow_tags[evict_slot] = tag;
 	  flow_idx = evict_slot;
 	  vlib_node_increment_counter (vm, node->node_index,
@@ -254,25 +256,16 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  continue;
 	}
 
-      if (cs->aggregate_index != ~0)
+      if (PREDICT_FALSE (!cake_agg_admit_chain (cm, cs, pkt_len, thread_index)))
 	{
-	  cake_aggregate_t *agg =
-	    pool_elt_at_index (cm->aggregates, cs->aggregate_index);
-	  u32 usage =
-	    __atomic_load_n (&agg->buffer_usage, __ATOMIC_RELAXED);
-	  if (PREDICT_FALSE (usage + pkt_len > agg->buffer_limit))
-	    {
-	      cobalt_queue_full (flow, cs->target_us, cs->p_inc,
-				 (u32) (vlib_time_now (vm) * 1e6));
-	      vlib_buffer_free_one (vm, bi0);
-	      cs->dropped_pkts++;
-	      tin->drops++;
-	      n_dropped++;
-	      vec_elt_at_index (agg->stats, thread_index)->backpressure_events++;
-	      continue;
-	    }
-	  __atomic_fetch_add (&agg->buffer_usage, pkt_len,
-			      __ATOMIC_RELAXED);
+	  cobalt_queue_full (flow, cs->target_us, cs->p_inc,
+			     (u32) (vlib_time_now (vm) * 1e6));
+	  vlib_buffer_free_one (vm, bi0);
+	  cs->dropped_pkts++;
+	  tin->drops++;
+	  n_dropped++;
+	  n_agg_backpressure++;
+	  continue;
 	}
 
       if (PREDICT_FALSE (flow->flow_state == CAKE_FLOW_NONE))
@@ -293,6 +286,9 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
       if (PREDICT_FALSE (cake_flow_queue_len (flow) >= CAKE_FLOW_RING_SIZE))
 	{
+	  /* Charged by aggregate admission above, and this buffer never
+	   * reaches a queue. */
+	  cake_agg_discharge (cm, cs, pkt_len);
 	  cobalt_queue_full (flow, cs->target_us, cs->p_inc,
 			     (u32) (vlib_time_now (vm) * 1e6));
 	  vlib_buffer_free_one (vm, bi0);
@@ -341,6 +337,12 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	    tin->hosts[flow->dst_host_idx].bulk_flow_count++;
 	}
 
+      /* 0->1 active: this scheduler now competes for its parent's rate, so
+       * its weight joins the parent's active sum. Idempotent - the common
+       * case is an already-active scheduler and returns without touching the
+       * parent. */
+      cake_sched_drr_activate (cm, cs);
+
       if (!clib_bitmap_get (cm->per_thread[thread_index].active_bitmap,
 			    cs->sched_index))
 	{
@@ -382,6 +384,10 @@ cake_enqueue_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 			       n_enqueued);
   vlib_node_increment_counter (vm, node->node_index,
 			       CAKE_ERROR_DROPPED_OVERFLOW, n_dropped);
+  if (n_agg_backpressure)
+    vlib_node_increment_counter (vm, node->node_index,
+				 CAKE_ERROR_AGG_BACKPRESSURE,
+				 n_agg_backpressure);
 
   return frame->n_vectors;
 }
