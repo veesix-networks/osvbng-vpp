@@ -10,15 +10,21 @@
 
 #include <osvbng_srg/osvbng_srg.h>
 
-void osvbng_srg_garp_build (vlib_buffer_t *b, u32 sw_if_index,
-			    ip4_address_t *ip4, mac_address_t *vmac);
-
-void osvbng_srg_na_build (vlib_main_t *vm, vlib_buffer_t *b, u32 sw_if_index,
-			  ip6_address_t *ip6, mac_address_t *vmac);
+/* One GARP/NA to build and send. The frame transmits on the wire parent
+ * of sw_if_index; VLAN tags come from the entry, not from sub-interface
+ * rewrite state (catch-all vlan-any sub-interfaces have none). */
+typedef struct
+{
+  u32 sw_if_index;
+  u16 outer_vlan; /* 0 = untagged */
+  u16 inner_vlan; /* 0 = single tag */
+  u16 outer_tpid; /* 0 = 0x8100 */
+  u8 is_ip6;
+  ip46_address_t ip;
+} osvbng_srg_garp_entry_arg_t;
 
 int osvbng_srg_send_garp_batch (vlib_main_t *vm, u8 *srg_name,
-				u32 *sw_if_indices, ip46_address_t *ip_addrs,
-				u8 *af_flags, u32 count,
-				mac_address_t *virtual_mac);
+				osvbng_srg_garp_entry_arg_t *entries,
+				u32 count, mac_address_t *virtual_mac);
 
 #endif /* __included_osvbng_srg_garp_h__ */

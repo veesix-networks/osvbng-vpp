@@ -101,10 +101,12 @@ osvbng_srg_add_del (u8 *name, mac_address_t *mac, u32 *sw_if_indices,
       vec_validate (sm->na_sent, srg_index);
       vec_validate (sm->mac_adds, srg_index);
       vec_validate (sm->mac_removes, srg_index);
+      vec_validate (sm->garp_skipped, srg_index);
       sm->garp_sent[srg_index] = 0;
       sm->na_sent[srg_index] = 0;
       sm->mac_adds[srg_index] = 0;
       sm->mac_removes[srg_index] = 0;
+      sm->garp_skipped[srg_index] = 0;
 
       vlib_log_notice (sm->log_class,
 		       "SRG '%s' added with %u interfaces, vMAC %U",
@@ -295,35 +297,37 @@ show_osvbng_srg_command_fn (vlib_main_t *vm, unformat_input_t *input,
       srg_index = p[0];
       srg = pool_elt_at_index (sm->srgs, srg_index);
 
-      vlib_cli_output (vm, "%-20s %-20s %-8s %-6s %-10s %-10s %-10s %-10s",
+      vlib_cli_output (vm, "%-20s %-20s %-8s %-6s %-10s %-10s %-10s %-10s %-10s",
 		       "Name", "Virtual MAC", "State", "IFs", "GARP Sent",
-		       "NA Sent", "MAC Adds", "MAC Dels");
-      vlib_cli_output (vm, "%-20s %-20U %-8s %-6u %-10llu %-10llu %-10llu %-10llu",
+		       "NA Sent", "MAC Adds", "MAC Dels", "GARP Skip");
+      vlib_cli_output (vm,
+		       "%-20s %-20U %-8s %-6u %-10llu %-10llu %-10llu %-10llu %-10llu",
 		       srg->srg_name, format_mac_address_t,
 		       &srg->virtual_mac,
 		       srg->is_active ? "active" : "standby",
 		       vec_len (srg->sw_if_indices),
 		       sm->garp_sent[srg_index], sm->na_sent[srg_index],
-		       sm->mac_adds[srg_index], sm->mac_removes[srg_index]);
+		       sm->mac_adds[srg_index], sm->mac_removes[srg_index],
+		       sm->garp_skipped[srg_index]);
 
       vec_free (name);
     }
   else
     {
-      vlib_cli_output (vm, "%-20s %-20s %-8s %-6s %-10s %-10s %-10s %-10s",
+      vlib_cli_output (vm, "%-20s %-20s %-8s %-6s %-10s %-10s %-10s %-10s %-10s",
 		       "Name", "Virtual MAC", "State", "IFs", "GARP Sent",
-		       "NA Sent", "MAC Adds", "MAC Dels");
+		       "NA Sent", "MAC Adds", "MAC Dels", "GARP Skip");
 
       pool_foreach (srg, sm->srgs)
 	{
 	  srg_index = srg - sm->srgs;
 	  vlib_cli_output (
-	    vm, "%-20s %-20U %-8s %-6u %-10llu %-10llu %-10llu %-10llu",
+	    vm, "%-20s %-20U %-8s %-6u %-10llu %-10llu %-10llu %-10llu %-10llu",
 	    srg->srg_name, format_mac_address_t, &srg->virtual_mac,
 	    srg->is_active ? "active" : "standby",
 	    vec_len (srg->sw_if_indices), sm->garp_sent[srg_index],
 	    sm->na_sent[srg_index], sm->mac_adds[srg_index],
-	    sm->mac_removes[srg_index]);
+	    sm->mac_removes[srg_index], sm->garp_skipped[srg_index]);
 	}
     }
 
