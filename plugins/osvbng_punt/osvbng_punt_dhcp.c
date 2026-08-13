@@ -32,6 +32,24 @@ format_osvbng_punt_dhcp_trace (u8 *s, va_list *args)
 #define foreach_osvbng_punt_dhcp_next \
   _(DROP, "error-drop")
 
+#define foreach_osvbng_punt_dhcp_error                                        \
+  _ (PUNTED, "DHCP packets punted")                                           \
+  _ (NOT_ENABLED, "DHCP packets dropped (punt not enabled on interface)")
+
+typedef enum
+{
+#define _(s, n) OSVBNG_PUNT_DHCP_ERROR_##s,
+  foreach_osvbng_punt_dhcp_error
+#undef _
+    OSVBNG_PUNT_DHCP_N_ERROR,
+} osvbng_punt_dhcp_error_t;
+
+static char *osvbng_punt_dhcp_error_strings[] = {
+#define _(s, n) n,
+  foreach_osvbng_punt_dhcp_error
+#undef _
+};
+
 typedef enum
 {
 #define _(s, n) OSVBNG_PUNT_DHCP_NEXT_##s,
@@ -78,13 +96,31 @@ osvbng_punt_dhcp_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  /* The UDP port registration is global, so frames reach this
 	   * node from every interface; punt only from interfaces the
 	   * control plane enabled, or a DHCP relay elsewhere on the box
-	   * would be punted to us. */
+	   * would be punted to us.
+	   *
+	   * Broadcast (discover, request) arrives with RX naming the
+	   * encap sub-interface the control plane enabled. A routed
+	   * unicast (renew, release) was decapped by a session plugin
+	   * first, so RX names the per-session interface instead; its
+	   * sup is its encap (the session parenting contract), so one
+	   * hop resolves the enablement. Dropping these silently held
+	   * every QinQ IPoE subscriber's lease forever. */
 	  if (!hash_get (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_DHCPV4],
 			 sw_if_index0))
 	    {
-	      vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
-					       n_left_to_next, bi0, next0);
-	      continue;
+	      vnet_sw_interface_t *sw0 = vnet_get_sw_interface_or_null (
+		vnet_get_main (), sw_if_index0);
+	      if (!sw0 || sw0->sup_sw_if_index == sw_if_index0 ||
+		  !hash_get (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_DHCPV4],
+			     sw0->sup_sw_if_index))
+		{
+		  b0->error =
+		    node->errors[OSVBNG_PUNT_DHCP_ERROR_NOT_ENABLED];
+		  vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
+						   to_next, n_left_to_next,
+						   bi0, next0);
+		  continue;
+		}
 	    }
 
 	  i16 rewind = sizeof (udp_header_t) + sizeof (ip4_header_t) + sizeof (ethernet_header_t);
@@ -98,6 +134,7 @@ osvbng_punt_dhcp_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
 	  osvbng_punt_send_packet (vm, b0, sw_if_index0,
 				   OSVBNG_PUNT_PROTO_DHCPV4);
+	  b0->error = node->errors[OSVBNG_PUNT_DHCP_ERROR_PUNTED];
 
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE) &&
 			     (b0->flags & VLIB_BUFFER_IS_TRACED)))
@@ -132,6 +169,8 @@ VLIB_REGISTER_NODE (osvbng_punt_dhcp_node) = {
   .vector_size = sizeof (u32),
   .format_trace = format_osvbng_punt_dhcp_trace,
   .type = VLIB_NODE_TYPE_INTERNAL,
+  .n_errors = OSVBNG_PUNT_DHCP_N_ERROR,
+  .error_strings = osvbng_punt_dhcp_error_strings,
   .n_next_nodes = OSVBNG_PUNT_DHCP_N_NEXT,
   .next_nodes = {
 #define _(s, n) [OSVBNG_PUNT_DHCP_NEXT_##s] = n,
