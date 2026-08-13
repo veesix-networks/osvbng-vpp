@@ -1,0 +1,42 @@
+Problem: af_packet RX reconstructs a kernel-stripped VLAN tag with a
+hardcoded 0x8100 TPID, discarding the TPID the kernel reports in
+tp_vlan_tpid. An 802.1ad outer tag therefore re-enters the graph as
+802.1q and dot1ad sub-interfaces never match. On veth the kernel
+always lifts the outermost tag into metadata regardless of ethtool
+offload settings, so QinQ subscribers behind af_packet are unreachable.
+Upstream: not submitted; to go to fd.io gerrit
+Upstream-Status: local-only
+
+diff --git a/src/plugins/af_packet/node.c b/src/plugins/af_packet/node.c
+index 4e1b6c0ac..60a04bacb 100644
+--- a/src/plugins/af_packet/node.c
++++ b/src/plugins/af_packet/node.c
+@@ -379,8 +379,12 @@ af_packet_v3_device_input_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
+ 			  vlan->priority_cfi_and_id =
+ 			    clib_host_to_net_u16 (tph->hv1.tp_vlan_tci);
+ 			  vlan->type = eth->type;
+-			  eth->type =
+-			    clib_host_to_net_u16 (ETHERNET_TYPE_VLAN);
++			  u16 tpid = ETHERNET_TYPE_VLAN;
++#ifdef TP_STATUS_VLAN_TPID_VALID
++			  if (tph->tp_status & TP_STATUS_VLAN_TPID_VALID)
++			    tpid = tph->hv1.tp_vlan_tpid;
++#endif
++			  eth->type = clib_host_to_net_u16 (tpid);
+ 			  vlan_len = sizeof (ethernet_vlan_header_t);
+ 			  bytes_copied = sizeof (ethernet_header_t);
+ 			}
+@@ -633,7 +637,12 @@ af_packet_v2_device_input_fn (vlib_main_t *vm, vlib_node_runtime_t *node,
+ 		      vlan->priority_cfi_and_id =
+ 			clib_host_to_net_u16 (tph->tp_vlan_tci);
+ 		      vlan->type = eth->type;
+-		      eth->type = clib_host_to_net_u16 (ETHERNET_TYPE_VLAN);
++		      u16 tpid = ETHERNET_TYPE_VLAN;
++#ifdef TP_STATUS_VLAN_TPID_VALID
++		      if (tph->tp_status & TP_STATUS_VLAN_TPID_VALID)
++			tpid = tph->tp_vlan_tpid;
++#endif
++		      eth->type = clib_host_to_net_u16 (tpid);
+ 		      vlan_len = sizeof (ethernet_vlan_header_t);
+ 		      bytes_copied = sizeof (ethernet_header_t);
+ 		    }
