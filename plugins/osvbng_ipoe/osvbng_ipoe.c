@@ -292,6 +292,20 @@ vnet_ipoe_add_del_session (vnet_ipoe_add_del_session_args_t *a,
   s->hw_if_index = hw_if_index;
   s->sw_if_index = sw_if_index = hi->sw_if_index;
 
+  /* Parent on the encap sub-interface so a sup_sw_if_index walk reaches the
+   * port. Must stay after vnet_register_interface(): its create-time callbacks
+   * must still observe sup == self (linux-cp reads sup != self as a subif).
+   *
+   * Cross-plugin contract: the encap sub-interface must outlive every
+   * session parented on it. Nothing in VPP enforces that; a consumer
+   * walking the sup chain (the QoS scheduler resolving its aggregate)
+   * dereferences this index raw. The control plane deletes sessions
+   * before their encap interface. */
+  {
+    vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, sw_if_index);
+    si->sup_sw_if_index = a->encap_if_index;
+  }
+
   vnet_hw_interface_set_flags (vnm, hw_if_index,
                                VNET_HW_INTERFACE_FLAG_LINK_UP);
   vnet_sw_interface_set_flags (vnm, sw_if_index,
