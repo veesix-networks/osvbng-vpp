@@ -29,6 +29,20 @@ typedef struct
   u32 flow_idx;
 } cake_dequeue_trace_t;
 
+/* GATE_CLOSED and DRR_BLOCKED are distinct from EMPTY because they make no
+ * progress: retrying the same flow before now_ns is re-sampled would spin.
+ * They are distinct from each other because they mean different things to an
+ * operator - the parent is at its configured rate, versus this child has
+ * spent its share of it. */
+typedef enum
+{
+  CAKE_DEQ_EMPTY = 0,
+  CAKE_DEQ_SENT,
+  CAKE_DEQ_DROPPED,
+  CAKE_DEQ_GATE_CLOSED,
+  CAKE_DEQ_DRR_BLOCKED,
+} cake_deq_result_t;
+
 static u8 *
 format_cake_dequeue_trace (u8 *s, va_list *args)
 {
@@ -50,6 +64,7 @@ cake_flow_reclaim (vlib_main_t *vm, cake_tin_t *tin, cake_sched_t *cs,
   cobalt_queue_empty (f, cs->target_us, cs->p_dec, cs->interval_us, now_us);
 
   cake_flow_list_remove (list_head, list_tail, tin->flows, flow_idx);
+  /* Callers check the queue is empty, so there is no credit to release. */
   cake_flow_ring_free (vm, f);
 
   if (f->flow_state == CAKE_FLOW_SPARSE)
@@ -83,7 +98,7 @@ cake_select_flow (cake_tin_t *tin)
   return ~0;
 }
 
-static_always_inline u8
+static_always_inline cake_deq_result_t
 cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
 		  cake_main_t *cm, cake_sched_t *cs, cake_tin_t *tin,
 		  cake_flow_t *flow, u32 now_us, u64 now_ns,
@@ -91,23 +106,44 @@ cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
 		  u32 *n_ecn_marks, u32 *random_seed)
 {
   if (cake_flow_queue_len (flow) == 0)
-    return 0;
+    return CAKE_DEQ_EMPTY;
 
   u32 bi = flow->ring[flow->head & CAKE_FLOW_RING_MASK];
-  flow->head++;
 
-  /* Queued packets have long since fallen out of cache and we touch the L3
-   * header below, so warm the next one in this flow while we work on this. */
-  if (cake_flow_queue_len (flow) > 0)
+  /* Queued packets have long since fallen out of cache and we read this one's
+   * header immediately below, so warm the next one in this flow first rather
+   * than issuing the prefetch behind that stall. */
+  if (cake_flow_queue_len (flow) > 1)
     {
       vlib_buffer_t *nb = vlib_get_buffer (
-	vm, flow->ring[flow->head & CAKE_FLOW_RING_MASK]);
+	vm, flow->ring[(flow->head + 1) & CAKE_FLOW_RING_MASK]);
       vlib_prefetch_buffer_header (nb, LOAD);
       CLIB_PREFETCH (nb->data, CLIB_CACHE_LINE_BYTES, LOAD);
     }
 
   vlib_buffer_t *b = vlib_get_buffer (vm, bi);
   u32 pkt_len = vlib_buffer_length_in_chain (vm, b);
+  u32 adj_len = cake_overhead_adjust (cs, pkt_len);
+
+  /* DRR eligibility against the immediate parent, before COBALT and before
+   * the ECN mark. Its only inputs are the head packet's length and
+   * owner-local state, so a blocked visit mutates no AQM state at all.
+   *
+   * This placement is load-bearing. A DRR-blocked child retries every
+   * polling dispatch - three orders of magnitude more often than rounds turn
+   * - and checked after the AQM like the rate gate below, each retry would
+   * re-run cobalt_should_drop on the same head packet, escalate codel_count,
+   * inflate ecn_marks and over-drop once the child unblocks. sch_cake
+   * likewise does not run its AQM while the shaper holds the qdisc closed;
+   * AQM action is deferred at most one round. */
+  cake_drr_admit_t drr = cake_sched_drr_admit (cm, cs, now_ns);
+  if (PREDICT_FALSE (drr == CAKE_DRR_BLOCKED))
+    {
+      cs->drr_blocked++;
+      return CAKE_DEQ_DRR_BLOCKED;
+    }
+
+  flow->head++;
 
   u32 enqueue_us = cake_buffer_enqueue_time (b);
   u32 sojourn_us = now_us - enqueue_us;
@@ -143,7 +179,7 @@ cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
       (*n_aqm_drops)++;
       cake_agg_discharge (cm, cs, pkt_len);
       vlib_buffer_free_one (vm, bi);
-      return 0;
+      return CAKE_DEQ_DROPPED;
     }
 
   if (PREDICT_FALSE (ecn_marked))
@@ -153,15 +189,25 @@ cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
       (*n_ecn_marks)++;
     }
 
-  u32 adj_len = cake_overhead_adjust (cs, pkt_len);
+  /* The parent chain's rate gates and, where there is a tier above the
+   * immediate parent, that tier's own DRR reserve. */
+  cake_parent_result_t pr =
+    cake_agg_dequeue_gate (cm, cs, adj_len, now_ns, vm->thread_index);
 
-  if (!cake_agg_dequeue_gate (cm, cs, adj_len, now_ns, vm->thread_index))
+  if (PREDICT_FALSE (pr != CAKE_PARENT_OK))
     {
       flow->head--;
-      return 0;
+      if (pr == CAKE_PARENT_DRR_BLOCKED)
+	{
+	  cs->drr_blocked++;
+	  return CAKE_DEQ_DRR_BLOCKED;
+	}
+      cs->parent_blocked++;
+      return CAKE_DEQ_GATE_CLOSED;
     }
 
-  cs->global_shaper_time_ns += (u64) adj_len * cs->rate_ns_per_byte;
+  cs->global_shaper_time_ns +=
+    cake_cost_ns (adj_len, cs->rate_ns_per_byte_scaled);
   u64 max_shaper = now_ns + (u64) 150000000;
   if (cs->global_shaper_time_ns > max_shaper)
     cs->global_shaper_time_ns = max_shaper;
@@ -173,6 +219,12 @@ cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
   cs->dequeued_pkts++;
   cs->dequeued_bytes += pkt_len;
   cake_agg_discharge (cm, cs, pkt_len);
+
+  /* The send has cleared every gate, so charge the share it consumed. Escape
+   * admissions are charged like any other; only CAKE_DRR_UNARBITRATED goes
+   * uncharged. */
+  if (PREDICT_TRUE (drr == CAKE_DRR_ADMIT))
+    cake_drr_local_charge (&cs->drr, adj_len);
 
   b->flags |= CAKE_BUFFER_F_SCHEDULED;
   u32 sw_if_index = vnet_buffer (b)->sw_if_index[VLIB_TX];
@@ -192,7 +244,7 @@ cake_dequeue_one (vlib_main_t *vm, vlib_node_runtime_t *node,
     }
 
   *out_bi = bi;
-  return 1;
+  return CAKE_DEQ_SENT;
 }
 
 VLIB_NODE_FN (cake_dequeue_node)
@@ -222,7 +274,22 @@ VLIB_NODE_FN (cake_dequeue_node)
 
   u32 n_aqm_drops = 0;
   u32 n_ecn_marks = 0;
+  u32 n_drr_blocked = 0;
+  u32 n_parent_blocked = 0;
+  u32 n_agg_shaped = 0;
 
+  /* Bitmap order is ascending pool index and stable, which before DRR made a
+   * shared aggregate gate a strict priority: the first scheduler polled took
+   * the credit and the rest found it shut, on every dispatch (issue #8).
+   *
+   * The order is deliberately left alone. A child can now only take its
+   * quantum whichever order it is reached in, so starting at the bottom costs
+   * nothing measurable: 0.63% spread over 30 s for four equal children under
+   * an 8 Mbit/s aggregate, and +0.57 points worst error at weights 1:2:4:8.
+   * Rotating the start (PR #9) improves those to 0.28% and +0.41 points by
+   * spreading the work-conserving escape, which is unarbitrated and does
+   * favour whoever is reached first. That is a refinement, not a fix, and it
+   * is not this spec's to make. */
   uword si;
   clib_bitmap_foreach (si, pt->active_bitmap)
     {
@@ -266,6 +333,9 @@ VLIB_NODE_FN (cake_dequeue_node)
 
 	  if (!tin)
 	    {
+	      /* Empty-detect on a live, owned scheduler: this is one of the
+	       * two weight-bearing deactivations. */
+	      cake_sched_drr_deactivate (cm, cs);
 	      if (n_deactivate < VLIB_FRAME_SIZE)
 		deactivate[n_deactivate++] = si;
 	      break;
@@ -274,6 +344,7 @@ VLIB_NODE_FN (cake_dequeue_node)
 	  u32 flow_idx = cake_select_flow (tin);
 	  if (flow_idx == ~0)
 	    {
+	      cake_sched_drr_deactivate (cm, cs);
 	      if (n_deactivate < VLIB_FRAME_SIZE)
 		deactivate[n_deactivate++] = si;
 	      break;
@@ -292,12 +363,12 @@ VLIB_NODE_FN (cake_dequeue_node)
 		  continue;
 		}
 
-	      u8 sent = cake_dequeue_one (
+	      cake_deq_result_t r = cake_dequeue_one (
 		vm, node, cm, cs, tin, flow, now_us, now_ns,
 		&out_bi[n_out], &out_nexts[n_out], &n_aqm_drops,
 		&n_ecn_marks, &pt->random_seed);
 
-	      if (sent)
+	      if (r == CAKE_DEQ_SENT)
 		{
 		  n_out++;
 		  budget--;
@@ -308,6 +379,19 @@ VLIB_NODE_FN (cake_dequeue_node)
 		cake_flow_reclaim (vm, tin, cs, flow_idx,
 				   &tin->new_flow_head,
 				   &tin->new_flow_tail, now_us);
+
+	      /* Nothing advanced, so retrying before the next dispatch
+	       * re-samples now_ns would spin. */
+	      if (r == CAKE_DEQ_GATE_CLOSED)
+		{
+		  n_parent_blocked++;
+		  break;
+		}
+	      if (r == CAKE_DEQ_DRR_BLOCKED)
+		{
+		  n_drr_blocked++;
+		  break;
+		}
 
 	      if (now_ns < cs->global_shaper_time_ns)
 		break;
@@ -345,16 +429,29 @@ VLIB_NODE_FN (cake_dequeue_node)
 		  break;
 		}
 
-	      u8 sent = cake_dequeue_one (
+	      cake_deq_result_t r = cake_dequeue_one (
 		vm, node, cm, cs, tin, flow, now_us, now_ns,
 		&out_bi[n_out], &out_nexts[n_out], &n_aqm_drops,
 		&n_ecn_marks, &pt->random_seed);
 
-	      if (sent)
+	      if (r == CAKE_DEQ_SENT)
 		{
 		  n_out++;
 		  budget--;
 		  sched_dequeued++;
+		}
+
+	      /* deficit and budget are unchanged, so this loop would spin on
+	       * the same closed gate or spent quantum. */
+	      if (r == CAKE_DEQ_GATE_CLOSED)
+		{
+		  n_parent_blocked++;
+		  goto shaper_exhausted;
+		}
+	      if (r == CAKE_DEQ_DRR_BLOCKED)
+		{
+		  n_drr_blocked++;
+		  goto shaper_exhausted;
 		}
 
 	      if (now_ns < cs->global_shaper_time_ns)
@@ -377,6 +474,9 @@ VLIB_NODE_FN (cake_dequeue_node)
 	shaper_exhausted:
 	  break;
 	}
+
+      if (cs->aggregate_index != ~0)
+	n_agg_shaped += sched_dequeued;
 
       if (sched_dequeued > 0
 	  && PREDICT_FALSE (node->flags & VLIB_NODE_FLAG_TRACE))
@@ -406,6 +506,15 @@ VLIB_NODE_FN (cake_dequeue_node)
   if (n_ecn_marks)
     vlib_node_increment_counter (vm, node->node_index, CAKE_ERROR_ECN_MARKED,
 				 n_ecn_marks);
+  if (n_drr_blocked)
+    vlib_node_increment_counter (vm, node->node_index, CAKE_ERROR_DRR_BLOCKED,
+				 n_drr_blocked);
+  if (n_parent_blocked)
+    vlib_node_increment_counter (vm, node->node_index,
+				 CAKE_ERROR_PARENT_BLOCKED, n_parent_blocked);
+  if (n_agg_shaped)
+    vlib_node_increment_counter (vm, node->node_index, CAKE_ERROR_AGG_SHAPED,
+				 n_agg_shaped);
 
   return n_out;
 }
