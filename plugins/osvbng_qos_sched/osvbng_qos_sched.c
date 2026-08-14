@@ -525,10 +525,13 @@ cake_sched_enable_disable (vlib_main_t *vm, u32 sw_if_index, u8 is_enable,
       if (buffer_limit == 0)
 	{
 	  u32 interval = interval_us > 0 ? interval_us : 100000;
-	  cs->buffer_limit =
-	    (u32) ((rate_bytes_per_sec * interval * 3) / (1000000 * 2));
-	  if (cs->buffer_limit < 65536)
-	    cs->buffer_limit = 65536;
+	  u64 derived = (rate_bytes_per_sec * interval * 3) / (1000000 * 2);
+	  if (derived < 65536)
+	    derived = 65536;
+	  /* 1.5 intervals of rate passes 4 GiB at ~229 Gbit/s with the
+	   * default interval, sooner with a longer one; saturate rather than
+	   * wrap the u32 into a tiny limit. */
+	  cs->buffer_limit = derived > ~0U ? ~0U : (u32) derived;
 	}
       else
 	cs->buffer_limit = buffer_limit;
