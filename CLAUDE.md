@@ -137,6 +137,14 @@ them correct.
   startup.conf, defaults stated in one place.
 - Node-internal shared-memory protocols carry a magic and a version;
   a consumer refuses a version it was not built for.
+- A new per-subscriber resource attaches to the session interface by
+  sw_if_index, never to a session id, MAC, IP or a privately keyed
+  table. The ipoe/pppoe session interface is the subscriber object
+  every feature keys on; resources attached anywhere else are
+  invisible to show handlers, break across restore (sw_if_index can
+  change), and fork the uniform session handling above the API. The
+  context repo's subscriber access model note carries the full
+  rationale.
 
 ## Patches: upstream first
 
