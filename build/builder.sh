@@ -9,9 +9,14 @@
 # the release build would be worthless as a check.
 
 TAG="${VPP_TAG:-v26.06}"
-IMG="osvbng-vpp-builder:${TAG}"
-WORK_VOL=osvbng-vpp-work
-CCACHE_VOL=osvbng-vpp-ccache
+# The distro is part of the build environment's identity: artifacts
+# must install on the runtime image's distro, so a base change means a
+# different builder image and different volumes, never an in-place
+# mutation of the old ones.
+DISTRO=debian12
+IMG="osvbng-vpp-builder:${TAG}-${DISTRO}"
+WORK_VOL=osvbng-vpp-work-${DISTRO}
+CCACHE_VOL=osvbng-vpp-ccache-${DISTRO}
 
 ensure_builder() {
   if ! docker image inspect "$IMG" >/dev/null 2>&1; then

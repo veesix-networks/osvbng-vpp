@@ -6,8 +6,12 @@
 # runtime builds never apt-install. Rebuild this image only on a VPP
 # version bump: dependency layers changing between builds is how ABI
 # surprises happen.
+#
+# The base MUST match the distro the artifacts install on. The osvbng
+# runtime image is debian:12; debs built on a newer-glibc distro fail
+# there with unmet libc6 and t64 library dependencies.
 
-FROM ubuntu:24.04
+FROM debian:12
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git make sudo curl ca-certificates ccache python3 xz-utils \
