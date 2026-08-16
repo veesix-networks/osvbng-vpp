@@ -1,0 +1,45 @@
+# Copyright 2026 The osvbng Authors
+# Licensed under the GNU General Public License v3.0 or later.
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Build the release deb set (patched VPP core plus every plugin from
+# one tree, ADR 0002) on the shared self-hosted pool and publish it
+# to the rolling dataplane-latest prerelease. osvbng's integration
+# workflow consumes those assets, so the dataplane under test is
+# always a published artifact of this repo's main, never a hand-built
+# binary. The release notes record the source commit: that is the
+# provenance an integration run reports.
+
+name: dataplane-artifacts
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# The build uses fixed docker volume and container names and must
+# never overlap itself.
+concurrency:
+  group: vpp-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: [self-hosted, osvbng-metal]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release debs
+        run: make vpp-build
+
+      - name: Publish rolling dataplane release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view dataplane-latest >/dev/null 2>&1 || \
+            gh release create dataplane-latest --prerelease \
+              --title "dataplane latest" \
+              --notes "placeholder"
+          gh release upload dataplane-latest dist/*.deb --clobber
+          gh release edit dataplane-latest --prerelease \
+            --notes "Rolling artifact set from main. Built from ${GITHUB_SHA} at $(date -u +%Y-%m-%dT%H:%M:%SZ). Assets are replaced on every merge."
