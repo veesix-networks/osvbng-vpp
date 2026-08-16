@@ -298,6 +298,32 @@ VLIB_NODE_FN (osvbng_pppoe_input_node) (vlib_main_t * vm,
               goto trace00;
             }
 
+          /* IPv6 to a multicast destination is in-band control traffic,
+           * not subscriber forwarding: DHCPv6 rides ff02::1:2 (RFC 8415
+           * section 7.1) and this deployment never sends the Server
+           * Unicast option, so every client DHCPv6 message is multicast.
+           * Punt the whole frame so the control plane's in-band PPP
+           * handlers see it; decapping it into ip6-input silently
+           * dropped every post-establishment DHCPv6 exchange. Rate is
+           * bounded by the punt policer like every other punt. */
+          if (ppp_proto0 == PPP_PROTOCOL_ip6)
+            {
+              ip6_header_t *ip60 = (ip6_header_t *) (pppoe0 + 1);
+              if (PREDICT_FALSE (ip60->dst_address.as_u8[0] == 0xff))
+                {
+                  if (PREDICT_FALSE (pem->punt_shm_tx_next_arc == ~0u))
+                    {
+                      error0 = PPPOE_ERROR_BAD_VER_TYPE;
+                      next0 = PPPOE_INPUT_NEXT_DROP;
+                      goto trace00;
+                    }
+                  vnet_buffer_punt_protocol (b0) =
+                    OSVBNG_PUNT_PROTO_PPPOE_SESSION;
+                  next0 = pem->punt_shm_tx_next_arc;
+                  goto trace00;
+                }
+            }
+
           /* IP frame without a session: cannot decap. Drop. */
           if (PREDICT_FALSE (t0 == 0))
             {
