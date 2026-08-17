@@ -6,7 +6,7 @@
  * CAKE-equivalent per-subscriber traffic scheduling.
  */
 
-option version = "3.0.0";
+option version = "3.1.0";
 import "vnet/interface_types.api";
 
 enum osvbng_cake_tin_mode : u8
@@ -173,6 +173,13 @@ enumflag osvbng_cake_feature : u32
   OSVBNG_CAKE_FEATURE_AGG_UPDATE = 0x8,
 };
 
+/* No feature bit for the sched v2 dump below: adding a value to this
+ * enumflag changes the CRC of capabilities_reply, which breaks every
+ * control plane built before the value existed - the exact failure the
+ * new-messages-only rule exists to prevent. A control plane discovers the
+ * dump the same way it discovers this message: by sending it. Absence is
+ * an answer, not a failure. */
+
 /** \brief Create an aggregate shaper at either tier
     @param sw_if_index - the physical or bond port, for both levels
     @param level - port, or an S-VLAN hanging off that port
@@ -304,6 +311,92 @@ autoreply define osvbng_cake_sched_v2_enable_disable
   u32 interval_us;
   vl_api_osvbng_cake_flags_t flags;
   u32 weight;
+};
+
+/** \brief Dump subscriber schedulers with hierarchy and DRR state
+    @param sw_if_index - one scheduler, ~0 for all
+    @param parent_sw_if_index - restrict to members of one aggregate,
+                                ~0 for no parent filter
+    @param parent_level - tier of the parent filter, when one is set
+    @param parent_svlan_id - any tag the parent S-VLAN owns; ignored when
+                             parent_level is port
+
+    The parent filter exists so a hierarchy view costs one targeted dump per
+    aggregate instead of a full walk of every subscriber on the box.
+*/
+define osvbng_cake_sched_v2_dump
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  vl_api_interface_index_t parent_sw_if_index;
+  vl_api_osvbng_cake_agg_level_t parent_level;
+  u16 parent_svlan_id;
+};
+
+/** \brief Subscriber scheduler details with hierarchy and DRR state
+    @param has_parent - false when no aggregate covers this scheduler; the
+                        parent_* fields are then meaningless
+    @param parent_level - tier of the immediate parent
+    @param parent_sw_if_index - the port the parent hangs off; with
+                                parent_level and parent_svlan_id this is the
+                                same composite key aggregate_v2_details
+                                reports, so the two dumps join without any
+                                dataplane-private index on the wire
+    @param parent_svlan_id - first tag of the parent S-VLAN; 0 for a port
+    @param effective_weight - own rate x weight multiplier
+    @param drr_deficit - bytes sendable this round, two's-complement signed
+                         in a u64 because the API type system has no i64;
+                         negative = bounded debt
+    @param drr_active - weight currently counted in the parent
+    @param drr_blocked - dispatches deferred because siblings held the
+                         capacity
+    @param parent_blocked - dispatches deferred because the parent chain was
+                            at its configured rate
+    @param tin_peak_delay_us - reserved, reads 0 until sojourn accounting
+                               lands in the dequeue path
+    @param tin_avg_delay_us - reserved, reads 0 likewise
+*/
+define osvbng_cake_sched_v2_details
+{
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  u64 rate_bytes_per_sec;
+  vl_api_osvbng_cake_tin_mode_t tin_mode;
+  u8 tin_cnt;
+  u32 weight;
+  i16 overhead_bytes;
+  vl_api_osvbng_cake_atm_mode_t atm_mode;
+  u8 mpu;
+  u32 target_us;
+  u32 interval_us;
+  bool has_parent;
+  vl_api_osvbng_cake_agg_level_t parent_level;
+  vl_api_interface_index_t parent_sw_if_index;
+  u16 parent_svlan_id;
+  u64 effective_weight;
+  u64 drr_deficit;
+  bool drr_active;
+  u64 drr_blocked;
+  u64 parent_blocked;
+  u64 enqueued_pkts;
+  u64 enqueued_bytes;
+  u64 dequeued_pkts;
+  u64 dequeued_bytes;
+  u64 dropped_pkts;
+  u32 queued_buffers;
+  u32 buffer_usage;
+  u32 buffer_limit;
+  u32 owner_thread;
+  u64 tin_packets[8];
+  u64 tin_bytes[8];
+  u64 tin_drops[8];
+  u64 tin_ecn_marks[8];
+  u32 tin_sparse_flows[8];
+  u32 tin_bulk_flows[8];
+  u32 tin_flow_count[8];
+  u32 tin_peak_delay_us[8];
+  u32 tin_avg_delay_us[8];
 };
 
 /** \brief Ask what this dataplane supports
