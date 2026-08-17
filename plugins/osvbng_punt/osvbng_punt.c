@@ -87,10 +87,15 @@ osvbng_punt_policer_init (void)
     }
 }
 
-/* Push the configured aggregate rates into the per-thread buckets,
- * each thread getting an equal share. The aggregate holds when traffic
- * spreads across workers, and a storm on one worker is limited to its
- * share, which errs towards protecting the management link. Runs after
+/* Push the configured rates into the per-thread buckets. The rate is
+ * divided so the aggregate sustained rate holds however traffic
+ * spreads across workers. The burst is NOT divided: subscriber flows
+ * hash whole onto one worker, so a synchronized handshake burst lands
+ * on one or two threads, and a burst/n share polices legitimate
+ * bring-up at trivial scale (six PPPoE sessions on a 21-worker box
+ * lost 6 of 10 discovery packets to a 100/21 share). The worst-case
+ * transient this admits is burst on every worker at once, bounded and
+ * small next to the sustained rate the divide protects. Runs after
  * shm init (per_thread must exist) and under a worker barrier when
  * called on a config change. */
 void
@@ -105,7 +110,7 @@ osvbng_punt_policer_apply (void)
       for (int i = 0; i < OSVBNG_PUNT_N_PROTO; i++)
 	{
 	  pt->rate[i] = pm->policer_rate[i] / (f64) n;
-	  pt->burst[i] = (f64) pm->policer_burst[i] / (f64) n;
+	  pt->burst[i] = (f64) pm->policer_burst[i];
 	  if (pt->burst[i] < 1.0)
 	    pt->burst[i] = 1.0;
 	  pt->tokens[i] = pt->burst[i];
