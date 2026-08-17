@@ -3,12 +3,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 # Build the release deb set (patched VPP core plus every plugin from
-# one tree, ADR 0002) on the shared self-hosted pool and publish it
-# to the rolling dataplane-latest prerelease. osvbng's integration
-# workflow consumes those assets, so the dataplane under test is
-# always a published artifact of this repo's main, never a hand-built
-# binary. The release notes record the source commit: that is the
-# provenance an integration run reports.
+# one tree, ADR 0002) on the shared self-hosted pool. The build runs
+# on the same box the suites run on, so the primary handoff is the
+# box's per-commit cache, written here as local disk: osvbng's
+# suite-run reads the provenance commit from the release notes and
+# hits that cache without touching GitHub. The release assets are a
+# best-effort mirror for provenance and for a future off-box
+# consumer; a GitHub uploads outage must never stall the pipeline
+# (it did, six consecutive publishes, 2026-08-17). The dataplane
+# under test is always built by this workflow from this repo's main,
+# never a hand-built binary.
 
 name: dataplane-artifacts
 
@@ -27,11 +31,39 @@ jobs:
   build:
     runs-on: [self-hosted, osvbng-metal]
     steps:
-      - uses: actions/checkout@v4
+      # Plain git instead of actions/checkout: action tarballs come
+      # from codeload.github.com, which rate-limits this box's IP
+      # under heavy CI use (same rationale as osvbng's suite-run).
+      - name: Checkout
+        run: |
+          git init -q .
+          sudo chown -R "$(id -u):$(id -g)" .
+          git remote remove origin 2>/dev/null || true
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}"
+          git fetch -q --depth 1 origin "$GITHUB_SHA"
+          git checkout -q -f FETCH_HEAD
+          git clean -qfdx
+          git remote set-url origin "https://github.com/${{ github.repository }}"
 
       - name: Build release debs
         run: make vpp-build
 
+      # The cache is the handoff: suite-run installs exactly these
+      # four debs and prefers this directory over any download. Local
+      # disk, so no external service can stall it. Same keep-3 prune
+      # as suite-run's fetch step.
+      - name: Seed the box's per-commit artifact cache
+        run: |
+          cache="$HOME/.cache/osvbng-dataplane/$GITHUB_SHA"
+          mkdir -p "$cache"
+          cp dist/vpp_*.deb dist/vpp-plugin-core_*.deb \
+             dist/vpp-plugin-dpdk_*.deb dist/libvppinfra_*.deb "$cache"/
+          ls -dt "$HOME"/.cache/osvbng-dataplane/*/ | tail -n +4 | xargs -r rm -rf
+
+      # The provenance pointer is a small JSON write and must land;
+      # the asset upload is a mirror and must not block the pipeline.
+      # An off-box consumer that hits a body/assets mismatch fails
+      # honestly at download and heals on the next successful upload.
       - name: Publish rolling dataplane release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -40,6 +72,12 @@ jobs:
             gh release create dataplane-latest --prerelease \
               --title "dataplane latest" \
               --notes "placeholder"
-          gh release upload dataplane-latest dist/*.deb --clobber
           gh release edit dataplane-latest --prerelease \
-            --notes "Rolling artifact set from main. Built from ${GITHUB_SHA} at $(date -u +%Y-%m-%dT%H:%M:%SZ). Assets are replaced on every merge."
+            --notes "Rolling artifact set from main. Built from ${GITHUB_SHA} at $(date -u +%Y-%m-%dT%H:%M:%SZ). Assets are replaced on every merge; the runner's per-commit cache is the primary handoff."
+          for attempt in 1 2 3; do
+            if gh release upload dataplane-latest dist/*.deb --clobber; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "::warning::asset upload failed after 3 attempts; cache is seeded, mirror heals on the next merge"
