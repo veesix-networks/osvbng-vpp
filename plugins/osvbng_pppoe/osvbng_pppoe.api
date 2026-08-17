@@ -79,6 +79,52 @@ define osvbng_pppoe_set_lac_tunnel_reply
   i32 retval;
 };
 
+/** \brief Set/clear the IPv6 WAN address on a PPPoE session (after DHCPv6 IA_NA)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - the PPPoE session interface
+    @param client_ip - assigned IPv6 address
+    @param is_add - add (1) or remove (0) binding
+*/
+define osvbng_pppoe_set_session_ipv6
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  vl_api_ip6_address_t client_ip;
+  bool is_add;
+};
+
+define osvbng_pppoe_set_session_ipv6_reply
+{
+  u32 context;
+  i32 retval;
+};
+
+/** \brief Set/clear delegated prefix for a PPPoE session (after DHCPv6 IA_PD)
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param sw_if_index - the PPPoE session interface
+    @param prefix - delegated prefix
+    @param next_hop - next-hop for prefix route (link-local or IA_NA address)
+    @param is_add - add (1) or remove (0) binding
+*/
+define osvbng_pppoe_set_delegated_prefix
+{
+  u32 client_index;
+  u32 context;
+  vl_api_interface_index_t sw_if_index;
+  vl_api_prefix_t prefix;
+  vl_api_ip6_address_t next_hop;
+  bool is_add;
+};
+
+define osvbng_pppoe_set_delegated_prefix_reply
+{
+  u32 context;
+  i32 retval;
+};
+
 /** \brief Dump PPPoE session
     @param client_index - opaque cookie to identify the sender
     @param context - sender context, to match reply w/ request
@@ -102,6 +148,9 @@ define osvbng_pppoe_session_dump
     @param client_mac - the client ethernet address
     @param outer_vlan - S-VLAN tag
     @param inner_vlan - C-VLAN tag
+    @param client_ipv6 - IPv6 WAN address (:: if not bound)
+    @param ipv6_bound - IPv6 binding active
+    @param delegated_prefix - delegated prefix (::/0 if no PD)
 */
 define osvbng_pppoe_session_details
 {
@@ -115,6 +164,9 @@ define osvbng_pppoe_session_details
   vl_api_mac_address_t client_mac;
   u16 outer_vlan;
   u16 inner_vlan;
+  vl_api_ip6_address_t client_ipv6;
+  bool ipv6_bound;
+  vl_api_prefix_t delegated_prefix;
 };
 
 /*

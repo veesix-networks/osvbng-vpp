@@ -487,6 +487,7 @@ int vnet_osvbng_pppoe_add_del_session
 
         ip_table_bind (FIB_PROTOCOL_IP4, sw_if_index, table_id);
         ip_table_bind (FIB_PROTOCOL_IP6, sw_if_index, table_id);
+        t->decap_fib_index_ip6 = fib_table_find (FIB_PROTOCOL_IP6, table_id);
       }
 
       /* add reverse route for client ip */
@@ -542,6 +543,128 @@ int vnet_osvbng_pppoe_add_del_session
 
   if (sw_if_indexp)
     *sw_if_indexp = sw_if_index;
+
+  return 0;
+}
+
+/*
+ * Set/clear IPv6 WAN address binding (after DHCPv6 IA_NA)
+ */
+int
+vnet_pppoe_set_session_ipv6 (u32 sw_if_index, ip6_address_t *addr, u8 is_add)
+{
+  osvbng_pppoe_main_t *pem = &osvbng_pppoe_main;
+  osvbng_pppoe_session_t *s;
+  u32 session_index;
+  fib_prefix_t pfx;
+
+  if (sw_if_index >= vec_len (pem->session_index_by_sw_if_index))
+    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
+
+  session_index = pem->session_index_by_sw_if_index[sw_if_index];
+  if (session_index == ~0)
+    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
+
+  s = pool_elt_at_index (pem->sessions, session_index);
+
+  clib_memset (&pfx, 0, sizeof (pfx));
+  pfx.fp_proto = FIB_PROTOCOL_IP6;
+  pfx.fp_len = 128;
+  pfx.fp_addr.ip6 = *addr;
+
+  if (is_add)
+    {
+      if (s->ipv6_bound &&
+          !clib_memcmp (&s->client_ipv6, addr, sizeof (ip6_address_t)))
+        return 0;
+
+      if (s->ipv6_bound)
+        vnet_pppoe_set_session_ipv6 (sw_if_index, &s->client_ipv6, 0);
+
+      fib_table_entry_path_add (
+        s->decap_fib_index_ip6, &pfx, pppoe_fib_src, FIB_ENTRY_FLAG_NONE,
+        DPO_PROTO_IP6, &pfx.fp_addr, sw_if_index, ~0, 1, NULL,
+        FIB_ROUTE_PATH_FLAG_NONE);
+
+      s->client_ipv6 = *addr;
+      s->ipv6_bound = 1;
+    }
+  else
+    {
+      if (!s->ipv6_bound)
+        return 0;
+
+      fib_table_entry_path_remove (
+        s->decap_fib_index_ip6, &pfx, pppoe_fib_src, DPO_PROTO_IP6,
+        &pfx.fp_addr, sw_if_index, ~0, 1, FIB_ROUTE_PATH_FLAG_NONE);
+
+      clib_memset (&s->client_ipv6, 0, sizeof (s->client_ipv6));
+      s->ipv6_bound = 0;
+    }
+
+  return 0;
+}
+
+/*
+ * Set/clear delegated prefix (after DHCPv6 IA_PD)
+ */
+int
+vnet_pppoe_set_delegated_prefix (u32 sw_if_index, ip6_address_t *prefix,
+                                 u8 prefix_len, ip6_address_t *next_hop,
+                                 u8 is_add)
+{
+  osvbng_pppoe_main_t *pem = &osvbng_pppoe_main;
+  osvbng_pppoe_session_t *s;
+  u32 session_index;
+  fib_prefix_t pfx;
+
+  if (sw_if_index >= vec_len (pem->session_index_by_sw_if_index))
+    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
+
+  session_index = pem->session_index_by_sw_if_index[sw_if_index];
+  if (session_index == ~0)
+    return VNET_API_ERROR_INVALID_SW_IF_INDEX;
+
+  s = pool_elt_at_index (pem->sessions, session_index);
+
+  clib_memset (&pfx, 0, sizeof (pfx));
+  pfx.fp_proto = FIB_PROTOCOL_IP6;
+  pfx.fp_len = prefix_len;
+  pfx.fp_addr.ip6 = *prefix;
+
+  if (is_add)
+    {
+      if (s->delegated_prefix_len == prefix_len &&
+          !clib_memcmp (&s->delegated_prefix, prefix, sizeof (ip6_address_t)))
+        return 0;
+
+      if (s->delegated_prefix_len)
+        vnet_pppoe_set_delegated_prefix (sw_if_index, &s->delegated_prefix,
+                                         s->delegated_prefix_len,
+                                         &s->pd_next_hop, 0);
+
+      fib_table_entry_path_add (
+        s->decap_fib_index_ip6, &pfx, pppoe_fib_src, FIB_ENTRY_FLAG_NONE,
+        DPO_PROTO_IP6, &pfx.fp_addr, sw_if_index, ~0, 1, NULL,
+        FIB_ROUTE_PATH_FLAG_NONE);
+
+      s->delegated_prefix = *prefix;
+      s->delegated_prefix_len = prefix_len;
+      s->pd_next_hop = *next_hop;
+    }
+  else
+    {
+      if (!s->delegated_prefix_len)
+        return 0;
+
+      fib_table_entry_path_remove (
+        s->decap_fib_index_ip6, &pfx, pppoe_fib_src, DPO_PROTO_IP6,
+        &pfx.fp_addr, sw_if_index, ~0, 1, FIB_ROUTE_PATH_FLAG_NONE);
+
+      clib_memset (&s->delegated_prefix, 0, sizeof (s->delegated_prefix));
+      s->delegated_prefix_len = 0;
+      clib_memset (&s->pd_next_hop, 0, sizeof (s->pd_next_hop));
+    }
 
   return 0;
 }
