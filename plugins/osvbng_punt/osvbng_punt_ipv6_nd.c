@@ -50,6 +50,7 @@ typedef enum
 {
   OSVBNG_PUNT_IPV6_ND_NEXT_DROP,
   OSVBNG_PUNT_IPV6_ND_NEXT_PASSTHROUGH_RS,
+  OSVBNG_PUNT_IPV6_ND_NEXT_PASSTHROUGH_NS,
   OSVBNG_PUNT_IPV6_ND_N_NEXT,
 } osvbng_punt_ipv6_nd_next_t;
 
@@ -136,8 +137,18 @@ osvbng_punt_ipv6_nd_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	    }
 	  else
 	    {
-	      /* Not enabled for punt — pass to VPP's default RS handler */
-	      next0 = OSVBNG_PUNT_IPV6_ND_NEXT_PASSTHROUGH_RS;
+	      /* Not enabled for punt — hand back to VPP's native handler
+	       * for whichever ND type this is. The node is registered for
+	       * both RS and NS, so the passthrough must dispatch by type
+	       * or core-facing NS would land in the RS handler. Buffer is
+	       * at the IPv6 header; RS and NS carry no extension headers
+	       * (RFC 4861 requires hop limit 255 and icmp6 directly). */
+	      ip6_header_t *ip60 = vlib_buffer_get_current (b0);
+	      icmp46_header_t *icmp0 = ip6_next_header (ip60);
+
+	      next0 = icmp0->type == ICMP6_neighbor_solicitation ?
+			OSVBNG_PUNT_IPV6_ND_NEXT_PASSTHROUGH_NS :
+			OSVBNG_PUNT_IPV6_ND_NEXT_PASSTHROUGH_RS;
 	      pkts_not_enabled++;
 	      not_enabled = 1;
 	    }
@@ -189,6 +200,7 @@ VLIB_REGISTER_NODE (osvbng_punt_ipv6_nd_node) = {
   .next_nodes = {
     [OSVBNG_PUNT_IPV6_ND_NEXT_DROP] = "error-drop",
     [OSVBNG_PUNT_IPV6_ND_NEXT_PASSTHROUGH_RS] = "icmp6-router-solicitation",
+    [OSVBNG_PUNT_IPV6_ND_NEXT_PASSTHROUGH_NS] = "icmp6-neighbor-solicitation",
   },
 };
 
@@ -201,9 +213,15 @@ osvbng_punt_enable_ipv6_nd (u32 sw_if_index)
 
   node_index = osvbng_punt_ipv6_nd_node.index;
 
-  /* Only register Router Solicitation, we only need to punt RS */
+  /* RS drives RA emission; NS must punt too or the daemon's neighbor
+   * advertisement responder never sees subscriber solicitations, and
+   * subscriber v6 origination dies whenever NUD probes the gateway
+   * (the entry only ever refreshes to STALE off periodic RAs).
+   * Core-facing interfaces are not punt-enabled and pass through to
+   * VPP's native handlers per type. */
   vlib_worker_thread_barrier_sync (vm);
   icmp6_register_type (vm, ICMP6_router_solicitation, node_index);
+  icmp6_register_type (vm, ICMP6_neighbor_solicitation, node_index);
 
   hash_set (pm->enabled_interfaces[OSVBNG_PUNT_PROTO_IPV6_ND], sw_if_index,
 	    1);
