@@ -291,15 +291,18 @@ _(client_ip)                                    \
 _(outer_vlan)                                   \
 _(inner_vlan)
 
+/* decap_fib_index names the table the session binds to and installs its
+ * client route in. Upstream's pppoe plugin compared it against ip4-input's
+ * next-node count, a bound for a decap next index that this argument never
+ * was, so any VRF whose fib index exceeded that handful was rejected as an
+ * invalid decap-next. The only bound is that the index names a live table
+ * for the session's address family. */
 static bool
-pppoe_decap_next_is_valid (osvbng_pppoe_main_t * pem, u32 is_ip6,
-                           u32 decap_fib_index)
+pppoe_decap_fib_is_valid (u32 is_ip6, u32 decap_fib_index)
 {
-  vlib_main_t *vm = pem->vlib_main;
-  u32 input_idx = (!is_ip6) ? ip4_input_node.index : ip6_input_node.index;
-  vlib_node_runtime_t *r = vlib_node_get_runtime (vm, input_idx);
-
-  return decap_fib_index < r->n_next_nodes;
+  if (is_ip6)
+    return !pool_is_free_index (ip6_main.fibs, decap_fib_index);
+  return !pool_is_free_index (ip4_main.fibs, decap_fib_index);
 }
 
 int vnet_osvbng_pppoe_add_del_session
@@ -376,9 +379,8 @@ int vnet_osvbng_pppoe_add_del_session
       if (pool_is_free_index (vnm->interface_main.sw_interfaces, a->encap_if_index))
         return VNET_API_ERROR_INVALID_SW_IF_INDEX;
 
-      /* if not set explicitly, default to ip4 */
-      if (!pppoe_decap_next_is_valid (pem, is_ip6, a->decap_fib_index))
-        return VNET_API_ERROR_INVALID_DECAP_NEXT;
+      if (!pppoe_decap_fib_is_valid (is_ip6, a->decap_fib_index))
+        return VNET_API_ERROR_NO_SUCH_FIB;
 
       pool_get_aligned (pem->sessions, t, CLIB_CACHE_LINE_BYTES);
       clib_memset (t, 0, sizeof (*t));
