@@ -104,6 +104,8 @@ vl_api_osvbng_cgnat_pool_add_del_inside_prefix_t_handler (
   pfx.fp_addr.ip4.as_u32 = base.as_u32;
 
   rv = cgnat_pool_inside_prefix_add_del (pool_id, &pfx, vrf_id, mp->is_add);
+  if (rv)
+    goto reply;
 
   if (mp->is_add && pool->mode == CGNAT_POOL_MODE_DETERMINISTIC)
     {
