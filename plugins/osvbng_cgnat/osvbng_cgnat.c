@@ -259,10 +259,14 @@ cgnat_add_del_subscriber_mapping (u32 pool_id, u32 sw_if_index,
   u32 pool_index = p[0];
   cgnat_pool_t *pool = pool_elt_at_index (cm->pools, pool_index);
 
+  /* The mapping is keyed by the inside fib index (ADR 0006) and looked up
+   * under the fib the subscriber's packets arrive in. A table that does
+   * not exist cannot be that fib; defaulting to table 0 here was a silent
+   * NO_MAPPING drop for every subscriber outside the default VRF. */
   u32 fib_index =
     fib_table_find (FIB_PROTOCOL_IP4, inside_vrf_id);
   if (fib_index == ~0)
-    fib_index = 0;
+    return VNET_API_ERROR_NO_SUCH_FIB;
 
   /* Deterministic mode: override operator-provided outside_ip and port range
    * with the algorithmic mapping from the matching det_params entry. The
@@ -564,7 +568,7 @@ cgnat_pool_inside_prefix_add_del (u32 pool_id, fib_prefix_t *prefix, u32 vrf_id,
   cgnat_pool_t *pool = pool_elt_at_index (cm->pools, p[0]);
   u32 fib_index = fib_table_find (FIB_PROTOCOL_IP4, vrf_id);
   if (fib_index == ~0)
-    fib_index = 0;
+    return VNET_API_ERROR_NO_SUCH_FIB;
 
   for (u32 i = 0; i < vec_len (pool->inside_prefixes); i++)
     {
@@ -633,7 +637,7 @@ cgnat_add_del_bypass (fib_prefix_t *prefix, u32 vrf_id, u8 is_add)
   cgnat_main_t *cm = &cgnat_main;
   u32 fib_index = fib_table_find (FIB_PROTOCOL_IP4, vrf_id);
   if (fib_index == ~0)
-    fib_index = 0;
+    return VNET_API_ERROR_NO_SUCH_FIB;
 
   if (is_add)
     {
