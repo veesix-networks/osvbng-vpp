@@ -5,10 +5,12 @@
  * osvbng CGNAT Plugin - out2in nodes
  * Fast/slow split reached via DPO steering (outside addresses registered as
  * FIB entries that dispatch to cgnat-out2in). The fast node translates
- * existing-session traffic. The slow node is the hook for ICMP-error
- * inner-rewrite and endpoint-independent filtering origination, both filled
- * in by later phases; for now it preserves the current behaviour by dropping
- * with CGNAT_ERROR_NO_SESSION.
+ * existing-session traffic. The slow node rewrites non-first fragments from
+ * the aux fragment record and ICMP errors from the session named by their
+ * quoted inner header; everything else drops with CGNAT_ERROR_NO_SESSION.
+ *
+ * Both nodes classify from the packet, never from vnet_buffer ip.reass:
+ * see cgnat_out2in_classify.
  */
 
 #include <vlib/vlib.h>
@@ -44,54 +46,58 @@ format_cgnat_out2in_trace (u8 *s, va_list *args)
   return s;
 }
 
-/* Pull L4 ports from the packet. Out2in is reached via the cgnat-outside DPO
- * AFTER ip4-lookup, which writes vnet_buffer(b)->ip.flow_hash — and that
- * union aliases reass.l4_src_port / reass.l4_dst_port / reass.ip_proto in
- * vnet/buffer.h's ip struct. Read L4 ports directly from the header instead.
- * Fragment / truncation / icmp_type live at non-overlapping offsets in the
- * union, so those checks still come from reass. */
+/* Out2in classifies from the packet, never from vnet_buffer ip.reass. Two
+ * paths reach this node with metadata that does not describe the packet in
+ * hand: ip4-lookup writes ip.flow_hash over reass.l4_src_port and
+ * l4_dst_port before the cgnat-outside DPO dispatches here, and
+ * ip4-icmp-error builds a locally generated error by copying the offending
+ * packet's buffer, opaque included, so the TTL-exceeded for a subscriber's
+ * probe arrives carrying the probe's ip_proto, ICMP type and fragment bits
+ * (vnet/buffer.h; vlib_buffer_copy_no_chain). The fragment and length tests
+ * repeat what ip4-sv-reassembly derives from the same header.
+ *
+ * Returns 0 with the session-key ports filled in, CGNAT_ERROR_FRAGMENT_DROP
+ * for a non-first fragment (the caller routes it to the slow node), or the
+ * error to drop with. */
 always_inline int
-cgnat_out2in_ports_from_reass (vlib_buffer_t *b0, ip4_header_t *ip0,
-			       u8 proto0, u16 *src_port, u16 *dst_port)
+cgnat_out2in_classify (ip4_header_t *ip0, u8 proto0, u16 *src_port,
+		       u16 *dst_port)
 {
+  u16 ip_len = clib_net_to_host_u16 (ip0->length);
+  u16 hdr_len = ip4_header_bytes (ip0);
+
   *src_port = 0;
   *dst_port = 0;
 
-  if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.l4_hdr_truncated))
-    return CGNAT_ERROR_NO_REASS_METADATA;
-
-  if (PREDICT_FALSE (vnet_buffer (b0)->ip.reass.is_non_first_fragment))
-    return CGNAT_ERROR_FRAGMENT_DROP;  /* sentinel — caller routes to slow */
+  if (PREDICT_FALSE (ip4_get_fragment_offset (ip0)))
+    return CGNAT_ERROR_FRAGMENT_DROP;
 
   if (proto0 == IP_PROTOCOL_TCP || proto0 == IP_PROTOCOL_UDP)
     {
-      udp_header_t *udp =
-	(udp_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
+      if (PREDICT_FALSE (ip_len < hdr_len + sizeof (udp_header_t)))
+	return CGNAT_ERROR_TRUNCATED;
+      udp_header_t *udp = (udp_header_t *) ((u8 *) ip0 + hdr_len);
       *src_port = udp->src_port;
       *dst_port = udp->dst_port;
     }
   else if (proto0 == IP_PROTOCOL_ICMP)
     {
-      icmp46_header_t *icmp =
-	(icmp46_header_t *) ((u8 *) ip0 + ip4_header_bytes (ip0));
+      if (PREDICT_FALSE (ip_len < hdr_len + sizeof (icmp46_header_t) +
+				    sizeof (nat_icmp_echo_header_t)))
+	return CGNAT_ERROR_TRUNCATED;
+      icmp46_header_t *icmp = (icmp46_header_t *) ((u8 *) ip0 + hdr_len);
       if (icmp->type == ICMP4_echo_request || icmp->type == ICMP4_echo_reply)
 	{
-	  /* nat44-ed convention: echo_id in both src_port and dst_port slots
-	   * of the session key. Aligns the install / fast-path lookup /
-	   * slowpath inner-ICMP error lookup so traceroute / tracepath /
-	   * PMTUd via ICMP errors actually finds the session. */
+	  /* nat44-ed convention: the echo id fills both port slots of the
+	   * session key, matching cgnat_session_create. */
 	  u16 *echo_id = (u16 *) (icmp + 1);
 	  *src_port = *echo_id;
 	  *dst_port = *echo_id;
 	}
       else if (!icmp_type_is_error_message (icmp->type))
-	{
-	  /* Unhandled ICMP type — drop explicitly. Mirrors nat44-ed's
-	   * BAD_ICMP_TYPE early drop. Without this the session lookup
-	   * misses and the slow path drops with NO_SESSION (misleading)
-	   * after a wasted slow-path round-trip. */
-	  return CGNAT_ERROR_BAD_ICMP_TYPE;
-	}
+	return CGNAT_ERROR_BAD_ICMP_TYPE;
+      /* Errors keep zero ports: the fast lookup misses and the slow node
+       * resolves the session from the quoted inner header. */
     }
   return 0;
 }
@@ -162,8 +168,6 @@ VLIB_NODE_FN (cgnat_out2in_node)
   u32 pkts_translated = 0;
   u32 pkts_slowpath = 0;
   u32 pkts_dropped = 0;
-  u32 pkts_no_reass = 0;
-  u32 pkts_frag_drop = 0;
   f64 now = vlib_time_now (vm);
 
   from = vlib_frame_vector_args (frame);
@@ -201,8 +205,8 @@ VLIB_NODE_FN (cgnat_out2in_node)
 	  proto0 = ip0->protocol;
 
 	  {
-	    int rerr = cgnat_out2in_ports_from_reass (b0, ip0, proto0,
-						      &src_port0, &dst_port0);
+	    int rerr =
+	      cgnat_out2in_classify (ip0, proto0, &src_port0, &dst_port0);
 	    if (PREDICT_FALSE (rerr))
 	      {
 		if (rerr == CGNAT_ERROR_FRAGMENT_DROP)
@@ -212,7 +216,6 @@ VLIB_NODE_FN (cgnat_out2in_node)
 		    goto trace;
 		  }
 		next0 = CGNAT_OUT2IN_NEXT_DROP;
-		pkts_no_reass++;
 		pkts_dropped++;
 		b0->error = node->errors[rerr];
 		goto trace;
@@ -268,10 +271,6 @@ VLIB_NODE_FN (cgnat_out2in_node)
 			       CGNAT_ERROR_TRANSLATED, pkts_translated);
   vlib_node_increment_counter (vm, node->node_index, CGNAT_ERROR_DROP,
 			       pkts_dropped);
-  vlib_node_increment_counter (vm, node->node_index,
-			       CGNAT_ERROR_NO_REASS_METADATA, pkts_no_reass);
-  vlib_node_increment_counter (vm, node->node_index,
-			       CGNAT_ERROR_FRAGMENT_DROP, pkts_frag_drop);
   (void) pkts_slowpath;
 
   return frame->n_vectors;
@@ -284,7 +283,6 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
   u32 n_left_from, *from, *to_next;
   cgnat_out2in_next_t next_index;
   u32 pkts_dropped = 0;
-  u32 pkts_no_reass = 0;
   u32 pkts_frag_drop = 0;
   f64 now = vlib_time_now (vm);
 
@@ -320,14 +318,15 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 	  proto0 = ip0->protocol;
 
+	  u32 fib_index0 =
+	    vec_elt (ip4_main.fib_index_by_sw_if_index, sw_if_index0);
+
 	  /* Non-first fragment: IP-only rewrite via aux fragment record.
 	   * Out2in packet has src=remote, dst=outside_ip; the aux key was
-	   * installed under (remote, outside, proto, outside_fib). */
-	  if (PREDICT_FALSE (
-		vnet_buffer (b0)->ip.reass.is_non_first_fragment))
+	   * installed under (remote, outside, proto, outside_fib). Tested
+	   * first because a non-first fragment carries no ICMP header. */
+	  if (PREDICT_FALSE (ip4_get_fragment_offset (ip0)))
 	    {
-	      u32 fib_index0 = vec_elt (ip4_main.fib_index_by_sw_if_index,
-					sw_if_index0);
 	      cgnat_frag_rewrite_t *fr = cgnat_frag_rewrite_lookup (
 		ip0->src_address, ip0->dst_address, proto0, fib_index0);
 	      if (PREDICT_FALSE (!fr))
@@ -346,24 +345,36 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 	      goto enqueue;
 	    }
 
-	  /* ICMP error inner-rewrite (D4). The packet's outer header carries
-	   * router_that_sent_error → outside_ip; the inner header (echoed in
-	   * the ICMP payload) is the original outbound that triggered the
-	   * error and carries outside_ip → remote. Look up by the inner tuple
-	   * and rewrite outer dst + inner src + inner sport so the inside
-	   * subscriber sees an ICMP error with proper inside addressing. */
-	  if (PREDICT_FALSE (
-		proto0 == IP_PROTOCOL_ICMP &&
-		icmp_type_is_error_message (
-		  vnet_buffer (b0)->ip.reass.icmp_type_or_tcp_flags)))
+	  /* ICMP error received from the external realm, RFC 5508 section
+	   * 4.2.1 (REQ-4). The quoted inner packet is the subscriber's own
+	   * outbound after translation, so inner.src is the outside address
+	   * and inner.sport the outside port: that tuple names the session.
+	   * Revert the inner header to the inside identity, rewrite the
+	   * outer destination to match, leave type and code as sent. The
+	   * type comes from the header: see cgnat_out2in_classify. */
+	  icmp46_header_t *icmp0 = (icmp46_header_t *) ip4_next_header (ip0);
+	  if (PREDICT_FALSE (proto0 == IP_PROTOCOL_ICMP &&
+			     icmp_type_is_error_message (icmp0->type)))
 	    {
-	      u32 fib_index0 = vec_elt (ip4_main.fib_index_by_sw_if_index,
-					sw_if_index0);
-	      icmp46_header_t *icmp0 =
-		(icmp46_header_t *) ip4_next_header (ip0);
 	      nat_icmp_echo_header_t *echo0 =
 		(nat_icmp_echo_header_t *) (icmp0 + 1);
 	      ip4_header_t *inner_ip = (ip4_header_t *) (echo0 + 1);
+	      u16 ip_len0 = clib_net_to_host_u16 (ip0->length);
+	      u16 inner_off = (u8 *) inner_ip - (u8 *) ip0;
+
+	      /* RFC 792 quotes the inner IP header plus 64 bits of its
+	       * payload; refuse anything that does not reach the fields
+	       * read below. ip4_next_header walks the inner options, which
+	       * is REQ-3 (b). */
+	      if (PREDICT_FALSE (
+		    ip_len0 < inner_off + sizeof (ip4_header_t) ||
+		    ip_len0 < inner_off + ip4_header_bytes (inner_ip) + 8))
+		{
+		  next0 = CGNAT_OUT2IN_NEXT_DROP;
+		  pkts_dropped++;
+		  b0->error = node->errors[CGNAT_ERROR_TRUNCATED];
+		  goto enqueue;
+		}
 	      void *inner_l4 = ip4_next_header (inner_ip);
 
 	      ip4_address_t lookup_dst = inner_ip->src_address;
@@ -405,30 +416,31 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 		  goto enqueue;
 		}
 
-	      /* Rewrite outer dst (outside_ip → inside_ip) — same address
-	       * change as s->o2i so we can reuse its precomputed delta. */
+	      /* Outer dst and inner src both go outside_ip to inside_ip, the
+	       * o2i address delta. */
 	      ip0->dst_address = s0->o2i.rewrite_daddr;
 	      ip0->checksum = ip_csum_fold (
 		ip_csum_add_even (ip0->checksum, s0->o2i.l3_csum_delta));
 
-	      /* Rewrite inner src (outside_ip → inside_ip) — the inner IP
-	       * src was our outside_ip; flip it to the subscriber's inside_ip
-	       * so the application sees a well-formed inner. Same delta. */
 	      inner_ip->src_address = s0->o2i.rewrite_daddr;
 	      inner_ip->checksum = ip_csum_fold (
 		ip_csum_add_even (inner_ip->checksum, s0->o2i.l3_csum_delta));
 
-	      /* Rewrite inner sport (outside_port → inside_port). The inner
-	       * header in an ICMP error is a copy of the ORIGINAL outbound
-	       * packet, so inner.src_port = NATed outside_port and
-	       * inner.dst_port = the remote application's port (which must
-	       * stay intact — tracepath / traceroute / PMTUd correlate the
-	       * ICMP error back to their probe by inner.dst_port). Only the
-	       * src side is the NATed port. */
+	      /* Inner sport was the outside port. inner.dport is the remote's
+	       * port and stays: it is what the subscriber's stack matches the
+	       * error against. */
 	      if (inner_proto == IP_PROTOCOL_TCP ||
 		  inner_proto == IP_PROTOCOL_UDP)
-		((nat_tcp_udp_header_t *) inner_l4)->src_port =
-		  s0->o2i.rewrite_dport;
+		{
+		  ((nat_tcp_udp_header_t *) inner_l4)->src_port =
+		    s0->o2i.rewrite_dport;
+		  /* The quoted 8 bytes of UDP include its checksum, which
+		   * covers the pseudo-header, and the o2i delta is exactly
+		   * this address and port change. TCP's checksum lies past
+		   * the quoted bytes. */
+		  if (inner_proto == IP_PROTOCOL_UDP)
+		    cgnat_udp_csum_update (inner_l4, s0->o2i.l4_csum_delta);
+		}
 	      else if (inner_proto == IP_PROTOCOL_ICMP)
 		{
 		  icmp46_header_t *inner_icmp = inner_l4;
@@ -459,7 +471,10 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 		ntohs (ip0->length) - ip4_header_bytes (ip0), 0);
 	      icmp0->checksum = ~ip_csum_fold (sum);
 
-	      s0->last_active = now;
+	      /* RFC 5508 section 4.3 (REQ-6): an error about an ICMP query
+	       * must not refresh that query's session. */
+	      if (inner_proto != IP_PROTOCOL_ICMP)
+		s0->last_active = now;
 	      s0->total_pkts++;
 	      s0->total_bytes += vlib_buffer_length_in_chain (vm, b0);
 
@@ -468,18 +483,9 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 	      goto enqueue;
 	    }
 
-	  {
-	    int rerr = cgnat_out2in_ports_from_reass (b0, ip0, proto0,
-						      &src_port0, &dst_port0);
-	    if (PREDICT_FALSE (rerr))
-	      {
-		pkts_no_reass++;
-		pkts_dropped++;
-		b0->error = node->errors[rerr];
-		goto enqueue;
-	      }
-	  }
-
+	  /* Inbound packet with no session. Classification passed in the
+	   * fast node; it is repeated here only to fill the trace ports. */
+	  cgnat_out2in_classify (ip0, proto0, &src_port0, &dst_port0);
 	  b0->error = node->errors[CGNAT_ERROR_NO_SESSION];
 	  pkts_dropped++;
 
@@ -507,8 +513,6 @@ VLIB_NODE_FN (cgnat_out2in_slowpath_node)
 
   vlib_node_increment_counter (vm, node->node_index, CGNAT_ERROR_DROP,
 			       pkts_dropped);
-  vlib_node_increment_counter (vm, node->node_index,
-			       CGNAT_ERROR_NO_REASS_METADATA, pkts_no_reass);
   vlib_node_increment_counter (vm, node->node_index,
 			       CGNAT_ERROR_FRAGMENT_DROP, pkts_frag_drop);
 

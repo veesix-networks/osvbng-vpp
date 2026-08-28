@@ -199,7 +199,7 @@ VLIB_NODE_FN (cgnat_in2out_node)
 	{
 	  vlib_buffer_t *b0;
 	  u32 bi0;
-	  u32 next0 = CGNAT_IN2OUT_NEXT_LOOKUP;
+	  u32 next0 = CGNAT_IN2OUT_NEXT_DROP;
 	  ip4_header_t *ip0;
 	  u32 sw_if_index0;
 	  u16 src_port0 = 0, dst_port0 = 0;
@@ -302,7 +302,11 @@ VLIB_NODE_FN (cgnat_in2out_node)
 
 	  cgnat_in2out_translate (vm, b0, ip0, s0, proto0, now);
 
+	  /* Translated packets stay on the arc, so every feature after this
+	   * one sees them; ip4-lookup at the arc end honours the VLIB_TX fib
+	   * override regardless of what runs in between. */
 	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = pool0->outside_fib_index;
+	  vnet_feature_next (&next0, b0);
 
 	  pkts_translated++;
 
@@ -373,7 +377,7 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 	{
 	  vlib_buffer_t *b0;
 	  u32 bi0;
-	  u32 next0 = CGNAT_IN2OUT_NEXT_LOOKUP;
+	  u32 next0 = CGNAT_IN2OUT_NEXT_DROP;
 	  ip4_header_t *ip0;
 	  u32 sw_if_index0;
 	  u16 src_port0 = 0, dst_port0 = 0;
@@ -397,12 +401,38 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 	  u32 fib_index0 =
 	    vec_elt (ip4_main.fib_index_by_sw_if_index, sw_if_index0);
 
-	  /* ICMP error inner-rewrite (D4) — symmetric of out2in. Outer is
-	   * inside_ip → somewhere with proto=ICMP error type; inner was a
-	   * packet that arrived at the subscriber (so inner.dst=inside_ip,
-	   * inner.dport=inside_port). Rewrite outer src (inside→outside) +
-	   * inner dst + inner dport so the remote sees an error with the
-	   * outside identity, not the inside leak. */
+	  /* Non-first fragment: IP-only rewrite via aux fragment record.
+	   * Tested before the ICMP branch because a non-first fragment
+	   * carries no ICMP header to classify from. */
+	  if (PREDICT_FALSE (
+		vnet_buffer (b0)->ip.reass.is_non_first_fragment))
+	    {
+	      cgnat_frag_rewrite_t *fr = cgnat_frag_rewrite_lookup (
+		ip0->src_address, ip0->dst_address, proto0, fib_index0);
+	      if (PREDICT_FALSE (!fr))
+		{
+		  trace_action = CGNAT_TRACE_DROPPED;
+		  next0 = CGNAT_IN2OUT_NEXT_DROP;
+		  pkts_frag_drop++;
+		  b0->error = node->errors[CGNAT_ERROR_FRAGMENT_DROP];
+		  goto trace;
+		}
+	      ip0->src_address = fr->outside_ip;
+	      ip0->checksum = ip_csum_fold (
+		ip_csum_add_even (ip0->checksum, fr->l3_csum_delta_i2o));
+	      vnet_buffer (b0)->sw_if_index[VLIB_TX] = fr->outside_fib_index;
+	      vnet_feature_next (&next0, b0);
+	      pkts_translated++;
+	      trace_action = CGNAT_TRACE_TRANSLATED;
+	      goto trace;
+	    }
+
+	  /* ICMP error originated in the private realm, RFC 5508 section
+	   * 4.2.2 (REQ-5). The quoted inner packet is one that arrived at
+	   * the subscriber, so inner.dst is the inside address and
+	   * inner.dport the inside port: that tuple names the session. Revert
+	   * the inner header to the outside identity, translate the outer
+	   * source, leave type and code as sent. */
 	  if (PREDICT_FALSE (
 		proto0 == IP_PROTOCOL_ICMP &&
 		icmp_type_is_error_message (
@@ -413,6 +443,23 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 	      nat_icmp_echo_header_t *echo0 =
 		(nat_icmp_echo_header_t *) (icmp0 + 1);
 	      ip4_header_t *inner_ip = (ip4_header_t *) (echo0 + 1);
+	      u16 ip_len0 = clib_net_to_host_u16 (ip0->length);
+	      u16 inner_off = (u8 *) inner_ip - (u8 *) ip0;
+
+	      /* RFC 792 quotes the inner IP header plus 64 bits of its
+	       * payload; refuse anything that does not reach the fields
+	       * read below. ip4_next_header walks the inner options, which
+	       * is REQ-3 (b). */
+	      if (PREDICT_FALSE (
+		    ip_len0 < inner_off + sizeof (ip4_header_t) ||
+		    ip_len0 < inner_off + ip4_header_bytes (inner_ip) + 8))
+		{
+		  trace_action = CGNAT_TRACE_DROPPED;
+		  next0 = CGNAT_IN2OUT_NEXT_DROP;
+		  pkts_dropped++;
+		  b0->error = node->errors[CGNAT_ERROR_TRUNCATED];
+		  goto trace;
+		}
 	      void *inner_l4 = ip4_next_header (inner_ip);
 
 	      ip4_address_t lookup_src = inner_ip->dst_address;
@@ -444,9 +491,9 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 		  goto trace;
 		}
 
-	      cgnat_session_t *s0 = cgnat_session_lookup_in2out (
-		&lookup_src, &lookup_dst, lookup_sport, lookup_dport,
-		inner_proto, fib_index0);
+	      s0 = cgnat_session_lookup_in2out (&lookup_src, &lookup_dst,
+						lookup_sport, lookup_dport,
+						inner_proto, fib_index0);
 	      if (PREDICT_FALSE (!s0))
 		{
 		  trace_action = CGNAT_TRACE_DROPPED;
@@ -466,8 +513,16 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 
 	      if (inner_proto == IP_PROTOCOL_TCP ||
 		  inner_proto == IP_PROTOCOL_UDP)
-		((nat_tcp_udp_header_t *) inner_l4)->src_port =
-		  s0->i2o.rewrite_sport;
+		{
+		  ((nat_tcp_udp_header_t *) inner_l4)->dst_port =
+		    s0->i2o.rewrite_sport;
+		  /* The quoted 8 bytes of UDP include its checksum, which
+		   * covers the pseudo-header, and the i2o delta is exactly
+		   * this address and port change. TCP's checksum lies past
+		   * the quoted bytes. */
+		  if (inner_proto == IP_PROTOCOL_UDP)
+		    cgnat_udp_csum_update (inner_l4, s0->i2o.l4_csum_delta);
+		}
 	      else if (inner_proto == IP_PROTOCOL_ICMP)
 		{
 		  icmp46_header_t *inner_icmp = inner_l4;
@@ -496,37 +551,17 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 		ntohs (ip0->length) - ip4_header_bytes (ip0), 0);
 	      icmp0->checksum = ~ip_csum_fold (sum);
 
-	      s0->last_active = now;
+	      /* RFC 5508 section 4.3 (REQ-6): an error about an ICMP query
+	       * must not refresh that query's session. */
+	      if (inner_proto != IP_PROTOCOL_ICMP)
+		s0->last_active = now;
 	      s0->total_pkts++;
 	      s0->total_bytes += vlib_buffer_length_in_chain (vm, b0);
 
 	      vnet_buffer (b0)->sw_if_index[VLIB_TX] = s0->i2o.rewrite_fib_index;
+	      vnet_feature_next (&next0, b0);
 	      trace_action = CGNAT_TRACE_TRANSLATED;
 	      pkts_translated++;
-	      goto trace;
-	    }
-
-	  /* Non-first fragment: IP-only rewrite via aux fragment record.
-	   * No port extraction needed (the fragment has no L4 header). */
-	  if (PREDICT_FALSE (
-		vnet_buffer (b0)->ip.reass.is_non_first_fragment))
-	    {
-	      cgnat_frag_rewrite_t *fr = cgnat_frag_rewrite_lookup (
-		ip0->src_address, ip0->dst_address, proto0, fib_index0);
-	      if (PREDICT_FALSE (!fr))
-		{
-		  trace_action = CGNAT_TRACE_DROPPED;
-		  next0 = CGNAT_IN2OUT_NEXT_DROP;
-		  pkts_frag_drop++;
-		  b0->error = node->errors[CGNAT_ERROR_FRAGMENT_DROP];
-		  goto trace;
-		}
-	      ip0->src_address = fr->outside_ip;
-	      ip0->checksum = ip_csum_fold (
-		ip_csum_add_even (ip0->checksum, fr->l3_csum_delta_i2o));
-	      vnet_buffer (b0)->sw_if_index[VLIB_TX] = fr->outside_fib_index;
-	      pkts_translated++;
-	      trace_action = CGNAT_TRACE_TRANSLATED;
 	      goto trace;
 	    }
 
@@ -617,6 +652,7 @@ VLIB_NODE_FN (cgnat_in2out_slowpath_node)
 	  cgnat_in2out_translate (vm, b0, ip0, s0, proto0, now);
 
 	  vnet_buffer (b0)->sw_if_index[VLIB_TX] = pool0->outside_fib_index;
+	  vnet_feature_next (&next0, b0);
 
 	  pkts_translated++;
 
@@ -678,21 +714,23 @@ VLIB_REGISTER_NODE (cgnat_in2out_slowpath_node) = {
   .type = VLIB_NODE_TYPE_INTERNAL,
   .n_errors = CGNAT_N_ERROR,
   .error_strings = cgnat_error_strings,
-  /* Slowpath only ever dispatches to DROP or LOOKUP — it never re-enqueues
-   * to itself. Cap n_next_nodes to 2 so VPP doesn't try to wire SLOWPATH
-   * slot to a duplicate "error-drop", which VPP's vlib_node_add_next dedup
-   * leaves as ~0 in the next_nodes table → segfault at vlib_node_main_init. */
-  .n_next_nodes = 2,
-  .next_nodes = {
-    [CGNAT_IN2OUT_NEXT_DROP] = "error-drop",
-    [CGNAT_IN2OUT_NEXT_LOOKUP] = "ip4-lookup",
-  },
+  /* Shares cgnat-in2out's next table. The index vnet_feature_next hands
+   * back for the feature after cgnat-in2out is a slot in that table, and
+   * the slow node leaves the arc through the same slot. */
+  .sibling_of = "cgnat-in2out",
 };
 
+/* Position on ip4-unicast. sv-reass supplies the ports and fragment bits
+ * this node reads. uRPF checks the subscriber's inside source, which a
+ * translated packet no longer carries, so it runs first. The MSS clamp is
+ * pinned so its position never depends on plugin load order: translated
+ * packets continue the arc and must meet it either way. */
 VNET_FEATURE_INIT (cgnat_in2out_feat, static) = {
   .arc_name = "ip4-unicast",
   .node_name = "cgnat-in2out",
-  .runs_after = VNET_FEATURES ("ip4-sv-reassembly-feature"),
+  .runs_after = VNET_FEATURES ("ip4-sv-reassembly-feature",
+			       "ip4-rx-urpf-loose", "ip4-rx-urpf-strict",
+			       "tcp-mss-clamping-ip4-in"),
   .runs_before = VNET_FEATURES ("ip4-lookup"),
 };
 
