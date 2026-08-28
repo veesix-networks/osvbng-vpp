@@ -72,10 +72,15 @@ echo "$plugins" >"$stamp"
 # plugin is silently absent from the build, the worst failure mode to
 # discover in a lab. Not a failure under VPP_DEV_TARGET, which builds
 # one thing on purpose.
+#
+# Only ninja's output under lib/ counts. The deb staging tree under
+# CMakeFiles/debian keeps copies from the last release build, and a
+# search of the whole tree can list one of those as this build's
+# binary, which is how a stale plugin reaches a lab.
 echo "== plugin binaries:"
 missing=0
 for name in $plugins; do
-  found=$(find "$dir" -name "${name}_plugin.so" -printf '%p\n' -quit)
+  found=$(find "$dir/lib" -name "${name}_plugin.so" -printf '%p\n' -quit)
   if [ -z "$found" ]; then
     echo "   $name: no ${name}_plugin.so produced" >&2
     missing=1
