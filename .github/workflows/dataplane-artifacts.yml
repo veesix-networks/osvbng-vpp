@@ -45,6 +45,41 @@ jobs:
           git clean -qfdx
           git remote set-url origin "https://github.com/${{ github.repository }}"
 
+      # This build shares one box with the osvbng rig, and a full root
+      # filesystem there does not fail a job: the runner units stay
+      # active while the agent can no longer write, so every instance
+      # drops offline at once and the queue stalls with nothing red to
+      # look at. A clean release build is also the heaviest thing the
+      # box does, so it is the wrong moment to find the disk gone.
+      # osvbng's suite-run carries the same pair of steps.
+      #
+      # The work and ccache volumes are deliberately untouched: they
+      # hold the patched VPP tree and its ccache and are mounted only
+      # while a build runs, so between builds they look unused and a
+      # volume prune would take them, turning every build into a cold
+      # one. Images are pruned dangling-only or the builder image goes
+      # with them.
+      - name: Reclaim docker disk
+        run: |
+          before=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          sudo docker container prune -f || true
+          sudo docker image prune -f || true
+          sudo docker builder prune -af || true
+          after=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          echo "root free: ${before}G -> ${after}G"
+
+      # A clean build needs room for the source tree, the build root
+      # and the deb set. Fail here, where the reason is legible,
+      # rather than part way through an hour-long compile.
+      - name: Require free disk
+        run: |
+          avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          echo "root free after reclaim: ${avail}G"
+          if [ "$avail" -lt 15 ]; then
+            echo "::error::only ${avail}G free on / after reclaim; a release build needs 15G. Check 'sudo docker system df -v', and 'sudo lsof +L1' for deleted-but-open files."
+            exit 1
+          fi
+
       - name: Build release debs
         run: make vpp-build
 
