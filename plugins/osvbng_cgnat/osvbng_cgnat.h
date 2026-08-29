@@ -769,4 +769,17 @@ icmp_type_is_error_message (u8 icmp_type)
   return 0;
 }
 
+/* Incremental UDP checksum update for a rewrite whose delta came from
+ * cgnat_flow_csum_calc. RFC 768: an all-zero checksum means none was
+ * computed and stays zero; a computed result of zero is sent as all ones. */
+always_inline void
+cgnat_udp_csum_update (udp_header_t *udp, ip_csum_t delta)
+{
+  if (udp->checksum == 0)
+    return;
+  udp->checksum = ip_csum_fold (ip_csum_add_even (udp->checksum, delta));
+  if (udp->checksum == 0)
+    udp->checksum = 0xFFFF;
+}
+
 #endif /* __included_osvbng_cgnat_h__ */
