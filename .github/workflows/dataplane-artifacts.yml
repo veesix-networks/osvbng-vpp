@@ -45,6 +45,52 @@ jobs:
           git clean -qfdx
           git remote set-url origin "https://github.com/${{ github.repository }}"
 
+      # This build shares one box with the osvbng rig, and a full root
+      # filesystem there does not fail a job: the runner units stay
+      # active while the agent can no longer write, so every instance
+      # drops offline at once and the queue stalls with nothing red to
+      # look at. A clean release build is also the heaviest thing the
+      # box does, so it is the wrong moment to find the disk gone.
+      # osvbng's suite-run carries the same pair of steps.
+      #
+      # The work and ccache volumes are deliberately untouched: they
+      # hold the patched VPP tree and its ccache and are mounted only
+      # while a build runs, so between builds they look unused and a
+      # volume prune would take them, turning every build into a cold
+      # one. Images are pruned dangling-only or the builder image goes
+      # with them.
+      - name: Reclaim docker disk
+        run: |
+          before=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          sudo docker container prune -f || true
+          sudo docker image prune -f || true
+          sudo docker builder prune -af || true
+          after=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          echo "root free: ${before}G -> ${after}G"
+
+      # Two tiers, matching osvbng's suite-run. The hard floor is what
+      # an incremental build needs for the deb set and the staging
+      # copies, not what a cold one needs: blocking every build at the
+      # comfortable number is its own outage. The warning is the early
+      # signal while there is still time to act, since the failure
+      # being guarded against is the box reaching zero, which drops
+      # every runner offline without anything going red.
+      - name: Check free disk
+        run: |
+          avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+          echo "root free after reclaim: ${avail}G"
+          echo "root free after reclaim: ${avail}G" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$avail" -lt 6 ]; then
+            echo "::error::only ${avail}G free on / after reclaim; a release build needs 6G to land its debs. Space the prune cannot reach: check 'sudo docker system df -v' for non-dangling images and volumes, 'sudo du -xh --max-depth=1 /' for the rest, and 'sudo lsof +L1' for deleted-but-open files a docker restart would release."
+            df -h / || true
+            sudo docker system df || true
+            exit 1
+          fi
+          if [ "$avail" -lt 15 ]; then
+            echo "::warning::only ${avail}G free on / after reclaim. A cold build (empty work volume) needs appreciably more than this and would fail part way through an hour-long compile."
+            sudo docker system df || true
+          fi
+
       - name: Build release debs
         run: make vpp-build
 
