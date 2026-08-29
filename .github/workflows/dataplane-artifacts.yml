@@ -68,16 +68,27 @@ jobs:
           after=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
           echo "root free: ${before}G -> ${after}G"
 
-      # A clean build needs room for the source tree, the build root
-      # and the deb set. Fail here, where the reason is legible,
-      # rather than part way through an hour-long compile.
-      - name: Require free disk
+      # Two tiers, matching osvbng's suite-run. The hard floor is what
+      # an incremental build needs for the deb set and the staging
+      # copies, not what a cold one needs: blocking every build at the
+      # comfortable number is its own outage. The warning is the early
+      # signal while there is still time to act, since the failure
+      # being guarded against is the box reaching zero, which drops
+      # every runner offline without anything going red.
+      - name: Check free disk
         run: |
           avail=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
           echo "root free after reclaim: ${avail}G"
-          if [ "$avail" -lt 15 ]; then
-            echo "::error::only ${avail}G free on / after reclaim; a release build needs 15G. Check 'sudo docker system df -v', and 'sudo lsof +L1' for deleted-but-open files."
+          echo "root free after reclaim: ${avail}G" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$avail" -lt 6 ]; then
+            echo "::error::only ${avail}G free on / after reclaim; a release build needs 6G to land its debs. Space the prune cannot reach: check 'sudo docker system df -v' for non-dangling images and volumes, 'sudo du -xh --max-depth=1 /' for the rest, and 'sudo lsof +L1' for deleted-but-open files a docker restart would release."
+            df -h / || true
+            sudo docker system df || true
             exit 1
+          fi
+          if [ "$avail" -lt 15 ]; then
+            echo "::warning::only ${avail}G free on / after reclaim. A cold build (empty work volume) needs appreciably more than this and would fail part way through an hour-long compile."
+            sudo docker system df || true
           fi
 
       - name: Build release debs
